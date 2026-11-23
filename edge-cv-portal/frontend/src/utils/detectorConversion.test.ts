@@ -12,6 +12,11 @@ import type { CheckpointAssessment } from '../services/api';
 import {
   CHECKPOINT_SIZE_CAP_BYTES,
   CONVERSION_GEOMETRY,
+  DEFAULT_MASK_THRESHOLD,
+  DEFAULT_SCORE_THRESHOLD,
+  INPUT_BOUNDS,
+  INPUT_STEP,
+  RFDETR_SEG_NATIVE_INPUTS,
   checkpointFamilyLabel,
   checkpointLibraryLabel,
   conversionLocksFor,
@@ -22,12 +27,14 @@ import {
   isCheckpointFileName,
   isConversionActive,
   isDetectorConversionRecord,
+  isValidRfDetrSegInput,
   networkInputProblem,
   putFileWithProgress,
   thresholdProblem,
   uploadFileProblem,
   validateClassNames,
 } from './detectorConversion';
+import { RFDETR_SEG_SIZES } from './detectionBaseModels';
 
 /** The PPE checkpoint (ultralytics 8.4.2, 4 classes, trained at 640). */
 const PPE: CheckpointAssessment = {
@@ -103,6 +110,46 @@ describe('isDetectorConversionRecord (mirrors the backend predicate)', () => {
     expect(isDetectorConversionRecord({ ...conversionRecord('Completed'), conversion: null })).toBe(false);
     expect(isDetectorConversionRecord(null)).toBe(false);
     expect(isDetectorConversionRecord(undefined)).toBe(false);
+  });
+
+  // rfdetr-seg-support Requirement 7.3: the Seg Conversion_Record is the
+  // detection one with model_type instance_segmentation (backend predicate
+  // widened in the shared layer; this is its frontend mirror).
+  it('is true for an imported ONNX instance_segmentation record with a conversion block', () => {
+    const seg = { ...conversionRecord('Completed'), model_type: 'instance_segmentation' };
+    expect(isDetectorConversionRecord(seg)).toBe(true);
+    expect(conversionStatusOf({ ...seg, conversion: { status: 'Finalizing', job_name: 'j' } })).toBe('Finalizing');
+    expect(isDetectorConversionRecord({ ...seg, model_type: 'segmentation' })).toBe(false);
+    expect(isDetectorConversionRecord({ ...seg, model_type: 'classification' })).toBe(false);
+  });
+});
+
+describe('RF-DETR-Seg constant mirrors (rfdetr-seg-support Req 12.1)', () => {
+  it('mirrors the backend INPUT_BOUNDS / DEFAULT_SCORE_THRESHOLD / DEFAULT_MASK_THRESHOLD', () => {
+    expect(INPUT_BOUNDS.rf_detr_seg).toEqual({ min: 240, max: 1152 });
+    expect(INPUT_BOUNDS.rf_detr).toEqual({ min: 224, max: 1120 });
+    expect(DEFAULT_SCORE_THRESHOLD.rf_detr_seg).toBe(0.5);
+    expect(DEFAULT_MASK_THRESHOLD).toBe(0.5);
+    expect(CONVERSION_GEOMETRY.rf_detr_seg.label).toBe(CONVERSION_GEOMETRY.rf_detr.label);
+    expect(CONVERSION_GEOMETRY.rf_detr_seg.reason).toMatch(/RF-DETR-Seg/);
+  });
+
+  it('lists the six native inputs ascending, the same table as RFDETR_SEG_SIZES', () => {
+    expect(RFDETR_SEG_NATIVE_INPUTS).toEqual([312, 384, 432, 504, 624, 768]);
+    expect([...RFDETR_SEG_NATIVE_INPUTS].sort((a, b) => a - b)).toEqual(Object.values(RFDETR_SEG_SIZES).sort((a, b) => a - b));
+  });
+
+  it('accepts exactly the natives and never applies the % INPUT_STEP test (Req 7.3)', () => {
+    for (const native of RFDETR_SEG_NATIVE_INPUTS) expect(isValidRfDetrSegInput(native)).toBe(true);
+    // 312, 432, 504 and 624 are not multiples of 32 and are still accepted.
+    expect([312, 432, 504, 624].filter(n => n % INPUT_STEP !== 0)).toEqual([312, 432, 504, 624]);
+    // In bounds and a multiple of 32, but not a native: rejected.
+    expect(isValidRfDetrSegInput(320)).toBe(false);
+    expect(isValidRfDetrSegInput(512)).toBe(false);
+    expect(isValidRfDetrSegInput(240)).toBe(false);
+    expect(isValidRfDetrSegInput(1152)).toBe(false);
+    expect(isValidRfDetrSegInput(384.5)).toBe(false);
+    expect(isValidRfDetrSegInput(NaN)).toBe(false);
   });
 });
 

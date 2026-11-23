@@ -17,9 +17,11 @@ export const MODEL_SOURCE_RF_DETR = 'rf_detr';
 
 /**
  * Detector family a detection source trains (`detection.detection_arch` on
- * the record; selects the device stage type and preprocessing).
+ * the record; selects the device stage type and preprocessing). The RF-DETR
+ * source trains two: `rf_detr` for object_detection and `rf_detr_seg` for
+ * instance_segmentation (rfdetr-seg-support Req 12.1).
  */
-export type DetectionArch = 'yolo' | 'rf_detr';
+export type DetectionArch = 'yolo' | 'rf_detr' | 'rf_detr_seg';
 
 // There is deliberately no "Imported Model (BYOM)" source (Req 6.7): starting
 // from an imported checkpoint is expressed by the Base model control under

@@ -186,6 +186,16 @@ const COMMON_DIMENSIONS: Record<string, { label: string; value: string }[]> = {
     { label: '768x768', value: '768' },
     { label: '1024x1024', value: '1024' },
   ],
+  // RF-DETR-Seg converts and runs only at a size's native resolution
+  // (rfdetr-seg-support Req 1.5): the six natives, nano .. 2xlarge.
+  instance_segmentation: [
+    { label: '312x312 (RF-DETR-Seg nano)', value: '312' },
+    { label: '384x384 (RF-DETR-Seg small)', value: '384' },
+    { label: '432x432 (RF-DETR-Seg medium)', value: '432' },
+    { label: '504x504 (RF-DETR-Seg large)', value: '504' },
+    { label: '624x624 (RF-DETR-Seg xlarge)', value: '624' },
+    { label: '768x768 (RF-DETR-Seg 2xlarge)', value: '768' },
+  ],
   anomaly_detection: [
     { label: '224x224', value: '224' },
     { label: '256x256', value: '256' },

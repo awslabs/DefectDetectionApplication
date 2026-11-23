@@ -7,6 +7,7 @@
  *
  * Bounds and defaults mirror the backend's `detection_training.py`
  * (`DETECTION_DEFAULTS`, `RFDETR_DEFAULTS`, `RFDETR_SIZES`,
+ * `RFDETR_SEG_DEFAULTS`, the `RFDETR_SEG_*` tables,
  * `parse_detection_hyperparameters`) so the form rejects exactly what the
  * API would reject, with the same wording.
  */
@@ -19,11 +20,13 @@ import type {
   DetectionHyperparameters,
   PublishedCheckpoint,
   RfDetrHyperparameters,
+  RfDetrSegHyperparameters,
+  RfDetrSegSize,
   RfDetrSize,
   TrainingJobRecord,
   YoloHyperparameters,
 } from '../services/api';
-import { OBJECT_DETECTION_MODEL_TYPE } from './manifestFormat';
+import { isDetectionModelType } from './manifestFormat';
 
 // ---------------------------------------------------------------------------
 // Published checkpoints
@@ -47,6 +50,56 @@ export function rfdetrNativeResolution(size: unknown): number {
   return isRfDetrSize(size) ? RFDETR_SIZES[size] : RFDETR_SIZES.small;
 }
 
+// RF-DETR-Seg (rfdetr-seg-support Req 1.2, 12.1; D4: all six sizes). Mirrors
+// the backend's detection_training.RFDETR_SEG_* tables field-for-field.
+
+/** RF-DETR-Seg size -> native square resolution (the default `resolution`). */
+export const RFDETR_SEG_SIZES: Record<RfDetrSegSize, number> = {
+  nano: 312,
+  small: 384,
+  medium: 432,
+  large: 504,
+  xlarge: 624,
+  '2xlarge': 768,
+};
+
+export const RFDETR_SEG_SIZE_ORDER: RfDetrSegSize[] = ['nano', 'small', 'medium', 'large', 'xlarge', '2xlarge'];
+
+/**
+ * Seg_Input_Block: the resolution must be a multiple of the selected size's
+ * block (patch size x window count: 12 for nano, 24 otherwise) — never of
+ * the detection step 32 (312, 432, 504 and 624 are not multiples of 32).
+ */
+export const RFDETR_SEG_INPUT_BLOCK: Record<RfDetrSegSize, 12 | 24> = {
+  nano: 12,
+  small: 24,
+  medium: 24,
+  large: 24,
+  xlarge: 24,
+  '2xlarge': 24,
+};
+
+/** The Seg resolution bounds (backend RFDETR_SEG_RESOLUTION_MIN / _MAX). */
+export const RFDETR_SEG_RESOLUTION_BOUNDS = { min: 240, max: 1152 } as const;
+
+/** Each Seg size's query count (the device's top_k). */
+export const RFDETR_SEG_QUERIES: Record<RfDetrSegSize, number> = {
+  nano: 100,
+  small: 100,
+  medium: 200,
+  large: 200,
+  xlarge: 300,
+  '2xlarge': 300,
+};
+
+export function isRfDetrSegSize(value: unknown): value is RfDetrSegSize {
+  return typeof value === 'string' && value in RFDETR_SEG_SIZES;
+}
+
+export function rfdetrSegNativeResolution(size: unknown): number {
+  return isRfDetrSegSize(size) ? RFDETR_SEG_SIZES[size] : RFDETR_SEG_SIZES.small;
+}
+
 /** The COCO checkpoints each arch's entry point can start from (Req 6.1 "published"). */
 export const PUBLISHED_CHECKPOINTS: Record<DetectionArch, PublishedCheckpoint[]> = {
   yolo: [
@@ -59,23 +112,31 @@ export const PUBLISHED_CHECKPOINTS: Record<DetectionArch, PublishedCheckpoint[]>
     label: `RF-DETR ${size} (COCO, native ${RFDETR_SIZES[size]}px)${size === 'small' ? ' — recommended' : ''}`,
     native_resolution: RFDETR_SIZES[size],
   })),
+  // The same refs `resolve_base_model('published', …)` accepts for rf_detr_seg.
+  rf_detr_seg: RFDETR_SEG_SIZE_ORDER.map(size => ({
+    ref: size,
+    label: `RF-DETR-Seg ${size} (COCO, native ${RFDETR_SEG_SIZES[size]}px)${size === 'small' ? ' — recommended' : ''}`,
+    native_resolution: RFDETR_SEG_SIZES[size],
+  })),
 };
 
 // ---------------------------------------------------------------------------
 // Base model grouping (feeds the grouped Select)
 // ---------------------------------------------------------------------------
 
-/** Mirrors `detection_training.is_trained_detection_record`. */
+/** Mirrors `detection_training.is_trained_detection_record` (object detection or instance segmentation). */
 export function isTrainedDetectionRecord(job: TrainingJobRecord | null | undefined): boolean {
   if (!job || typeof job !== 'object') return false;
-  if (job.model_type !== OBJECT_DETECTION_MODEL_TYPE) return false;
+  if (!isDetectionModelType(job.model_type)) return false;
   if (String(job.runtime ?? '').toLowerCase() !== 'onnx') return false;
   return job.source !== 'imported';
 }
 
 /** A record's detector family; records written before RF-DETR existed are YOLO. */
 export function recordDetectionArch(job: TrainingJobRecord | null | undefined): DetectionArch {
-  return job?.detection?.detection_arch === 'rf_detr' ? 'rf_detr' : 'yolo';
+  const arch = job?.detection?.detection_arch;
+  if (arch === 'rf_detr' || arch === 'rf_detr_seg') return arch;
+  return 'yolo';
 }
 
 /**
@@ -300,6 +361,9 @@ export interface DetectionFormParams {
   resolution: string;
   gradAccum: string;
   lr: string;
+  // RF-DETR-Seg (train_rfdetr_seg.py; rfdetr-seg-support Req 12.2)
+  rfdetrSegSize: RfDetrSegSize;
+  maskThreshold: string;
 }
 
 /** Backend `DETECTION_DEFAULTS` (YOLO). */
@@ -315,6 +379,8 @@ export const YOLO_PARAM_DEFAULTS: DetectionFormParams = {
   resolution: String(RFDETR_SIZES.small),
   gradAccum: '4',
   lr: '0.0001',
+  rfdetrSegSize: 'small',
+  maskThreshold: '0.5',
 };
 
 /** Backend `RFDETR_DEFAULTS` (the documented T4 configuration, Req 3.5). */
@@ -330,9 +396,29 @@ export const RFDETR_PARAM_DEFAULTS: DetectionFormParams = {
   resolution: String(RFDETR_SIZES.small),
   gradAccum: '4',
   lr: '0.0001',
+  rfdetrSegSize: 'small',
+  maskThreshold: '0.5',
+};
+
+/** Backend `RFDETR_SEG_DEFAULTS` (rfdetr-seg-support Req 1.1): the RF-DETR shape, Seg size table, mask threshold. */
+export const RFDETR_SEG_PARAM_DEFAULTS: DetectionFormParams = {
+  epochs: '100',
+  batch: '4',
+  patience: '10',
+  scoreThreshold: '0.5',
+  imgsz: '1280',
+  baseWeights: 'yolo11s.pt',
+  iouThreshold: '0.45',
+  rfdetrSize: 'small',
+  resolution: String(RFDETR_SEG_SIZES.small),
+  gradAccum: '4',
+  lr: '0.0001',
+  rfdetrSegSize: 'small',
+  maskThreshold: '0.5',
 };
 
 export function detectionParamDefaults(arch: DetectionArch): DetectionFormParams {
+  if (arch === 'rf_detr_seg') return { ...RFDETR_SEG_PARAM_DEFAULTS };
   return arch === 'rf_detr' ? { ...RFDETR_PARAM_DEFAULTS } : { ...YOLO_PARAM_DEFAULTS };
 }
 
@@ -352,9 +438,36 @@ export function isValidRfDetrResolution(resolution: number): boolean {
 }
 
 /**
+ * The Seg resolution rule's wording, per size (the backend's
+ * `_parse_rfdetr_seg_hyperparameters` message without its "Invalid
+ * hyperparameter" prefix, the way `RFDETR_RESOLUTION_ERROR` is worded).
+ */
+export function rfdetrSegResolutionError(size: RfDetrSegSize): string {
+  return `Resolution must be a multiple of ${RFDETR_SEG_INPUT_BLOCK[size]} between `
+    + `${RFDETR_SEG_RESOLUTION_BOUNDS.min} and ${RFDETR_SEG_RESOLUTION_BOUNDS.max} for RF-DETR-Seg ${size}`;
+}
+
+/**
+ * The Seg resolution rule (rfdetr-seg-support Req 1.2): an integer multiple
+ * of the SELECTED size's input block within [240, 1152] — never the detection
+ * step of 32. Returns the problem, or null.
+ */
+export function validateRfDetrSegResolution(size: RfDetrSegSize, value: unknown): string | null {
+  const resolution = Number(value);
+  const block = RFDETR_SEG_INPUT_BLOCK[size];
+  const ok = Number.isInteger(resolution)
+    && resolution >= RFDETR_SEG_RESOLUTION_BOUNDS.min
+    && resolution <= RFDETR_SEG_RESOLUTION_BOUNDS.max
+    && resolution % block === 0;
+  return ok ? null : rfdetrSegResolutionError(size);
+}
+
+/**
  * Client-side mirror of the backend's hyperparameter bounds, one message per
  * violated field. The YOLO messages are the ones CreateTraining has always
- * shown; RF-DETR's follow the same style.
+ * shown; RF-DETR's follow the same style; RF-DETR-Seg validates the size
+ * against its own table, the resolution per block, the mask threshold, and
+ * has no imgsz / IoU rule.
  */
 export function validateDetectionParams(arch: DetectionArch, p: DetectionFormParams): string[] {
   const errors: string[] = [];
@@ -362,7 +475,14 @@ export function validateDetectionParams(arch: DetectionArch, p: DetectionFormPar
   const batch = parseInt(p.batch, 10);
   const patience = parseInt(p.patience, 10);
   const score = parseFloat(p.scoreThreshold);
-  if (arch === 'rf_detr') {
+  if (arch === 'rf_detr_seg') {
+    if (!isRfDetrSegSize(p.rfdetrSegSize)) {
+      errors.push(`Size must be one of ${RFDETR_SEG_SIZE_ORDER.join(', ')}`);
+    } else {
+      const problem = validateRfDetrSegResolution(p.rfdetrSegSize, p.resolution);
+      if (problem) errors.push(problem);
+    }
+  } else if (arch === 'rf_detr') {
     if (!isRfDetrSize(p.rfdetrSize)) errors.push(`Size must be one of ${RFDETR_SIZE_ORDER.join(', ')}`);
     const resolution = Number(p.resolution);
     if (!isValidRfDetrResolution(resolution)) errors.push(RFDETR_RESOLUTION_ERROR);
@@ -372,7 +492,7 @@ export function validateDetectionParams(arch: DetectionArch, p: DetectionFormPar
   }
   if (!(epochs >= 1 && epochs <= 1000)) errors.push('Epochs must be between 1 and 1000');
   if (!(batch >= 1 && batch <= 64)) errors.push('Batch size must be between 1 and 64');
-  if (arch === 'rf_detr') {
+  if (arch === 'rf_detr' || arch === 'rf_detr_seg') {
     const gradAccum = parseInt(p.gradAccum, 10);
     const lr = parseFloat(p.lr);
     if (!(gradAccum >= 1 && gradAccum <= 64)) errors.push('Gradient accumulation must be between 1 and 64');
@@ -380,6 +500,10 @@ export function validateDetectionParams(arch: DetectionArch, p: DetectionFormPar
   }
   if (!(patience >= 0 && patience <= 1000)) errors.push('Patience must be between 0 and 1000');
   if (!(score > 0 && score < 1)) errors.push('Score threshold must be strictly between 0 and 1');
+  if (arch === 'rf_detr_seg') {
+    const mask = parseFloat(p.maskThreshold);
+    if (!(mask > 0 && mask < 1)) errors.push('Mask threshold must be strictly between 0 and 1');
+  }
   if (arch === 'yolo') {
     const iou = parseFloat(p.iouThreshold);
     if (!(iou > 0 && iou < 1)) errors.push('IoU threshold must be strictly between 0 and 1');
@@ -389,9 +513,26 @@ export function validateDetectionParams(arch: DetectionArch, p: DetectionFormPar
 
 /**
  * The `hyperparameters` body for the arch — YOLO exactly as before; RF-DETR
- * without `imgsz` or `iou_threshold` (Req 3.6: no IoU, NMS-free).
+ * without `imgsz` or `iou_threshold` (Req 3.6: no IoU, NMS-free); RF-DETR-Seg
+ * the RF-DETR shape with `rfdetr_seg_size` and `mask_threshold`, never
+ * `imgsz` / `iou_threshold` / `base_weights` (the backend's `_reject_unknown`
+ * answers 400 to any of them).
  */
 export function buildDetectionHyperparameters(arch: DetectionArch, p: DetectionFormParams): DetectionHyperparameters {
+  if (arch === 'rf_detr_seg') {
+    const seg: RfDetrSegHyperparameters = {
+      rfdetr_seg_size: p.rfdetrSegSize,
+      resolution: parseInt(p.resolution, 10),
+      epochs: parseInt(p.epochs, 10),
+      batch: parseInt(p.batch, 10),
+      grad_accum: parseInt(p.gradAccum, 10),
+      lr: parseFloat(p.lr),
+      patience: parseInt(p.patience, 10),
+      score_threshold: parseFloat(p.scoreThreshold),
+      mask_threshold: parseFloat(p.maskThreshold),
+    };
+    return seg;
+  }
   if (arch === 'rf_detr') {
     const rf: RfDetrHyperparameters = {
       rfdetr_size: p.rfdetrSize,
@@ -417,8 +558,9 @@ export function buildDetectionHyperparameters(arch: DetectionArch, p: DetectionF
   return yolo;
 }
 
-/** The `published` base model the current form implies (YOLO: base weights; RF-DETR: size). */
+/** The `published` base model the current form implies (YOLO: base weights; RF-DETR / RF-DETR-Seg: size). */
 export function publishedBaseModelRef(arch: DetectionArch, p: DetectionFormParams): BaseModelRef {
+  if (arch === 'rf_detr_seg') return { kind: 'published', ref: p.rfdetrSegSize };
   return { kind: 'published', ref: arch === 'rf_detr' ? p.rfdetrSize : p.baseWeights };
 }
 
@@ -459,12 +601,24 @@ export const DETECTION_DEFAULT_INSTANCE_TYPE = 'ml.g4dn.xlarge';
 export const RFDETR_LARGE_INSTANCE_TYPE = 'ml.g5.xlarge';
 
 /**
- * `ml.g4dn.xlarge` (T4) for YOLO and RF-DETR nano/small; RF-DETR medium and
- * large are nudged to `ml.g5.xlarge` (A10G, 24 GB). The page applies this
- * only while the user has not picked an instance type themselves.
+ * RF-DETR-Seg's per-size default (rfdetr-seg-support Req 5.3): `ml.g4dn.xlarge`
+ * (T4) for nano / small / medium, `ml.g5.xlarge` (A10G, 24 GB) for large,
+ * xlarge and 2xlarge. An unknown size takes the T4 default.
  */
-export function defaultDetectionInstanceType(arch: DetectionArch, rfdetrSize?: RfDetrSize | string): string {
-  if (arch === 'rf_detr' && (rfdetrSize === 'medium' || rfdetrSize === 'large')) {
+export function defaultInstanceTypeForSegSize(size?: RfDetrSegSize | string): string {
+  if (size === 'large' || size === 'xlarge' || size === '2xlarge') return RFDETR_LARGE_INSTANCE_TYPE;
+  return DETECTION_DEFAULT_INSTANCE_TYPE;
+}
+
+/**
+ * `ml.g4dn.xlarge` (T4) for YOLO and RF-DETR nano/small; RF-DETR medium and
+ * large are nudged to `ml.g5.xlarge` (A10G, 24 GB); RF-DETR-Seg follows
+ * `defaultInstanceTypeForSegSize` (the callers pass the Seg size). The page
+ * applies this only while the user has not picked an instance type themselves.
+ */
+export function defaultDetectionInstanceType(arch: DetectionArch, size?: RfDetrSize | RfDetrSegSize | string): string {
+  if (arch === 'rf_detr_seg') return defaultInstanceTypeForSegSize(size);
+  if (arch === 'rf_detr' && (size === 'medium' || size === 'large')) {
     return RFDETR_LARGE_INSTANCE_TYPE;
   }
   return DETECTION_DEFAULT_INSTANCE_TYPE;
@@ -483,9 +637,20 @@ export function applyRfDetrSize(p: DetectionFormParams, size: RfDetrSize): Detec
   };
 }
 
+/** The RF-DETR-Seg sibling of `applyRfDetrSize`, over the Seg size table. */
+export function applyRfDetrSegSize(p: DetectionFormParams, size: RfDetrSegSize): DetectionFormParams {
+  const wasNative = p.resolution === String(rfdetrSegNativeResolution(p.rfdetrSegSize));
+  return {
+    ...p,
+    rfdetrSegSize: size,
+    resolution: wasNative ? String(RFDETR_SEG_SIZES[size]) : p.resolution,
+  };
+}
+
 /**
  * Form values a selected base record implies (Req 6.2): the network input it
- * was trained at and, for RF-DETR, its size (the checkpoint IS that size).
+ * was trained at and, for RF-DETR / RF-DETR-Seg, its size (the checkpoint IS
+ * that size).
  */
 export function paramsFromBaseRecord(
   arch: DetectionArch,
@@ -496,7 +661,13 @@ export function paramsFromBaseRecord(
   if (!det) return p;
   const next = { ...p };
   const input = det.network_input_width;
-  if (arch === 'rf_detr') {
+  if (arch === 'rf_detr_seg') {
+    if (isRfDetrSegSize(det.rfdetr_seg_size)) next.rfdetrSegSize = det.rfdetr_seg_size;
+    const resolution = det.resolution ?? input;
+    if (typeof resolution === 'number' && validateRfDetrSegResolution(next.rfdetrSegSize, resolution) === null) {
+      next.resolution = String(resolution);
+    }
+  } else if (arch === 'rf_detr') {
     if (isRfDetrSize(det.rfdetr_size)) next.rfdetrSize = det.rfdetr_size;
     const resolution = det.resolution ?? input;
     if (typeof resolution === 'number' && isValidRfDetrResolution(resolution)) next.resolution = String(resolution);

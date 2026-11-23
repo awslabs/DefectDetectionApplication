@@ -20,7 +20,8 @@ import type {
   DetectionArch,
   RfDetrSize,
 } from '../services/api';
-import { RFDETR_SIZES, RFDETR_SIZE_ORDER, isRfDetrSize } from './detectionBaseModels';
+import { RFDETR_SEG_SIZES, RFDETR_SIZES, RFDETR_SIZE_ORDER, isRfDetrSize } from './detectionBaseModels';
+import { isDetectionModelType } from './manifestFormat';
 
 // ---------------------------------------------------------------------------
 // Limits (backend detector_conversion.py)
@@ -37,14 +38,25 @@ export const CHECKPOINT_EXTENSIONS = ['.pt', '.pth'] as const;
 
 export const INPUT_STEP = 32;
 
-/** The square network inputs each decoder family accepts. */
+/**
+ * The square network inputs each decoder family accepts. RF-DETR-Seg
+ * converts only at one of its six native resolutions (below), so its bounds
+ * are informational and the `% INPUT_STEP` test never applies to it (312,
+ * 432, 504 and 624 are not multiples of 32; rfdetr-seg-support Req 7.3).
+ */
 export const INPUT_BOUNDS: Record<DetectionArch, { min: number; max: number }> = {
   yolo: { min: 320, max: 2048 },
   rf_detr: { min: 224, max: 1120 },
+  rf_detr_seg: { min: 240, max: 1152 },
 };
 
-export const DEFAULT_SCORE_THRESHOLD: Record<DetectionArch, number> = { yolo: 0.25, rf_detr: 0.5 };
+export const DEFAULT_SCORE_THRESHOLD: Record<DetectionArch, number> = { yolo: 0.25, rf_detr: 0.5, rf_detr_seg: 0.5 };
 export const DEFAULT_IOU_THRESHOLD = 0.45;
+/** RF-DETR-Seg: the mask binarisation threshold (backend DEFAULT_MASK_THRESHOLD). */
+export const DEFAULT_MASK_THRESHOLD = 0.5;
+
+/** The six RF-DETR-Seg native inputs, ascending (backend RFDETR_SEG_NATIVE_INPUTS). */
+export const RFDETR_SEG_NATIVE_INPUTS: readonly number[] = [...new Set(Object.values(RFDETR_SEG_SIZES))].sort((a, b) => a - b);
 
 /** Offered when a YOLO checkpoint records no usable `imgsz` (the ultralytics default). */
 export const YOLO_FALLBACK_INPUT = 640;
@@ -109,13 +121,18 @@ export interface ConversionRecordLike {
   conversion?: unknown;
 }
 
-/** Mirrors the backend's `detector_conversion.is_detector_conversion_record` (Requirement 9.1). */
+/**
+ * Mirrors the backend's `detector_conversion.is_detector_conversion_record`
+ * (Requirement 9.1): an imported ONNX detection-family record (object
+ * detection or, rfdetr-seg-support Req 7.3, instance segmentation) carrying
+ * a conversion block.
+ */
 export function isDetectorConversionRecord(record: ConversionRecordLike | null | undefined): boolean {
   if (!record || typeof record !== 'object') return false;
   const conversion = record.conversion;
   return (
     record.source === 'imported' &&
-    record.model_type === 'object_detection' &&
+    isDetectionModelType(record.model_type) &&
     String(record.runtime ?? '').toLowerCase() === 'onnx' &&
     !!conversion &&
     typeof conversion === 'object' &&
@@ -250,11 +267,26 @@ export const CONVERSION_GEOMETRY: Record<DetectionArch, { label: string; reason:
       'RF-DETR is trained on a square resize of the frame, normalised with the ImageNet mean and ' +
       'standard deviation.',
   },
+  rf_detr_seg: {
+    label: 'Square resize with ImageNet normalisation',
+    reason:
+      'RF-DETR-Seg is trained on a square resize of the frame, normalised with the ImageNet mean and ' +
+      'standard deviation; its masks are predicted on a quarter-resolution grid and scaled back.',
+  },
 };
 
 function isValidYoloInput(value: number): boolean {
   const { min, max } = INPUT_BOUNDS.yolo;
   return Number.isInteger(value) && value % INPUT_STEP === 0 && value >= min && value <= max;
+}
+
+/**
+ * RF-DETR-Seg converts only at one of its six native inputs: the native-only
+ * rule is the whole input rule, never the `% INPUT_STEP` / bounds test
+ * (rfdetr-seg-support Req 7.3; backend `_seg_native_input`).
+ */
+export function isValidRfDetrSegInput(value: number): boolean {
+  return Number.isInteger(value) && RFDETR_SEG_NATIVE_INPUTS.includes(value);
 }
 
 /**
