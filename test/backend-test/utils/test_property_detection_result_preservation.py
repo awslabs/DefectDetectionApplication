@@ -51,7 +51,7 @@ Recorded baselines (observed in the flask-app x86 container on unfixed code)
 * ``InferenceResultSchema().load()`` requires exactly ``captureId``,
   ``captureType``, ``workflowId``, ``inferenceCreationTime``, ``prediction``,
   ``confidence``, ``anomalyScore``, ``anomalyThreshod``, ``inputImageFilePath``,
-  ``modelId``; everything else is optional. ``dump()`` always emits all 23
+  ``modelId``; everything else is optional. ``dump()`` always emits all 22
   fields, filling omitted ones from ``InferenceResult.__init__`` defaults
   (``maskImage`` ``''``, ``maskBackground`` / ``anomalyLabels`` /
   ``humanClassification`` / ``textNote`` / ``detections`` ``None``,
