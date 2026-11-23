@@ -4,13 +4,17 @@
  * (rfdetr-seg-support DD20). The three functions moved here verbatim from
  * `components/labeling/AnnotationCanvas.tsx`, which re-exports them so its
  * callers and tests are unchanged; importing the canvas module into the
- * viewer would pull the whole labeling UI.
+ * viewer would pull the whole labeling UI. `rleToImageData` (task 11.3) is
+ * the viewer's canvas decoder for a device `mask_rle`.
  *
  * Wire format: the backend's canonical form is the space-separated counts
  * string ("4 1 4") over the mask flattened column-major (down each column,
  * left to right), counts alternating starting with the zero-run (a leading
  * "0" when the first pixel is foreground); `sum(counts) == width * height`.
  */
+
+/** An RGBA colour, each channel 0..255. */
+export type Rgba = [number, number, number, number];
 
 /**
  * Encode the pixels of `bitmap` equal to `value` as COCO-style RLE counts:
@@ -97,4 +101,61 @@ export function decodeRleColumnMajor(
     value = 1 - value;
   }
   return mask;
+}
+
+/**
+ * An `ImageData` over `data` (`width * height * 4` RGBA bytes). Uses the
+ * platform constructor where it exists; jsdom (vitest) has none, so the
+ * structurally identical plain object stands in there.
+ */
+export function pixelsToImageData(
+  data: Uint8ClampedArray<ArrayBuffer>,
+  width: number,
+  height: number
+): ImageData {
+  if (typeof ImageData !== 'undefined') {
+    return new ImageData(data, width, height);
+  }
+  return { data, width, height, colorSpace: 'srgb' } as ImageData;
+}
+
+/**
+ * Decode a device `mask_rle` (Canonical_RLE at source-frame resolution,
+ * rfdetr-seg-support Requirement 10.2) into canvas pixels: `rgba` where the
+ * mask is set, fully transparent elsewhere. The runs must be non-negative
+ * integers summing to `width * height` (the dimensions of the loaded source
+ * image); anything else throws a `RangeError`, as the device's decoder
+ * rejects it, so the caller skips that instance and keeps its box.
+ */
+export function rleToImageData(
+  rle: string | number[],
+  width: number,
+  height: number,
+  rgba: Rgba
+): ImageData {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 0 || height < 0) {
+    throw new RangeError(`mask size must be non-negative integers, got ${width}x${height}`);
+  }
+  const counts = parseRleCounts(rle);
+  if (counts.some((count) => !Number.isInteger(count) || count < 0)) {
+    throw new RangeError('mask_rle run lengths must be non-negative integers');
+  }
+  const total = width * height;
+  const sum = counts.reduce((acc, count) => acc + count, 0);
+  if (sum !== total) {
+    throw new RangeError(`mask_rle runs sum to ${sum}, expected ${width}x${height} = ${total}`);
+  }
+  const bits = decodeRleColumnMajor(counts, width, height);
+  const data = new Uint8ClampedArray(total * 4);
+  const [r, g, b, a] = rgba;
+  for (let i = 0; i < total; i++) {
+    if (bits[i]) {
+      const offset = i * 4;
+      data[offset] = r;
+      data[offset + 1] = g;
+      data[offset + 2] = b;
+      data[offset + 3] = a;
+    }
+  }
+  return pixelsToImageData(data, width, height);
 }

@@ -2136,11 +2136,17 @@ class ApiService {
   // Mirrors getImagePreview: presigned-URL pattern against the inference-results
   // bucket, returning parsed capture metadata (detection typing + Detections_Block)
   // and presigned URLs for the source / overlay / mask artifacts.
+  // Two request shapes on the one route (rfdetr-seg-support Requirement 11.1):
+  // the page (no `key`) is always the light form; `key` (a capture's
+  // `jsonl_key` under the same prefix) selects the per-capture detail, whose
+  // entries carry `mask_rle` when `include_masks` is set. Same envelope.
   async getCaptures(params: {
     usecase_id: string;
     prefix: string;
     device_id?: string;
     limit?: number;
+    key?: string;
+    include_masks?: boolean;
   }): Promise<{
     captures: Capture[];
     bucket: string;
@@ -2153,6 +2159,8 @@ class ApiService {
       prefix: params.prefix,
       ...(params.device_id && { device_id: params.device_id }),
       ...(params.limit && { limit: params.limit.toString() }),
+      ...(params.key && { key: params.key }),
+      ...(params.include_masks && { include_masks: '1' }),
     });
     return this.request(`/captures?${queryParams}`);
   }
