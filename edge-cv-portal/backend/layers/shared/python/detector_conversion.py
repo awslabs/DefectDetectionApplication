@@ -558,7 +558,10 @@ def validate_conversion_request(body: Dict[str, Any], assessment: Dict[str, Any]
                          f"(set-based decoding, no NMS)")
     mask = output_mode = None
     if seg:
+        # An explicit null is "not given", as for output_mode below.
         mask = _number(body, 'mask_threshold', DEFAULT_MASK_THRESHOLD)
+        if mask is None:
+            mask = DEFAULT_MASK_THRESHOLD
         if not 0.0 < mask < 1.0:
             raise ValueError("'mask_threshold' must be strictly between 0 and 1")
         output_mode = str(body.get('output_mode') or DEFAULT_OUTPUT_MODE).strip().lower()

@@ -218,6 +218,101 @@ def test_rfdetr_seg_checkpoint_is_accepted_as_instance_segmentation():
     assert dc.assess_checkpoint(detection)["rfdetr_size"] == "nano"
 
 
+def _seg_probe(**evidence):
+    """The Seg-Nano probe fixture without its model_name, plus the evidence given."""
+    probe = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+    probe["evidence"].pop("model_name")
+    probe["evidence"].update(evidence)
+    return probe
+
+
+@pytest.mark.parametrize("native,size,queries", [
+    (312, "nano", 100), (384, "small", 100), (432, "medium", 200),
+    (504, "large", 200), (624, "xlarge", 300), (768, "2xlarge", 300),
+])
+def test_rfdetr_seg_size_is_read_from_the_native_resolution_alone(native, size, queries):
+    # rfdetr-seg-support task 7.6 (Req 7.2): the six Seg natives are pairwise
+    # distinct, so args_picks.resolution names the size when model_name is
+    # absent (the published weights' envelope); the pre-fill is that native.
+    out = dc.assess_checkpoint(_seg_probe(args_picks={"resolution": native}))
+    assert out["convertible"] is True, out["reasons"]
+    assert (out["arch"], out["rfdetr_seg_size"], out["num_queries"]) == ("rf_detr_seg", size, queries)
+    assert out["train_input_size"] == native and out["model_class"] is None
+    assert dc.assessment_prefill(out)["input_width"] == native
+
+
+def test_rfdetr_seg_train_input_size_is_native_only():
+    # args_picks.resolution 312 is accepted for a Seg probe (the detection
+    # % 32 rule would have refused it); 640 is no Seg native -> the reason.
+    named = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+    named["evidence"]["args_picks"] = {"resolution": 312}
+    out = dc.assess_checkpoint(named)
+    assert out["convertible"] is True and out["train_input_size"] == 312
+    off_native = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+    off_native["evidence"]["args_picks"] = {"resolution": 640}
+    out = dc.assess_checkpoint(off_native)
+    assert out["convertible"] is False
+    assert out["reasons"] == ["the checkpoint was trained at 640px; RF-DETR-Seg nano converts only "
+                              "at its native 312px"]
+    nameless = dc.assess_checkpoint(_seg_probe(args_picks={"resolution": 640}))
+    assert len(nameless["reasons"]) == 1
+    assert "not a native RF-DETR-Seg resolution (nano 312, small 384" in nameless["reasons"][0]
+    # A query count contradicting the named size is a reason; a matching one is not.
+    contradicted = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+    contradicted["evidence"]["args_picks"] = {"resolution": 312, "num_queries": 300}
+    assert dc.assess_checkpoint(contradicted)["reasons"] == [
+        "the checkpoint has 300 queries; RF-DETR-Seg nano has 100"]
+    consistent = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+    consistent["evidence"]["args_picks"] = {"resolution": 312, "num_queries": 100}
+    assert dc.assess_checkpoint(consistent)["convertible"] is True
+
+
+@pytest.mark.parametrize("model_name,word", [
+    ("RFDETRSegPreview", "deprecated preview size"),
+    ("RFDETRKeypointPreview", "not an RF-DETR detection model"),
+    ("RFDETRBase", "legacy"),
+])
+def test_rfdetr_seg_probe_rejects_preview_keypoint_and_legacy_names(model_name, word):
+    probe = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+    probe["evidence"]["model_name"] = model_name
+    out = dc.assess_checkpoint(probe)
+    assert out["convertible"] is False and out["arch"] == "rf_detr_seg"
+    assert word in out["reasons"][0] and model_name in out["reasons"][0]
+    assert "suggested_type" not in dc.assessment_prefill(out)
+
+
+def test_rfdetr_seg_without_size_evidence_is_left_to_the_job():
+    # The stripped published weights: no model_name, no usable resolution.
+    out = dc.assess_checkpoint(_seg_probe())
+    assert out["convertible"] is True
+    assert (out["rfdetr_seg_size"], out["num_queries"], out["train_input_size"]) == (None, None, None)
+    assert out["arch"] == "rf_detr_seg" and out["model_type"] == "instance_segmentation"
+    prefill = dc.assessment_prefill(out)
+    assert prefill["input_width"] is None and prefill["suggested_type"] == "instance_segmentation"
+    # Opaque args: a non-integer resolution never names a size or a reason.
+    assert dc.assess_checkpoint(_seg_probe(args_picks={"resolution": "312"}))["rfdetr_seg_size"] is None
+
+
+def test_rfdetr_seg_disabled_switch_is_the_only_reason():
+    # inspect_checkpoint_file passes the Seg_Switch OFF text as the
+    # unavailable reason (DD7): the assessment carries convertible: false
+    # with exactly that reason and the pre-fill offers no suggested type.
+    reason = "RF-DETR-Seg is disabled on this portal"
+    out = dc.assess_checkpoint(RFDETR_SEG_OWN_PROBE, conversion_available=False,
+                               unavailable_reason=reason)
+    assert out["convertible"] is False and out["reasons"] == [reason]
+    assert (out["arch"], out["rfdetr_seg_size"], out["train_input_size"]) == ("rf_detr_seg", "nano", 312)
+    prefill = dc.assessment_prefill(out)
+    assert "suggested_type" not in prefill and "detection_arch" not in prefill
+    assert prefill["architecture_hints"] == ["RF-DETR-Seg checkpoint", f"Not convertible: {reason}"]
+    assert prefill["input_width"] is None
+    # A Seg checkpoint that is not convertible anyway keeps its own reasons only.
+    preview = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+    preview["evidence"]["model_name"] = "RFDETRSegPreview"
+    out = dc.assess_checkpoint(preview, conversion_available=False, unavailable_reason=reason)
+    assert reason not in out["reasons"] and len(out["reasons"]) == 1
+
+
 def test_rfdetr_non_native_resolution_is_rejected():
     probe = copy.deepcopy(RFDETR_OWN_PROBE)
     probe["evidence"]["args_picks"] = {"resolution": 640}

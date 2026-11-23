@@ -200,6 +200,44 @@ def test_inspect_without_an_export_image_reports_not_configured(h, monkeypatch):
         "Checkpoint conversion is not configured on this portal (no detector export image)"]
 
 
+def test_inspect_of_a_seg_checkpoint_follows_the_seg_switch(h, monkeypatch):
+    """rfdetr-seg-support task 7.6 (Req 7.2, 15.2; DD7): a Seg .pth is assessed
+    as an instance_segmentation / rf_detr_seg checkpoint with its native
+    pre-fill when the Seg_Switch is ON (absent), and as not convertible with
+    exactly the OFF reason when PORTAL_RFDETR_SEG_ENABLED=false; a detection
+    checkpoint is unaffected by the switch."""
+    put_source(h, lambda p: fx.rfdetr_seg_checkpoint(p, envelope="training"), "uploads/seg.pth")
+    monkeypatch.delenv("PORTAL_RFDETR_SEG_ENABLED", raising=False)
+    status, body = call(mc.inspect_model_endpoint, inspect_body(h, "uploads/seg.pth"))
+    assert status == 200, body
+    info = body["inspection_result"]
+    ckpt = info["checkpoint"]
+    assert ckpt["convertible"] is True and ckpt["reasons"] == []
+    assert (ckpt["arch"], ckpt["model_type"], ckpt["task"]) == ("rf_detr_seg", "instance_segmentation",
+                                                                 "segmentation")
+    assert (ckpt["rfdetr_seg_size"], ckpt["num_queries"], ckpt["train_input_size"]) == ("nano", 100, 312)
+    assert ckpt["class_names"] == ["disc", "block"] and ckpt["num_classes"] == 2
+    assert info["suggested_type"] == "instance_segmentation" and info["detection_arch"] == "rf_detr_seg"
+    assert info["input_width"] == info["input_height"] == 312
+    assert info["architecture_hints"] == ["RF-DETR-Seg checkpoint"] and info["fine_tunable"] is True
+
+    monkeypatch.setenv("PORTAL_RFDETR_SEG_ENABLED", "false")
+    status, body = call(mc.inspect_model_endpoint, inspect_body(h, "uploads/seg.pth"))
+    assert status == 200, body
+    info = body["inspection_result"]
+    assert info["checkpoint"]["convertible"] is False
+    assert info["checkpoint"]["reasons"] == ["RF-DETR-Seg is disabled on this portal"]
+    assert "suggested_type" not in info and "detection_arch" not in info
+    assert info["architecture_hints"] == ["RF-DETR-Seg checkpoint",
+                                          "Not convertible: RF-DETR-Seg is disabled on this portal"]
+    assert info["input_width"] is None
+    # Detection checkpoints never see the switch.
+    put_source(h, ppe_like, "uploads/best.pt")
+    status, body = call(mc.inspect_model_endpoint, inspect_body(h, "uploads/best.pt"))
+    assert status == 200 and body["inspection_result"]["checkpoint"]["convertible"] is True
+    assert body["inspection_result"]["suggested_type"] == "object_detection"
+
+
 def test_inspect_reports_torchscript_as_not_convertible(h):
     put_source(h, fx.build_torchscript, "uploads/traced.pt")
     status, body = call(mc.inspect_model_endpoint, inspect_body(h, "uploads/traced.pt"))

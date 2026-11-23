@@ -166,6 +166,123 @@ def test_non_convertible_checkpoint_is_rejected_with_its_reasons():
 
 
 # ---------------------------------------------------------------------------
+# RF-DETR-Seg requests (rfdetr-seg-support task 7.6; Req 7.3, 7.9)
+# ---------------------------------------------------------------------------
+
+def _seg_assessment(size=None, class_names=("disc", "block")):
+    """The Seg-Nano assessment re-sized: `size` None = the stripped published
+    weights (no size evidence at all), else that Seg size with its native
+    pre-fill."""
+    out = dict(RF_SEG_OWN, class_names=list(class_names) if class_names else None)
+    out["rfdetr_seg_size"] = size
+    out["num_queries"] = dc.RFDETR_SEG_QUERIES_FOR_SIZE[size] if size else None
+    out["train_input_size"] = dc.RFDETR_SEG_SIZES[size] if size else None
+    out["model_class"] = dc.RFDETR_SEG_CLASS_FOR_SIZE[size] if size else None
+    return out
+
+
+def test_seg_defaults_are_native_resolution_top_k_mask_threshold_and_instance_mode():
+    params = dc.validate_conversion_request({}, RF_SEG_OWN)
+    assert params == {
+        "arch": "rf_detr_seg", "network_input": 312, "num_classes": 2, "class_names": ["disc", "block"],
+        "score_threshold": 0.5, "iou_threshold": None, "top_k": 100, "preserve_aspect": False,
+        "onnx_opset": 17, "rfdetr_size": None,
+        # the Seg-only keys follow the ten every arch shares (C28)
+        "rfdetr_seg_size": "nano", "mask_threshold": 0.5, "output_mode": "instance",
+    }
+    assert list(params)[:10] == list(dc.validate_conversion_request({}, PPE))
+
+
+@pytest.mark.parametrize("size,native,queries", [
+    ("nano", 312, 100), ("small", 384, 100), ("medium", 432, 200),
+    ("large", 504, 200), ("xlarge", 624, 300), ("2xlarge", 768, 300),
+])
+def test_seg_accepts_exactly_its_sizes_native_resolution(size, native, queries):
+    assessment = _seg_assessment(size)
+    params = dc.validate_conversion_request({}, assessment)
+    assert (params["network_input"], params["top_k"], params["rfdetr_seg_size"]) == (native, queries, size)
+    explicit = dc.validate_conversion_request({"image_width": native, "image_height": native}, assessment)
+    assert explicit == params
+    for other in dc.RFDETR_SEG_NATIVE_INPUTS:
+        if other != native:
+            assert f"native resolution ({size}: {native}); got {other}" in bad(
+                {"image_width": other, "image_height": other}, assessment)
+    # a multiple of 32 inside the detection bounds is no help: native only
+    assert f"native resolution ({size}: {native}); got 320" in bad(
+        {"image_width": 320, "image_height": 320}, assessment)
+    assert "must be square" in bad({"image_width": native, "image_height": 320}, assessment)
+
+
+def test_seg_unknown_size_accepts_any_native_and_names_top_k_from_the_input():
+    # tasks review pass 10, finding 4: the stripped published weights carry
+    # neither model_name nor a usable args_picks.resolution, so the request
+    # must name one of the six natives and that width names top_k; the
+    # record's rfdetr_seg_size stays None for the job's own native check.
+    unknown = _seg_assessment(None)
+    assert "'image_width' and 'image_height' (the network input) are required" in bad({}, unknown)
+    for native, size in dc.RFDETR_SEG_SIZE_FOR_NATIVE.items():
+        params = dc.validate_conversion_request({"image_width": native, "image_height": native}, unknown)
+        assert params["top_k"] == dc.RFDETR_SEG_QUERIES_FOR_SIZE[size]
+        assert params["rfdetr_seg_size"] is None and params["network_input"] == native
+    for off in (320, 640, 224):
+        assert f"native resolution (312, 384, 432, 504, 624, 768); got {off}" in bad(
+            {"image_width": off, "image_height": off}, unknown)
+    params = dc.validate_conversion_request({"image_width": 432, "image_height": 432}, unknown)
+    assert params["top_k"] == 200 and params["rfdetr_seg_size"] is None
+    rec = _record(unknown, body={"image_width": 432, "image_height": 432}, fine_tunable=None)
+    assert "rfdetr_seg_size" in rec["detection"] and rec["detection"]["rfdetr_seg_size"] is None
+    assert rec["detection"]["top_k"] == 200 and rec["detection"]["resolution"] == 432
+    env = _job(params=params)["Environment"]
+    assert "RFDETR_SIZE" not in env
+    assert (env["DETECTION_ARCH"], env["NETWORK_INPUT"], env["TASK"], env["MASK_THRESHOLD"]) == (
+        "rf_detr_seg", "432", "segmentation", "0.5")
+
+
+@pytest.mark.parametrize("body,fragment", [
+    ({"iou_threshold": 0.45}, "'iou_threshold' does not apply to RF-DETR-Seg"),
+    ({"rfdetr_size": "nano"}, "'rfdetr_size' does not apply to RF-DETR-Seg"),
+    ({"rfdetr_size": "small"}, "'rfdetr_size' does not apply to RF-DETR-Seg"),
+    ({"model_type": "object_detection"},
+     "'model_type' must be 'instance_segmentation' for an RF-DETR-Seg checkpoint conversion; "
+     "got 'object_detection'"),
+    ({"detection_arch": "rf_detr"}, "contradicts the checkpoint, which is an RF-DETR-Seg checkpoint"),
+    ({"preserve_aspect": True}, "must be false for RF-DETR"),
+    ({"output_mode": "panoptic"}, "'output_mode' must be one of instance, semantic; got 'panoptic'"),
+    ({"mask_threshold": 0}, "'mask_threshold' must be strictly between 0 and 1"),
+    ({"mask_threshold": 1}, "'mask_threshold' must be strictly between 0 and 1"),
+    ({"mask_threshold": "x"}, "'mask_threshold' must be a number"),
+    ({"mask_threshold": True}, "'mask_threshold' must be a number"),
+    ({"score_threshold": 1.5}, "'score_threshold' must be strictly between 0 and 1"),
+    ({"class_names": ["disc"]}, "exactly 2 classes"),
+    ({"class_names": ["a", "b", "c"]}, "exactly 2 classes"),
+    ({"num_classes": 3}, "contradicts the checkpoint's 2"),
+])
+def test_seg_request_rejections(body, fragment):
+    assert fragment in bad(body, RF_SEG_OWN)
+
+
+def test_seg_output_mode_and_mask_threshold_are_validated_and_normalised():
+    params = dc.validate_conversion_request({"output_mode": "Semantic", "mask_threshold": 0.3}, RF_SEG_OWN)
+    assert params["output_mode"] == "semantic" and params["mask_threshold"] == 0.3
+    assert dc.validate_conversion_request({"output_mode": None}, RF_SEG_OWN)["output_mode"] == "instance"
+    assert dc.validate_conversion_request({"mask_threshold": None}, RF_SEG_OWN)["mask_threshold"] == 0.5
+    agreed = {"model_type": "instance_segmentation", "detection_arch": "RF_DETR_SEG", "preserve_aspect": False}
+    assert dc.validate_conversion_request(agreed, RF_SEG_OWN)["arch"] == "rf_detr_seg"
+    # The Seg-only keys never reach a yolo / rf_detr params dict (C28).
+    for assessment in (PPE, RF_OWN):
+        assert set(dc.validate_conversion_request({}, assessment)) == set(
+            dc.validate_conversion_request({}, PPE))
+
+
+def test_seg_class_names_are_required_without_checkpoint_names():
+    anonymous = _seg_assessment("nano", class_names=None)
+    assert "'class_names' is required: the checkpoint stores no class names; supply exactly 2" in bad(
+        {}, anonymous)
+    assert dc.validate_conversion_request({"class_names": ["a", "b"]}, anonymous)["class_names"] == ["a", "b"]
+    assert "exactly 2 classes" in bad({"class_names": ["a"]}, anonymous)
+
+
+# ---------------------------------------------------------------------------
 # Job request (Req 5.1-5.4)
 # ---------------------------------------------------------------------------
 
@@ -226,9 +343,26 @@ def test_environment_contract_rfdetr_passes_the_known_size():
     assert "RFDETR_SIZE" not in env
 
 
+def test_environment_contract_seg_adds_task_and_mask_threshold_for_the_seg_arch_only():
+    # rfdetr-seg-support task 7.6 (Req 7.3, C26): one RFDETR_SIZE key for both
+    # DETR archs, TASK + MASK_THRESHOLD for rf_detr_seg only.
+    env = _job(params=dc.validate_conversion_request({"mask_threshold": 0.35}, RF_SEG_OWN))["Environment"]
+    assert env == {"DETECTION_ARCH": "rf_detr_seg", "NETWORK_INPUT": "312", "EXPECTED_NUM_CLASSES": "2",
+                   "EXPECTED_SHA256": PPE_SHA256, "ONNX_OPSET": "17", "RFDETR_SIZE": "nano",
+                   "TASK": "segmentation", "MASK_THRESHOLD": "0.35"}
+    assert all(isinstance(v, str) for v in env.values())
+    # An rf_detr record's environment is byte-identical to today's: six keys.
+    env = _job(params=dc.validate_conversion_request({}, RF_OWN))["Environment"]
+    assert env == {"DETECTION_ARCH": "rf_detr", "NETWORK_INPUT": "512", "EXPECTED_NUM_CLASSES": "1",
+                   "EXPECTED_SHA256": PPE_SHA256, "ONNX_OPSET": "17", "RFDETR_SIZE": "small"}
+
+
 @pytest.mark.parametrize("assessment,body", [
     (PPE, {}), (PPE, {"image_width": 1280, "image_height": 1280}), (RF_OWN, {}),
     (RF_PUBLISHED, {"class_names": [f"c{i}" for i in range(90)]}),
+    (RF_SEG_OWN, {}),                                                      # rfdetr-seg-support 7.6
+    (RF_SEG_OWN, {"output_mode": "semantic", "mask_threshold": 0.3}),
+    (_seg_assessment(None), {"image_width": 624, "image_height": 624}),    # unknown size: no RFDETR_SIZE
 ])
 def test_the_export_entry_point_accepts_every_environment_the_portal_builds(assessment, body):
     export = _load_export_module()
@@ -240,6 +374,8 @@ def test_the_export_entry_point_accepts_every_environment_the_portal_builds(asse
     assert cfg.expected_sha256 == PPE_SHA256
     assert cfg.opset == 17
     assert cfg.rfdetr_size == env.get("RFDETR_SIZE")
+    assert cfg.task == ("segmentation" if assessment["arch"] == "rf_detr_seg" else "detection")
+    assert cfg.mask_threshold == float(env.get("MASK_THRESHOLD", "0.5"))
 
 
 def test_job_request_rejects_a_bad_digest():
@@ -358,6 +494,31 @@ def test_seg_record_writes_the_sidecar_descriptor_exactly_as_for_detection():
     assert "iou_threshold" not in det and "rfdetr_size" not in det and "imgsz" not in det
     assert dc.is_detector_conversion_record(rec)
     assert detection_training.is_trained_detection_record(rec) is False
+
+
+def test_seg_record_is_dynamodb_ready_and_keeps_the_conversion_identifiers():
+    # rfdetr-seg-support task 7.6: the record carries the request's mode and
+    # threshold as Decimals, and every identifier a Conversion_Record has today.
+    rec = _record(RF_SEG_OWN, body={"output_mode": "semantic", "mask_threshold": 0.3}, fine_tunable=None)
+
+    def walk(v):
+        assert not isinstance(v, float), v
+        if isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+    walk(rec)
+    json.dumps(rec, default=str)
+    det = rec["detection"]
+    assert det["output_mode"] == "semantic" and det["mask_threshold"] == Decimal("0.3")
+    assert {k: rec[k] for k in ("source", "model_type", "runtime", "status", "progress")} == {
+        "source": "imported", "model_type": "instance_segmentation", "runtime": "onnx",
+        "status": "InProgress", "progress": 10}
+    assert rec["metadata"]["input_shape"] == [1, 3, 312, 312] and rec["metadata"]["fine_tunable"] is None
+    assert rec["conversion"]["source_framework"] == "rfdetr" and rec["algorithm_uri"] == IMAGE
+    assert set(rec) == set(_record(RF_OWN, fine_tunable=None))  # no new top-level key for Seg
 
 
 def test_record_is_dynamodb_ready():

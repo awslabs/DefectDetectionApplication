@@ -24,6 +24,7 @@ own validator (detector_conversion).
 # Validates: Requirements 5.3, 5.6, 5.7, 6.1-6.8, 12.2
 """
 import ast
+import contextlib
 import copy
 import hashlib
 import importlib.util
@@ -135,6 +136,67 @@ def test_read_config_accepts_the_contract():
 ])
 def test_read_config_rejects_what_the_portal_never_sends(overrides, fragment):
     assert fragment in fatal_message(ec.read_config, env(**overrides))
+
+
+# --- RF-DETR-Seg environment (spec rfdetr-seg-support task 7.6; Req 7.3, C26) ---
+
+def seg_env(**overrides):
+    base = {"DETECTION_ARCH": "rf_detr_seg", "NETWORK_INPUT": "384", "EXPECTED_NUM_CLASSES": "2",
+            "TASK": "segmentation", "MASK_THRESHOLD": "0.5", "RFDETR_SIZE": "small"}
+    base.update(overrides)
+    return env(**base)
+
+
+@pytest.mark.parametrize("size,native", sorted(ec.RFDETR_SEG_NATIVE_INPUTS.items()))
+def test_read_config_accepts_every_seg_native_with_and_without_its_size(size, native):
+    cfg = ec.read_config(seg_env(NETWORK_INPUT=str(native), RFDETR_SIZE=size))
+    assert (cfg.arch, cfg.task, cfg.network_input, cfg.rfdetr_size) == ("rf_detr_seg", "segmentation",
+                                                                        native, size)
+    assert (cfg.num_classes, cfg.opset, cfg.mask_threshold, cfg.expected_sha256) == (2, 17, 0.5, SHA)
+    nameless = ec.read_config(seg_env(NETWORK_INPUT=str(native), RFDETR_SIZE=None))
+    assert nameless.rfdetr_size is None and nameless.network_input == native
+    assert set(vars(cfg)) == {"arch", "task", "network_input", "num_classes", "opset",
+                              "expected_sha256", "rfdetr_size", "mask_threshold"}
+
+
+@pytest.mark.parametrize("overrides,fragment", [
+    ({"NETWORK_INPUT": "320", "RFDETR_SIZE": None},
+     "NETWORK_INPUT must be the native resolution of an RF-DETR-Seg size (312, 384, 432, 504, 624, 768)"),
+    ({"NETWORK_INPUT": "320", "RFDETR_SIZE": "nano"}, "native resolution of an RF-DETR-Seg size"),
+    ({"NETWORK_INPUT": "640", "RFDETR_SIZE": None}, "got 640"),
+    ({"NETWORK_INPUT": "384", "RFDETR_SIZE": "nano"}, "RF-DETR-Seg nano converts only at 312; got 384"),
+    ({"RFDETR_SIZE": "base"}, "RFDETR_SIZE must be one of nano, small, medium, large, xlarge, 2xlarge"),
+    ({"TASK": "detection"}, "TASK detection contradicts DETECTION_ARCH rf_detr_seg"),
+    ({"TASK": None}, "TASK detection contradicts DETECTION_ARCH rf_detr_seg"),
+    ({"TASK": "panoptic"}, "TASK must be one of detection, segmentation"),
+    ({"MASK_THRESHOLD": "1.5"}, "MASK_THRESHOLD must be a number strictly between 0 and 1; got '1.5'"),
+    ({"MASK_THRESHOLD": "0"}, "MASK_THRESHOLD must be a number strictly between 0 and 1"),
+    ({"MASK_THRESHOLD": "x"}, "MASK_THRESHOLD must be a number strictly between 0 and 1; got 'x'"),
+])
+def test_read_config_rejects_a_malformed_seg_environment(overrides, fragment):
+    assert fragment in fatal_message(ec.read_config, seg_env(**overrides))
+
+
+def test_read_config_seg_sizes_are_accepted_for_the_seg_arch_only():
+    # D4: xlarge / 2xlarge convert for rf_detr_seg and stay rejected for rf_detr (:132 holds).
+    assert ec.read_config(seg_env(NETWORK_INPUT="624", RFDETR_SIZE="xlarge")).rfdetr_size == "xlarge"
+    assert ec.read_config(seg_env(NETWORK_INPUT="768", RFDETR_SIZE="2xlarge")).rfdetr_size == "2xlarge"
+    message = fatal_message(ec.read_config, env(DETECTION_ARCH="rf_detr", NETWORK_INPUT="512",
+                                                RFDETR_SIZE="2xlarge"))
+    assert "RFDETR_SIZE must be one of nano, small, medium, large (and only for rf_detr" in message
+    # TASK=segmentation on a detection arch is the reverse contradiction.
+    assert "TASK segmentation contradicts DETECTION_ARCH rf_detr" in fatal_message(
+        ec.read_config, env(DETECTION_ARCH="rf_detr", NETWORK_INPUT="512", TASK="segmentation"))
+    assert "TASK segmentation contradicts DETECTION_ARCH yolo" in fatal_message(
+        ec.read_config, env(TASK="segmentation"))
+
+
+def test_read_config_task_and_mask_threshold_default_for_the_detection_archs():
+    cfg = ec.read_config(env())
+    assert (cfg.task, cfg.mask_threshold) == ("detection", 0.5)
+    cfg = ec.read_config(env(DETECTION_ARCH="rf_detr", NETWORK_INPUT="512", TASK="detection",
+                             MASK_THRESHOLD="0.3"))
+    assert (cfg.task, cfg.mask_threshold) == ("detection", 0.3)  # read, harmless, unused for detection
 
 
 def test_single_input_file(tmp_path):
@@ -394,10 +456,27 @@ def _rf_state(size, num_classes, seg=False):
     return sd
 
 
+class _Tensor:
+    """A forward output stand-in: only .detach().cpu().numpy() is read."""
+
+    def __init__(self, array):
+        self.array = array
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.array
+
+
 class _Module:
-    def __init__(self, state):
+    def __init__(self, state, forward=None):
         self.state = state
         self.exported = False
+        self.forward = forward
 
     def state_dict(self):
         return dict(self.state)
@@ -411,8 +490,13 @@ class _Module:
     def export(self):
         self.exported = True
 
+    def __call__(self, batch):
+        assert self.exported, "the parity reference must run the forward_export path"
+        assert self.forward is not None, "this stub was built without a forward"
+        return self.forward(batch)
 
-def _install_rfdetr(monkeypatch, tmp_path, ckpt, log, *, loaded_state=None):
+
+def _install_rfdetr(monkeypatch, tmp_path, ckpt, log, *, loaded_state=None, forward=None):
     rfdetr = types.ModuleType("rfdetr")
     natives = {"nano": 384, "small": 512, "medium": 576, "large": 704}
     tables = [(size, cls_name, False, natives[size]) for size, cls_name in ec.RFDETR_SIZE_CLASSES.items()]
@@ -426,7 +510,7 @@ def _install_rfdetr(monkeypatch, tmp_path, ckpt, log, *, loaded_state=None):
                     state = _rf_state(size, num_classes, seg=seg)
                     if pretrain_weights is not None and loaded_state is not None:
                         state = loaded_state
-                    self.model = SimpleNamespace(model=_Module(state), resolution=native)
+                    self.model = SimpleNamespace(model=_Module(state, forward), resolution=native)
 
                 def export(self, output_dir, **kwargs):
                     log.append(("export", kwargs))
@@ -440,6 +524,8 @@ def _install_rfdetr(monkeypatch, tmp_path, ckpt, log, *, loaded_state=None):
     torch.__version__ = "2.5.1+cpu"
     torch.load = lambda path, map_location=None, weights_only=None: (
         log.append(("torch.load", weights_only)) or copy.deepcopy(ckpt))
+    torch.no_grad = contextlib.nullcontext
+    torch.from_numpy = lambda array: array
     monkeypatch.setitem(sys.modules, "rfdetr", rfdetr)
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setattr(ec, "WORK", tmp_path / "work")
@@ -549,6 +635,38 @@ def test_rfdetr_task_gate_both_ways(tmp_path, monkeypatch):
     _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt("small"), log)
     message = fatal_message(ec.convert_rfdetr, tmp_path / "c.pth", _seg_cfg())
     assert "recorded an RF-DETR-Seg checkpoint but the state dict has no segmentation head" in message
+
+
+def test_rfdetr_reference_closure_returns_three_arrays_for_seg_and_two_otherwise(tmp_path, monkeypatch,
+                                                                                seg_stamp):
+    """rfdetr-seg-support task 7.6 (DD17): after .export() the module's forward
+    is forward_export, a TUPLE in ONNX output order -- the closure returns its
+    first three arrays for the Seg task and two otherwise; the dict branch
+    stays for a detection module."""
+    arrays = [np.zeros((1, 100, 4), np.float32), np.zeros((1, 100, 2), np.float32),
+              np.zeros((1, 100, 96, 96), np.float32)]
+    batch = np.zeros((1, 3, 384, 384), np.float32)
+
+    def tuple_forward(x):
+        assert x is batch  # torch.from_numpy stub: the batch reaches the module as given
+        return tuple(_Tensor(a) for a in arrays)
+
+    log = []
+    _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt("small", seg=True), log, forward=tuple_forward)
+    result = ec.convert_rfdetr(tmp_path / "c.pth", _seg_cfg())
+    out = result.reference(batch)
+    assert [a.shape for a in out] == [(1, 100, 4), (1, 100, 2), (1, 100, 96, 96)]
+    assert all(isinstance(a, np.ndarray) for a in out)
+    _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt("small"), log, forward=tuple_forward)
+    result = ec.convert_rfdetr(tmp_path / "c.pth", _rf_cfg())
+    assert [a.shape for a in result.reference(batch)] == [(1, 100, 4), (1, 100, 2)]
+
+    def dict_forward(x):
+        return {"pred_boxes": _Tensor(arrays[0]), "pred_logits": _Tensor(arrays[1])}
+
+    _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt("small"), log, forward=dict_forward)
+    result = ec.convert_rfdetr(tmp_path / "c.pth", _rf_cfg())
+    assert [a.shape for a in result.reference(batch)] == [(1, 100, 4), (1, 100, 2)]
 
 
 def test_rfdetr_class_count_and_resolution(tmp_path, monkeypatch):
@@ -665,6 +783,71 @@ def test_rfdetr_contract_uses_the_trainer_verifier():
     fp16 = summary(inputs=[("input", [1, 3, 512, 512], "FLOAT")],
                    outputs=[("dets", [1, 300, 4], "FLOAT16"), ("labels", [1, 300, 2], "FLOAT")])
     assert "FLOAT16" in fatal_message(ec.verify_rfdetr_contract, fp16, 512, 1, train_rfdetr)
+
+
+def test_rfdetr_seg_contract_uses_the_seg_trainer_verifier():
+    # rfdetr-seg-support task 7.6 (Req 7.4): input contract + float32 on all
+    # three outputs + train_rfdetr_seg.verify_seg_outputs; the shapes come
+    # back in boxes / logits / masks order whatever the graph order, with the
+    # graph-order names the metadata records.
+    ok = summary(inputs=[("input", [1, 3, 384, 384], "FLOAT")],
+                 outputs=[("dets", [1, 100, 4], "FLOAT"), ("labels", [1, 100, 2], "FLOAT"),
+                          ("masks", [1, 100, 96, 96], "FLOAT")])
+    assert ec.verify_rfdetr_seg_contract(ok, 384, 1, train_rfdetr_seg) == {
+        "input_shape": [1, 3, 384, 384], "output_shapes": [[1, 100, 4], [1, 100, 2], [1, 100, 96, 96]],
+        "output_names": ["dets", "labels", "masks"], "top_k": 100}
+    reordered = summary(inputs=[("input", [1, 3, 384, 384], "FLOAT")],
+                        outputs=[("masks", [1, 100, 96, 96], "FLOAT"), ("labels", [1, 100, 2], "FLOAT"),
+                                 ("dets", [1, 100, 4], "FLOAT")])
+    out = ec.verify_rfdetr_seg_contract(reordered, 384, 1, train_rfdetr_seg)
+    assert out["output_shapes"] == [[1, 100, 4], [1, 100, 2], [1, 100, 96, 96]]
+    assert out["output_names"] == ["masks", "labels", "dets"]
+    # three classes: dets / labels settle the two [1, Q, 4] tensors; nameless is fatal
+    three = summary(inputs=[("input", [1, 3, 384, 384], "FLOAT")],
+                    outputs=[("labels", [1, 100, 4], "FLOAT"), ("dets", [1, 100, 4], "FLOAT"),
+                             ("masks", [1, 100, 96, 96], "FLOAT")])
+    assert ec.verify_rfdetr_seg_contract(three, 384, 3, train_rfdetr_seg)["top_k"] == 100
+    nameless = summary(inputs=[("input", [1, 3, 384, 384], "FLOAT")],
+                       outputs=[("a", [1, 100, 4], "FLOAT"), ("b", [1, 100, 4], "FLOAT"),
+                                ("c", [1, 100, 96, 96], "FLOAT")])
+    msg = fatal_message(ec.verify_rfdetr_seg_contract, nameless, 384, 3, train_rfdetr_seg)
+    assert "ambiguous" in msg and not msg.startswith("FATAL: FATAL")
+    two = summary(inputs=[("input", [1, 3, 384, 384], "FLOAT")],
+                  outputs=[("dets", [1, 100, 4], "FLOAT"), ("labels", [1, 100, 2], "FLOAT")])
+    assert "expected exactly 3 ONNX outputs" in fatal_message(ec.verify_rfdetr_seg_contract, two, 384, 1,
+                                                              train_rfdetr_seg)
+    wrong_grid = summary(inputs=[("input", [1, 3, 384, 384], "FLOAT")],
+                         outputs=[("dets", [1, 100, 4], "FLOAT"), ("labels", [1, 100, 2], "FLOAT"),
+                                  ("masks", [1, 100, 48, 48], "FLOAT")])
+    assert "RESOLUTION 384 // 4" in fatal_message(ec.verify_rfdetr_seg_contract, wrong_grid, 384, 1,
+                                                  train_rfdetr_seg)
+    fp16 = summary(inputs=[("input", [1, 3, 384, 384], "FLOAT")],
+                   outputs=[("dets", [1, 100, 4], "FLOAT"), ("labels", [1, 100, 2], "FLOAT"),
+                            ("masks", [1, 100, 96, 96], "FLOAT16")])
+    assert "masks is FLOAT16" in fatal_message(ec.verify_rfdetr_seg_contract, fp16, 384, 1,
+                                               train_rfdetr_seg)
+    wrong_input = summary(inputs=[("input", [1, 3, 312, 312], "FLOAT")], outputs=ok["outputs"])
+    assert "expected static [1, 3, 384, 384]" in fatal_message(ec.verify_rfdetr_seg_contract, wrong_input,
+                                                                384, 1, train_rfdetr_seg)
+
+
+def test_parity_inputs_normalise_both_detr_archs_and_not_yolo():
+    # rfdetr-seg-support task 7.6 (Req 7.5): the Seg manifest's normalize:
+    # True is matched on the synthetic tensor exactly as for rf_detr; yolo
+    # keeps the plain 0..1 tensor. No bundled image on this host (ultralytics
+    # is absent), so only the synthetic input is produced.
+    seg = ec.parity_inputs("rf_detr_seg", 312)
+    det = ec.parity_inputs("rf_detr", 312)
+    yolo = ec.parity_inputs("yolo", 320)
+    assert list(seg) == ["synthetic"] and seg["synthetic"].shape == (1, 3, 312, 312)
+    assert seg["synthetic"].dtype == np.float32
+    assert np.array_equal(seg["synthetic"], det["synthetic"])
+    assert seg["synthetic"].min() < 0.0  # ImageNet mean / std applied to a [0, 1) draw
+    assert yolo["synthetic"].min() >= 0.0 and yolo["synthetic"].max() < 1.0
+    raw = np.random.default_rng(ec.PARITY_SEED).random((1, 3, 312, 312), dtype=np.float32)
+    mean = np.array(ec.IMAGENET_MEAN, dtype=np.float32).reshape(1, 3, 1, 1)
+    std = np.array(ec.IMAGENET_STD, dtype=np.float32).reshape(1, 3, 1, 1)
+    assert np.allclose(seg["synthetic"], (raw - mean) / std, atol=1e-6)
 
 
 def test_ir_version_is_clamped_only_above_the_floor(tmp_path, monkeypatch):
@@ -1080,6 +1263,23 @@ def _rf_metadata():
                                         parity, SHA, "ef" * 32, (8, 8))
 
 
+def _seg_metadata():
+    cfg = _seg_cfg(num_classes=2, mask_threshold=0.4)
+    result = SimpleNamespace(describe={"size": "small", "model_class": "RFDETRSegSmall", "num_classes": 2,
+                                       "class_names": ["disc", "block"], "resolution": 384},
+                             exporter="rfdetr 1.10.1", torch="2.5.1+cpu")
+    s = summary(inputs=[("input", [1, 3, 384, 384], "FLOAT")],
+                outputs=[("dets", [1, 100, 4], "FLOAT"), ("labels", [1, 100, 3], "FLOAT"),
+                         ("masks", [1, 100, 96, 96], "FLOAT")])
+    contract = ec.verify_rfdetr_seg_contract(s, 384, 2, train_rfdetr_seg)
+    parity = {"onnxruntime 1.30.0": {"image": {"box_max_abs": 1e-6, "score_max_abs": 2e-5,
+                                               "mask_iou_min": 0.998}},
+              "onnxruntime 1.16.3": {"image": {"box_max_abs": 2e-6, "score_max_abs": 3e-5,
+                                               "mask_iou_min": 0.995}}}
+    return ec.build_conversion_metadata(cfg, result, s, contract, SimpleNamespace(ort="1.16.3"),
+                                        parity, SHA, "ab" * 32, (8, 8))
+
+
 PACKAGER_KEYS_YOLO = ("detection_arch", "imgsz", "onnx_output_shape", "num_classes", "class_names",
                       "device_manifest_hints")
 PACKAGER_KEYS_RF = ("detection_arch", "resolution", "onnx_output_shapes", "num_classes",
@@ -1118,6 +1318,52 @@ def test_rfdetr_metadata_carries_the_packager_and_provenance_keys():
     assert meta["class_names"] == []  # the record, not the checkpoint, names the classes
 
 
+# Seg (spec rfdetr-seg-support task 7.6, Req 7.6): the keys packaging's Seg
+# branch and the portal validator read, in the Data-contracts shape.
+PACKAGER_KEYS_SEG = PACKAGER_KEYS_RF + ("rfdetr_seg_size", "model_type", "onnx_output_names",
+                                       "mask_downsample_ratio", "mask_threshold")
+RF_METADATA_KEYS = frozenset(PACKAGER_KEYS_RF + PROVENANCE_KEYS + (
+    "onnx_opset", "ir_version_exported", "torch", "fleet_floor", "checkpoint", "conversion",
+    "rfdetr_size", "model_class", "onnx_input_shape", "logits_slots", "background_slot"))
+
+
+def test_rfdetr_seg_metadata_carries_the_data_contract_keys_and_hints():
+    meta = _seg_metadata()
+    for key in PACKAGER_KEYS_SEG + PROVENANCE_KEYS:
+        assert key in meta, key
+    assert (meta["detection_arch"], meta["model_type"], meta["rfdetr_seg_size"]) == (
+        "rf_detr_seg", "instance_segmentation", "small")
+    assert meta["model_class"] == "RFDETRSegSmall" and meta["resolution"] == 384
+    assert meta["onnx_input_shape"] == [1, 3, 384, 384]
+    assert meta["onnx_output_shapes"] == [[1, 100, 4], [1, 100, 3], [1, 100, 96, 96]]
+    assert meta["onnx_output_names"] == ["dets", "labels", "masks"]
+    assert (meta["logits_slots"], meta["background_slot"], meta["top_k"]) == (3, 2, 100)
+    assert (meta["mask_downsample_ratio"], meta["mask_threshold"]) == (4, 0.4)
+    assert meta["num_classes"] == 2 and meta["class_names"] == ["disc", "block"]
+    assert meta["device_manifest_hints"] == {
+        "layout": "rf_detr", "stage_type": "rf_detr_instance_segmentation", "output_mode": "instance",
+        "network_input": 384, "preserve_aspect": False, "normalize": True, "score_threshold": 0.5,
+        "mask_threshold": 0.4, "top_k": 100}
+    assert meta["parity"]["tolerance"] == ec.PARITY_TOLERANCE["rf_detr_seg"]
+    assert meta["parity"]["max_abs"] == {"box_max_abs": 2e-6, "score_max_abs": 3e-5, "mask_iou_min": 0.995}
+    assert meta["parity"]["runtimes"]["onnxruntime 1.30.0"]["image"]["mask_iou_min"] == 0.998
+    assert "rfdetr_size" not in meta and "imgsz" not in meta and "onnx_output_shape" not in meta
+    assert set(meta) == RF_METADATA_KEYS - {"rfdetr_size"} | {
+        "rfdetr_seg_size", "model_type", "onnx_output_names", "mask_downsample_ratio", "mask_threshold"}
+    json.dumps(meta)
+
+
+def test_rfdetr_detection_metadata_is_unchanged_by_the_seg_branch():
+    # The two-shape branch's document: exactly today's keys and hints.
+    meta = _rf_metadata()
+    assert set(meta) == RF_METADATA_KEYS
+    assert meta["device_manifest_hints"] == {
+        "layout": "rf_detr", "stage_type": "rf_detr_object_detection", "network_input": 512,
+        "preserve_aspect": False, "normalize": True, "score_threshold": 0.5, "top_k": 300}
+    assert meta["parity"]["max_abs"] == {"box_max_abs": 1e-6, "score_max_abs": 2e-5}
+    assert "mask_iou_min" not in json.dumps(meta)
+
+
 @pytest.mark.parametrize("build,arch,size,classes", [
     (_yolo_metadata, "yolo", 640, 4), (_rf_metadata, "rf_detr", 512, 4)])
 def test_the_portal_validator_accepts_what_the_job_writes(build, arch, size, classes):
@@ -1125,6 +1371,19 @@ def test_the_portal_validator_accepts_what_the_job_writes(build, arch, size, cla
     portal_summary = {"outputs": ([[1, 8, 8400]] if arch == "yolo" else [[1, 300, 4], [1, 300, 5]]),
                       "top_k": 300}
     dc.check_metadata_against_record(meta, arch, size, classes, meta["onnx_sha256"], portal_summary)
+
+
+def test_the_portal_validator_accepts_what_the_seg_job_writes():
+    meta = _seg_metadata()
+    for outputs in ([[1, 100, 4], [1, 100, 3], [1, 100, 96, 96]], [[1, 100, 96, 96], [1, 100, 3], [1, 100, 4]]):
+        dc.check_metadata_against_record(meta, "rf_detr_seg", 384, 2, meta["onnx_sha256"],
+                                         {"outputs": outputs, "top_k": 100})
+    with pytest.raises(dc.ConversionValidationError, match="onnx_output_shapes"):
+        dc.check_metadata_against_record(meta, "rf_detr_seg", 384, 2, meta["onnx_sha256"],
+                                         {"outputs": [[1, 300, 4], [1, 300, 3], [1, 300, 96, 96]], "top_k": 300})
+    with pytest.raises(dc.ConversionValidationError, match="top_k 100"):
+        dc.check_metadata_against_record(meta, "rf_detr_seg", 384, 2, meta["onnx_sha256"],
+                                         {"outputs": [[1, 100, 4], [1, 100, 3], [1, 100, 96, 96]], "top_k": 300})
 
 
 def test_write_artifact_leaves_exactly_two_members(tmp_path):
@@ -1229,9 +1488,13 @@ def test_run_passes_the_task_and_mask_threshold_to_the_seg_parity_check(tmp_path
         env_overrides=dict(DETECTION_ARCH="rf_detr_seg", NETWORK_INPUT="384", EXPECTED_NUM_CLASSES="1",
                            TASK="segmentation", MASK_THRESHOLD="0.4", RFDETR_SIZE="small"),
         outputs=outputs, onnx_summary=_seg_summary(6, 1, 384), describe=SEG_DESCRIBE)
-    # one comparison per runtime, both with the record's task and threshold
+    # the Seg contract verifier, then one comparison per runtime, both with the
+    # record's task and threshold
+    assert calls["verifier"] == ["verify_rfdetr_seg_contract"]
     assert calls["compare"] == [{"task": "segmentation", "mask_threshold": 0.4}] * 2
     assert calls["convert_cfg"][0].mask_threshold == 0.4
+    assert (metadata["onnx_output_names"], metadata["mask_downsample_ratio"]) == (["dets", "labels", "masks"], 4)
+    assert metadata["onnx_output_shapes"] == [[1, 6, 4], [1, 6, 2], [1, 6, 96, 96]]
     parity = metadata["parity"]
     assert parity["tolerance"] == ec.PARITY_TOLERANCE["rf_detr_seg"]
     assert set(parity["runtimes"]) == {"onnxruntime 1.30.0", "onnxruntime 1.16.3"}
@@ -1251,9 +1514,23 @@ def test_run_keeps_the_detection_parity_call_and_metadata_free_of_mask_terms(tmp
         monkeypatch, tmp_path,
         env_overrides=dict(DETECTION_ARCH="rf_detr", NETWORK_INPUT="512", EXPECTED_NUM_CLASSES="1"),
         outputs=outputs, onnx_summary=_det_summary(6, 1, 512), describe=DET_DESCRIBE)
+    assert calls["verifier"] == ["verify_rfdetr_contract"]
     assert calls["compare"] == [{"task": "detection", "mask_threshold": 0.5}] * 2
     parity = metadata["parity"]
     assert parity["tolerance"] == ec.PARITY_TOLERANCE["rf_detr"]
     assert parity["max_abs"] == {"box_max_abs": 0.0, "score_max_abs": 0.0}
     assert "mask_iou_min" not in json.dumps(parity)
     assert "mask_threshold" not in metadata
+
+
+def test_run_stops_a_seg_job_at_the_contract_before_any_parity_check(tmp_path, monkeypatch, scipy_stub):
+    # A two-output graph under a Seg record: the Seg verifier's fatal, no
+    # comparison, nothing written to the model dir.
+    outputs = _rf_seg_outputs(q=6, c=1, grid=96, confident=((0, 0, 0.9),))
+    with pytest.raises(SystemExit) as exc:
+        _run_job(monkeypatch, tmp_path,
+                 env_overrides=dict(DETECTION_ARCH="rf_detr_seg", NETWORK_INPUT="384",
+                                    EXPECTED_NUM_CLASSES="1", TASK="segmentation"),
+                 outputs=outputs, onnx_summary=_det_summary(6, 1, 384), describe=SEG_DESCRIBE)
+    assert "expected exactly 3 ONNX outputs" in str(exc.value.code)
+    assert not (tmp_path / "model").exists()
