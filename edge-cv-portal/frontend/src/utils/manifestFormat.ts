@@ -94,3 +94,13 @@ export const INSTANCE_SEGMENTATION_MODEL_TYPE = 'instance_segmentation';
 export function isDetectionModelType(modelType: unknown): boolean {
   return modelType === OBJECT_DETECTION_MODEL_TYPE || modelType === INSTANCE_SEGMENTATION_MODEL_TYPE;
 }
+
+/**
+ * The LFV (marketplace) semantic-segmentation model types — the ones the
+ * "Segmentation head only" toggle, the Manifest Transformer's `segmentation`
+ * task and the seghead reset apply to. Spelled out rather than tested with
+ * `includes('segmentation')`, which `instance_segmentation` would also match.
+ */
+export function isLfvSegmentationType(modelType: unknown): boolean {
+  return modelType === 'segmentation' || modelType === 'segmentation-robust';
+}

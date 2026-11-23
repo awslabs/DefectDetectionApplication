@@ -20,12 +20,15 @@ import {
   StatusIndicator,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
-import type { BaseModelRef, DetectionArch, DetectionBaseModels } from '../services/api';
+import type { BaseModelRef, DetectionArch, DetectionBaseModels, OutputMode } from '../services/api';
+import { getConfig } from '../config';
 import { useUsecase } from '../contexts/UsecaseContext';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import {
   classifyManifestFormat,
+  INSTANCE_SEGMENTATION_MODEL_TYPE,
   isDetectionModelType,
+  isLfvSegmentationType,
   ManifestFormat,
 } from '../utils/manifestFormat';
 import {
@@ -34,18 +37,25 @@ import {
   MODEL_SOURCE_OPTIONS,
   MODEL_SOURCE_RF_DETR,
   MODEL_SOURCE_YOLO,
+  detectionArchFor,
   detectionArchForSource,
+  isInstanceSegmentationTaskType,
   labelingJobCoversFolder,
   modelSourceForLabelingTask,
   modelSourceForType,
-  modelTypeOptionsForSource,
   normalizeS3Folder,
+  visibleModelTypeOptionsForSource,
 } from '../utils/trainingSources';
 import {
   DetectionFormParams,
+  RFDETR_SEG_INPUT_BLOCK,
+  RFDETR_SEG_RESOLUTION_BOUNDS,
+  RFDETR_SEG_SIZES,
+  RFDETR_SEG_SIZE_ORDER,
   RFDETR_SIZES,
   RFDETR_SIZE_ORDER,
   YOLO_PARAM_DEFAULTS,
+  applyRfDetrSegSize,
   applyRfDetrSize,
   baseModelClassNames,
   baseModelSelectOptions,
@@ -54,16 +64,19 @@ import {
   classMismatchWarning,
   classNamesFromManifestEntry,
   defaultDetectionInstanceType,
+  defaultInstanceTypeForSegSize,
   detectionParamDefaults,
   findBaseModelOption,
   findBaseModelRecord,
   groupDetectionBaseModels,
+  isRfDetrSegSize,
   isRfDetrSize,
   parseBaseModelOptionValue,
   parseClassNamesInput,
   paramsFromBaseRecord,
   publishedBaseModelRef,
   rfdetrNativeResolution,
+  rfdetrSegNativeResolution,
   validateDetectionParams,
 } from '../utils/detectionBaseModels';
 
@@ -86,6 +99,40 @@ const RFDETR_SIZE_OPTIONS: SelectProps.Option[] = RFDETR_SIZE_ORDER.map(size => 
     ? 'Larger backbone; ml.g5.xlarge recommended.'
     : 'Fits the documented ml.g4dn.xlarge (T4) configuration.',
 }));
+// RF-DETR-Seg sizes (rfdetr-seg-support Req 12.2; all six, D4). The native
+// resolution in the label; the per-size instance default (Req 5.3) in the
+// description.
+const RFDETR_SEG_SIZE_OPTIONS: SelectProps.Option[] = RFDETR_SEG_SIZE_ORDER.map(size => ({
+  label: `${size} (native ${RFDETR_SEG_SIZES[size]}px)${size === 'small' ? ' — recommended' : ''}`,
+  value: size,
+  description: defaultInstanceTypeForSegSize(size) === 'ml.g5.xlarge'
+    ? 'Larger backbone; ml.g5.xlarge recommended.'
+    : 'Fits the documented ml.g4dn.xlarge (T4) configuration.',
+}));
+// How a Seg model's masks are packaged for the device (rfdetr-seg-support
+// D1): sent as the request's top-level `output_mode`.
+const OUTPUT_MODE_OPTIONS: SelectProps.Option[] = [
+  {
+    label: 'instance',
+    value: 'instance',
+    description: 'One mask per detected object, beside its box and class (Detection_List with masks).',
+  },
+  {
+    label: 'semantic overlay',
+    value: 'semantic',
+    description: 'All instances merged into one class-coloured mask over the frame.',
+  },
+];
+// Client-side mirror of the backend's manifest-kind checks for the Seg form
+// (rfdetr-seg-support Req 3.5): never "must be transformed".
+const SEG_NEEDS_INSTANCE_BOXES_ONLY =
+  'RF-DETR-Seg needs an instance-segmentation manifest (one outline per object); this manifest has boxes only';
+const SEG_NEEDS_INSTANCE_SEMANTIC =
+  'RF-DETR-Seg needs an instance-segmentation manifest (one outline per object); this manifest is a semantic or classification manifest';
+const DETECTION_GOT_INSTANCE_MANIFEST =
+  'This is an instance-segmentation manifest; choose Instance Segmentation (RF-DETR-Seg)';
+const LFV_GOT_INSTANCE_MANIFEST =
+  'This is an instance-segmentation manifest — select the RF-DETR model source with the Instance Segmentation model type to train from it';
 
 // Detection jobs run on a plain SageMaker PyTorch GPU DLC, so any GPU instance
 // works (the marketplace list below is constrained by the LFV algorithm).
@@ -139,6 +186,8 @@ export default function CreateTraining() {
   const [error, setError] = useState<string | null>(null);
   const [manifestFormat, setManifestFormat] = useState<ManifestFormat | null>(null);
   const [detectionParams, setDetectionParams] = useState<DetectionFormParams>(YOLO_PARAM_DEFAULTS);
+  // RF-DETR-Seg only (rfdetr-seg-support Req 5.5): how the masks are packaged.
+  const [outputMode, setOutputMode] = useState<OutputMode>('instance');
   // Base model (Req 6): null = "the published checkpoint the form names"
   // (YOLO base weights / RF-DETR size); otherwise a prior training job or an
   // imported fine-tunable checkpoint in this use case.
@@ -160,8 +209,9 @@ export default function CreateTraining() {
   const [transformError, setTransformError] = useState<string | null>(null);
   const [transformedManifestUri, setTransformedManifestUri] = useState<string | null>(null);
 
-  // Model types the selected source can train (LFV four, or Object Detection).
-  const modelTypeOptions = modelTypeOptionsForSource(modelSource.value);
+  // Model types the selected source can train (LFV four, Object Detection, or
+  // for RF-DETR also Instance Segmentation unless the Seg switch is off).
+  const modelTypeOptions = visibleModelTypeOptionsForSource(modelSource.value, getConfig());
 
   // Instance types supported by the AWS Marketplace "Computer Vision Defect
   // Detection" training algorithm. This MUST match the algorithm's
@@ -183,32 +233,50 @@ export default function CreateTraining() {
 
   const isDetection = isDetectionModelType(modelType.value);
   const activeInstanceTypeOptions = isDetection ? DETECTION_INSTANCE_TYPE_OPTIONS : instanceTypeOptions;
-  // Detector family the selected source trains; only meaningful when
-  // isDetection (both detection sources force model_type=object_detection).
-  const detectionArch: DetectionArch = detectionArchForSource(modelSource.value) ?? 'yolo';
+  // Detector family the selected source + model type trains (the request's
+  // `detection_arch`); only meaningful when isDetection. The RF-DETR source
+  // trains rf_detr for Object Detection and rf_detr_seg for Instance
+  // Segmentation (rfdetr-seg-support Req 12.2).
+  const detectionArch: DetectionArch = detectionArchFor(modelSource.value, modelType.value) ?? 'yolo';
   const isRfDetr = isDetection && detectionArch === 'rf_detr';
+  const isRfDetrSeg = isDetection && detectionArch === 'rf_detr_seg';
+  /** The size the per-arch instance default keys on: the Seg size for a Seg form, the RF-DETR size otherwise. */
+  const archSize = (arch: DetectionArch, p: DetectionFormParams) =>
+    arch === 'rf_detr_seg' ? p.rfdetrSegSize : p.rfdetrSize;
 
   /**
    * Select a model type and apply the defaults that go with it: max runtime,
-   * the seghead toggle (segmentation only), and — because the marketplace
+   * the seghead toggle (LFV segmentation only), and — because the marketplace
    * algorithm and the detection DLC accept different instance lists — the
-   * instance type when crossing the detection boundary.
+   * instance type when crossing the detection boundary. Crossing between
+   * detector families (Object Detection <-> Instance Segmentation under the
+   * RF-DETR source, or entering detection) resets Detection Settings to the
+   * arch's defaults and drops the base model: a detection checkpoint cannot
+   * seed a Seg run, and the rf_detr size / resolution are not Seg values.
+   * `source` is the (possibly just chosen) model source the type belongs to.
    */
-  const applyModelType = (option: SelectProps.Option, arch: DetectionArch = detectionArch) => {
+  const applyModelType = (option: SelectProps.Option, source: unknown = modelSource.value) => {
     const nextValue = option.value as string | undefined;
     const wasDetection = isDetection;
     const nextIsDetection = isDetectionModelType(nextValue);
+    const nextArch: DetectionArch = detectionArchFor(source, nextValue) ?? 'yolo';
     setModelType(option);
-    const isSegmentation = !!nextValue?.includes('segmentation');
+    const isLfvSegmentation = isLfvSegmentationType(nextValue);
     const isRobust = !!nextValue?.includes('robust');
     setMaxRuntime(
       nextIsDetection ? DETECTION_DEFAULT_MAX_RUNTIME
-        : isRobust ? '86400' : isSegmentation ? '7200' : '3600'
+        : isRobust ? '86400' : isLfvSegmentation ? '7200' : '3600'
     );
-    if (!isSegmentation) setSegheadOnly(false);
+    if (!isLfvSegmentation) setSegheadOnly(false);
+    let nextParams = detectionParams;
+    if (nextIsDetection && (!wasDetection || nextArch !== detectionArch)) {
+      nextParams = detectionParamDefaults(nextArch);
+      setDetectionParams(nextParams);
+      setBaseModel(null);
+    }
     if (nextIsDetection && !wasDetection) {
       instanceTouched.current = false;
-      setInstanceType(detectionInstanceOption(defaultDetectionInstanceType(arch, detectionParams.rfdetrSize)));
+      setInstanceType(detectionInstanceOption(defaultDetectionInstanceType(nextArch, archSize(nextArch, nextParams))));
     } else if (!nextIsDetection && wasDetection) {
       instanceTouched.current = false;
       setInstanceType(instanceTypeOptions[0]);
@@ -228,9 +296,9 @@ export default function CreateTraining() {
       setDetectionParams(detectionParamDefaults(nextArch));
       setBaseModel(null);
     }
-    const allowed = modelTypeOptionsForSource(option.value);
+    const allowed = visibleModelTypeOptionsForSource(option.value, getConfig());
     if (!allowed.some(o => o.value === modelType.value)) {
-      applyModelType(allowed[0], nextArch ?? 'yolo');
+      applyModelType(allowed[0], option.value);
     }
   };
 
@@ -256,13 +324,13 @@ export default function CreateTraining() {
   }, [useCaseId?.value, isDetection, detectionArch]);
 
   // Instance default nudge (Req 3.5): ml.g4dn.xlarge for YOLO and RF-DETR
-  // nano/small; ml.g5.xlarge for RF-DETR medium/large — until the user picks
-  // an instance type themselves.
+  // nano/small; ml.g5.xlarge for RF-DETR medium/large and RF-DETR-Seg
+  // large/xlarge/2xlarge — until the user picks an instance type themselves.
   useEffect(() => {
     if (!isDetection || instanceTouched.current) return;
-    const wanted = defaultDetectionInstanceType(detectionArch, detectionParams.rfdetrSize);
+    const wanted = defaultDetectionInstanceType(detectionArch, archSize(detectionArch, detectionParams));
     setInstanceType(prev => (prev.value === wanted ? prev : detectionInstanceOption(wanted)));
-  }, [isDetection, detectionArch, detectionParams.rfdetrSize]);
+  }, [isDetection, detectionArch, detectionParams.rfdetrSize, detectionParams.rfdetrSegSize]);
 
   const baseModelOptions = baseModelGroups
     ? baseModelSelectOptions(baseModelGroups)
@@ -285,7 +353,9 @@ export default function CreateTraining() {
       setDetectionParams(p =>
         detectionArch === 'rf_detr'
           ? (isRfDetrSize(ref.ref) ? applyRfDetrSize(p, ref.ref) : p)
-          : { ...p, baseWeights: ref.ref }
+          : detectionArch === 'rf_detr_seg'
+            ? (isRfDetrSegSize(ref.ref) ? applyRfDetrSegSize(p, ref.ref) : p)
+            : { ...p, baseWeights: ref.ref }
       );
       return;
     }
@@ -314,7 +384,8 @@ export default function CreateTraining() {
           );
           if (sourceOption) setModelSource(sourceOption);
           setModelType(typeOption);
-          const clonedArch = detectionArchForSource(sourceOption?.value);
+          // The pair names the arch: a cloned Seg job takes the Seg defaults.
+          const clonedArch = detectionArchFor(sourceOption?.value, cloneFrom.model_type);
           if (clonedArch) setDetectionParams(detectionParamDefaults(clonedArch));
         }
       }
@@ -451,14 +522,19 @@ export default function CreateTraining() {
           const completedJobs: any[] = (labelingData.jobs || [])
             .filter((job: any) => job.output_manifest_s3_uri); // Only include jobs with output manifest
           const jobOptions = completedJobs.map((job: any) => {
-            // Bounding-box jobs never need the DDA transform; for detection
-            // the "Transformed" badge would be noise (and wrong).
+            // Bounding-box and instance-segmentation jobs never need the DDA
+            // transform; for detection the "Transformed" badge would be noise
+            // (and wrong).
             const isBboxJob = String(job.task_type || '').toLowerCase().includes('detection');
-            const suffix = isDetection || isBboxJob
-              ? (isBboxJob ? ' • Bounding boxes' : '')
+            const isInstanceJob = isInstanceSegmentationTaskType(job.task_type);
+            const isDetectionFamilyJob = isBboxJob || isInstanceJob;
+            const suffix = isDetection || isDetectionFamilyJob
+              ? (isBboxJob ? ' • Bounding boxes' : isInstanceJob ? ' • Instance masks' : '')
               : (job.is_transformed ? ' ✓ Transformed' : ' ⚠️ Not Transformed');
-            const desc = isDetection || isBboxJob
-              ? (isBboxJob ? ' • Object detection labels' : ` • ${job.task_type || 'labels'}`)
+            const desc = isDetection || isDetectionFamilyJob
+              ? (isBboxJob ? ' • Object detection labels'
+                : isInstanceJob ? ' • Instance segmentation labels'
+                  : ` • ${job.task_type || 'labels'}`)
               : (job.is_transformed ? ' • DDA-compatible' : ' • Requires transformation');
             const coversFolder = dataPath && labelingJobCoversFolder(job, dataPath);
             return {
@@ -482,6 +558,14 @@ export default function CreateTraining() {
               if (modelSource.value !== wantedSource) {
                 const sourceOption = MODEL_SOURCE_OPTIONS.find(o => o.value === wantedSource);
                 if (sourceOption) applyModelSource(sourceOption);
+              }
+              // An InstanceSegmentation job trains only under the RF-DETR
+              // source's Instance Segmentation type (the source alone defaults
+              // to Object Detection); applied only while the type is offered.
+              if (isInstanceSegmentationTaskType(job.task_type)) {
+                const segOption = visibleModelTypeOptionsForSource(wantedSource, getConfig())
+                  .find(o => o.value === INSTANCE_SEGMENTATION_MODEL_TYPE);
+                if (segOption && modelType.value !== segOption.value) applyModelType(segOption, wantedSource);
               }
               setDataPathMatch('matched');
               await handleLabelingJobSelect(jobOptions[idx]);
@@ -520,7 +604,7 @@ export default function CreateTraining() {
       const result = await apiService.transformManifest({
         usecase_id: useCaseId.value as string,
         source_manifest_uri: manifestUri,
-        task_type: (modelType.value as string)?.includes('segmentation') ? 'segmentation' : 'classification',
+        task_type: isLfvSegmentationType(modelType.value) ? 'segmentation' : 'classification',
       });
       
       setTransformedManifestUri(result.transformed_manifest_uri);
@@ -593,6 +677,8 @@ export default function CreateTraining() {
           base_model: detectionFields.base_model,
           ...(detectionFields.class_names && { class_names: detectionFields.class_names }),
         }),
+        // RF-DETR-Seg only (Req 5.5): how the masks are packaged.
+        ...(isRfDetrSeg && { output_mode: outputMode }),
       });
 
       navigate('/training');
@@ -631,12 +717,25 @@ export default function CreateTraining() {
     if (!instanceType) errors.push('Instance Type is required');
     if (manifestFormat === 'ground-truth' && !transformedManifestUri) errors.push('Manifest must be transformed from Ground Truth format');
     // Model type / manifest kind must agree: a detector cannot learn from
-    // anomaly labels, and the LFV algorithm cannot read bounding boxes.
-    if (isDetection && (manifestFormat === 'dda' || manifestFormat === 'ground-truth')) {
+    // anomaly labels, the LFV algorithm cannot read bounding boxes, and
+    // RF-DETR-Seg needs instance masks (rfdetr-seg-support Req 3.5; an
+    // instance manifest is never "transformed").
+    if (isRfDetrSeg && (manifestFormat === 'dda' || manifestFormat === 'ground-truth')) {
+      errors.push(SEG_NEEDS_INSTANCE_SEMANTIC);
+    } else if (isDetection && (manifestFormat === 'dda' || manifestFormat === 'ground-truth')) {
       errors.push('Object Detection requires a bounding-box manifest (this manifest has classification/segmentation labels)');
+    }
+    if (isRfDetrSeg && manifestFormat === 'detection') {
+      errors.push(SEG_NEEDS_INSTANCE_BOXES_ONLY);
     }
     if (!isDetection && manifestFormat === 'detection') {
       errors.push('This is a bounding-box manifest — select the YOLO or RF-DETR model source to train from it');
+    }
+    if (isDetection && !isRfDetrSeg && manifestFormat === 'instance') {
+      errors.push(DETECTION_GOT_INSTANCE_MANIFEST);
+    }
+    if (!isDetection && manifestFormat === 'instance') {
+      errors.push(LFV_GOT_INSTANCE_MANIFEST);
     }
     if (isDetection) {
       errors.push(...validateDetectionParams(detectionArch, detectionParams));
@@ -695,7 +794,15 @@ export default function CreateTraining() {
 
             {isDetection ? (
               <Alert type="info">
-                {isRfDetr ? (
+                {isRfDetrSeg ? (
+                  <>
+                    Instance Segmentation fine-tunes an RF-DETR-Seg model (DINOv2 backbone, NMS-free, with a
+                    mask head) on an instance-segmentation manifest (the output of an Instance Segmentation
+                    labeling job) and exports ONNX for the DDA edge runtime. The model trains on a square resize
+                    with ImageNet normalisation and is served exactly the same way; each kept detection carries a
+                    binary mask. It needs no compilation step.
+                  </>
+                ) : isRfDetr ? (
                   <>
                     Object Detection fine-tunes an RF-DETR detector (DINOv2 backbone, NMS-free) on a
                     bounding-box manifest (the output of a bounding-box labeling job) and exports ONNX for
@@ -730,7 +837,23 @@ export default function CreateTraining() {
               />
             </FormField>
 
-            {isDetection ? (
+            {isRfDetrSeg ? (
+              <Alert type="info">
+                <Box variant="h4">Manifest Requirements</Box>
+                <Box variant="p">
+                  Instance Segmentation trains from an instance-segmentation manifest with these attributes:
+                </Box>
+                <ul style={{ marginLeft: '20px' }}>
+                  <li><code>source-ref</code> - Image S3 URI</li>
+                  <li><code>instance-segmentation</code> - One outline per object (<code>annotations</code> with a box and an <code>rle</code> mask, <code>image_size</code>)</li>
+                  <li><code>instance-segmentation-metadata</code> - <code>class-map</code> naming each class id</li>
+                </ul>
+                <Box variant="p">
+                  The output of an Instance Segmentation labeling job is accepted as-is; a bounding-box or semantic
+                  manifest cannot be used, and no transform is offered.
+                </Box>
+              </Alert>
+            ) : isDetection ? (
               <Alert type="info">
                 <Box variant="h4">Manifest Requirements</Box>
                 <Box variant="p">
@@ -813,7 +936,7 @@ export default function CreateTraining() {
                 modelSource.value === MODEL_SOURCE_YOLO
                   ? 'YOLO trains bounding-box object detectors'
                   : modelSource.value === MODEL_SOURCE_RF_DETR
-                    ? 'RF-DETR trains bounding-box object detectors'
+                    ? 'RF-DETR trains bounding-box object detectors and instance-segmentation models (masks + boxes)'
                     : 'Choose between classification or segmentation'
               }
               stretch
@@ -832,9 +955,11 @@ export default function CreateTraining() {
                   <FormField
                     label="Base model"
                     description={
-                      isRfDetr
-                        ? 'Weights the run starts from: a published RF-DETR COCO checkpoint, one of your completed RF-DETR detectors in this use case, or an imported fine-tunable checkpoint.'
-                        : 'Weights the run starts from: a published YOLO COCO checkpoint, one of your completed YOLO detectors in this use case, or an imported fine-tunable checkpoint.'
+                      isRfDetrSeg
+                        ? 'Weights the run starts from: a published RF-DETR-Seg COCO checkpoint, one of your completed RF-DETR-Seg models in this use case, or an imported fine-tunable RF-DETR-Seg checkpoint.'
+                        : isRfDetr
+                          ? 'Weights the run starts from: a published RF-DETR COCO checkpoint, one of your completed RF-DETR detectors in this use case, or an imported fine-tunable checkpoint.'
+                          : 'Weights the run starts from: a published YOLO COCO checkpoint, one of your completed YOLO detectors in this use case, or an imported fine-tunable checkpoint.'
                     }
                     stretch
                   >
@@ -853,7 +978,43 @@ export default function CreateTraining() {
                     <Alert type="warning">{classMismatchWarning(baseClasses)}</Alert>
                   )}
                   <ColumnLayout columns={2}>
-                    {isRfDetr ? (
+                    {isRfDetrSeg ? (
+                      <>
+                        <FormField
+                          label="Size"
+                          description={
+                            baseModel
+                              ? 'Fixed by the selected base model (its checkpoint is this size).'
+                              : 'RF-DETR-Seg checkpoint family (all six sizes). Larger sizes are more accurate and slower on device.'
+                          }
+                        >
+                          <Select
+                            selectedOption={
+                              RFDETR_SEG_SIZE_OPTIONS.find(o => o.value === detectionParams.rfdetrSegSize) ??
+                              { label: detectionParams.rfdetrSegSize, value: detectionParams.rfdetrSegSize }
+                            }
+                            onChange={({ detail }) => {
+                              const size = detail.selectedOption.value;
+                              if (isRfDetrSegSize(size)) setDetectionParams(p => applyRfDetrSegSize(p, size));
+                            }}
+                            options={RFDETR_SEG_SIZE_OPTIONS}
+                            disabled={!!baseModel}
+                            selectedAriaLabel="Selected"
+                          />
+                        </FormField>
+                        <FormField
+                          label="Resolution"
+                          description={`Square input the model trains and exports at; multiple of ${RFDETR_SEG_INPUT_BLOCK[detectionParams.rfdetrSegSize]}, ${RFDETR_SEG_RESOLUTION_BOUNDS.min}–${RFDETR_SEG_RESOLUTION_BOUNDS.max}. Native for ${detectionParams.rfdetrSegSize}: ${rfdetrSegNativeResolution(detectionParams.rfdetrSegSize)}.`}
+                        >
+                          <Input
+                            type="number"
+                            step={RFDETR_SEG_INPUT_BLOCK[detectionParams.rfdetrSegSize]}
+                            value={detectionParams.resolution}
+                            onChange={({ detail }) => setDetectionParams(p => ({ ...p, resolution: detail.value }))}
+                          />
+                        </FormField>
+                      </>
+                    ) : isRfDetr ? (
                       <>
                         <FormField
                           label="Size"
@@ -921,7 +1082,7 @@ export default function CreateTraining() {
                         onChange={({ detail }) => setDetectionParams(p => ({ ...p, batch: detail.value }))}
                       />
                     </FormField>
-                    {isRfDetr && (
+                    {(isRfDetr || isRfDetrSeg) && (
                       <>
                         <FormField
                           label="Gradient accumulation"
@@ -958,7 +1119,30 @@ export default function CreateTraining() {
                         onChange={({ detail }) => setDetectionParams(p => ({ ...p, scoreThreshold: detail.value }))}
                       />
                     </FormField>
-                    {!isRfDetr && (
+                    {isRfDetrSeg && (
+                      <>
+                        <FormField label="Mask threshold" description="Mask logit cut-off that binarises each kept detection's mask on device (0–1).">
+                          <Input
+                            type="number"
+                            step={0.05}
+                            value={detectionParams.maskThreshold}
+                            onChange={({ detail }) => setDetectionParams(p => ({ ...p, maskThreshold: detail.value }))}
+                          />
+                        </FormField>
+                        <FormField
+                          label="Output"
+                          description="How the masks are packaged for the device: one mask per object, or one semantic overlay. Can be overridden when packaging."
+                        >
+                          <Select
+                            selectedOption={OUTPUT_MODE_OPTIONS.find(o => o.value === outputMode) ?? OUTPUT_MODE_OPTIONS[0]}
+                            onChange={({ detail }) => setOutputMode((detail.selectedOption.value as OutputMode) ?? 'instance')}
+                            options={OUTPUT_MODE_OPTIONS}
+                            selectedAriaLabel="Selected"
+                          />
+                        </FormField>
+                      </>
+                    )}
+                    {detectionArch === 'yolo' && (
                       <FormField label="IoU threshold" description="Non-max-suppression overlap threshold (0–1).">
                         <Input
                           type="number"
@@ -981,9 +1165,11 @@ export default function CreateTraining() {
                     />
                   </FormField>
                   <Box variant="small" color="text-status-inactive">
-                    {isRfDetr
-                      ? 'The trained model is served with a square resize and ImageNet normalisation to match training; decoding is set-based (top-k, no NMS).'
-                      : 'The trained model is served with aspect-preserving (letterbox) preprocessing to match training.'}
+                    {isRfDetrSeg
+                      ? 'The trained model is served with a square resize and ImageNet normalisation to match training; decoding is set-based (top-k, no NMS) and each kept detection carries a binary mask.'
+                      : isRfDetr
+                        ? 'The trained model is served with a square resize and ImageNet normalisation to match training; decoding is set-based (top-k, no NMS).'
+                        : 'The trained model is served with aspect-preserving (letterbox) preprocessing to match training.'}
                   </Box>
                 </SpaceBetween>
               </Container>
@@ -998,7 +1184,7 @@ export default function CreateTraining() {
               </Alert>
             )}
 
-            {modelType.value?.includes('segmentation') && (
+            {isLfvSegmentationType(modelType.value) && (
               <FormField
                 label={
                   <SpaceBetween direction="horizontal" size="xs">
@@ -1135,9 +1321,11 @@ export default function CreateTraining() {
 
             {manifestFormat === 'dda' && (
               <Alert type={isDetection ? 'error' : 'success'} dismissible onDismiss={() => setManifestFormat(null)}>
-                {isDetection
-                  ? 'This manifest has classification/segmentation labels (anomaly-label). Object Detection needs a bounding-box manifest — pick a bounding-box labeling job or switch the model type.'
-                  : '✓ Manifest is in DDA format and ready for training'}
+                {isRfDetrSeg
+                  ? SEG_NEEDS_INSTANCE_SEMANTIC
+                  : isDetection
+                    ? 'This manifest has classification/segmentation labels (anomaly-label). Object Detection needs a bounding-box manifest — pick a bounding-box labeling job or switch the model type.'
+                    : '✓ Manifest is in DDA format and ready for training'}
                 {!isDetection && transformedManifestUri && (
                   <Box variant="small" color="text-status-success" margin={{ top: 'xs' }}>
                     Using transformed manifest: {transformedManifestUri}
@@ -1147,10 +1335,21 @@ export default function CreateTraining() {
             )}
 
             {manifestFormat === 'detection' && (
-              <Alert type={isDetection ? 'success' : 'error'} dismissible onDismiss={() => setManifestFormat(null)}>
-                {isDetection
-                  ? `✓ Bounding-box manifest detected — ready for Object Detection training (no transform needed)${manifestClassNames.length > 0 ? `. Classes: ${manifestClassNames.join(', ')}` : ''}`
-                  : 'This is a bounding-box manifest. Select the YOLO or RF-DETR model source to train from it.'}
+              <Alert type={isDetection && !isRfDetrSeg ? 'success' : 'error'} dismissible onDismiss={() => setManifestFormat(null)}>
+                {isRfDetrSeg
+                  ? SEG_NEEDS_INSTANCE_BOXES_ONLY
+                  : isDetection
+                    ? `✓ Bounding-box manifest detected — ready for Object Detection training (no transform needed)${manifestClassNames.length > 0 ? `. Classes: ${manifestClassNames.join(', ')}` : ''}`
+                    : 'This is a bounding-box manifest. Select the YOLO or RF-DETR model source to train from it.'}
+              </Alert>
+            )}
+            {manifestFormat === 'instance' && (
+              <Alert type={isRfDetrSeg ? 'success' : 'error'} dismissible onDismiss={() => setManifestFormat(null)}>
+                {isRfDetrSeg
+                  ? `✓ Instance-segmentation manifest detected — ready for RF-DETR-Seg training (no transform needed)${manifestClassNames.length > 0 ? `. Classes: ${manifestClassNames.join(', ')}` : ''}`
+                  : isDetection
+                    ? DETECTION_GOT_INSTANCE_MANIFEST
+                    : LFV_GOT_INSTANCE_MANIFEST}
               </Alert>
             )}
           </SpaceBetween>
