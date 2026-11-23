@@ -36,6 +36,7 @@ import {
   detectorExportImage as resolveDetectorExportImage,
   groundedSamWorkerEnabled,
   portalRegistryEnforced,
+  rfDetrSegEnabled,
 } from './context-helpers';
 import { PYTHON_CONTAINER_ASSET_EXCLUDES } from './container-asset-excludes';
 
@@ -803,6 +804,26 @@ export class ComputeStack extends cdk.Stack {
         x86_64_nvidia: '1.0.47',
       }),
     };
+    // The RF-DETR-Seg Seg_Switch (rfdetr-seg-support Requirement 15.1,
+    // design DD7, owner decision O12 b): the feature's ONE configuration-only
+    // off switch, default ON. `-c enableRfDetrSeg=false` is the only value
+    // that turns it off (context-helpers rfDetrSegEnabled, the
+    // groundedSamWorkerEnabled rule). Spread into exactly the three handlers
+    // that read it at request time — TrainingHandler (POST /training with
+    // model_type instance_segmentation), ModelConverterHandler (inspect /
+    // convert) and PackagingHandler (the output_mode override) — never into
+    // the shared lambdaEnvironment, and never into the MCP Lambda: the MCP
+    // tools invoke those handlers and relay their 403 (Requirement 15.2). The
+    // same value is published as the RfDetrSegEnabled stack output, which
+    // deploy-frontend.sh copies into config.json rfDetrSegEnabled so the
+    // frontend hides the Seg pickers and tiles when the backend refuses them.
+    const rfDetrSegEnvironment = {
+      PORTAL_RFDETR_SEG_ENABLED: rfDetrSegEnabled(
+        this.node.tryGetContext('enableRfDetrSeg'),
+      )
+        ? 'true'
+        : 'false',
+    };
 
     // Per-model Model_Image_Limit overrides for `llm:` auto-label requests
     // (llm-autolabel-prompt-tuning Req 7.1): a JSON object keyed by model
@@ -1563,6 +1584,7 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('Training'),
       environment: {
         ...lambdaEnvironment,
+        ...rfDetrSegEnvironment,
         CODE_VERSION: '2026-09-13-v1', // Force update - object detection (YOLO) training path
         DETECTION_TRAINING_IMAGE: detectionTrainingImage,
       },
@@ -1594,6 +1616,7 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('Packaging'),
       environment: {
         ...lambdaEnvironment,
+        ...rfDetrSegEnvironment,
         STORAGE_WARNING_THRESHOLD: '6442450944', // 6GB in bytes
         STORAGE_CRITICAL_THRESHOLD: '7516192768', // 7GB in bytes
         ENABLE_STREAMING_PROCESSING: 'true',
@@ -1815,6 +1838,7 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         ...uploadCorsEnvironment,
+        ...rfDetrSegEnvironment,
         MODEL_IMPORT_FUNCTION_NAME: modelImportHandler.functionName,
         CODE_VERSION: '2025-01-10-converter',
         // detector-checkpoint-import: the pinned Export_Image; '' disables
@@ -4215,6 +4239,16 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     new cdk.CfnOutput(this, 'ApiId', {
       value: apiGatewayStack.api.restApiId,
       description: 'API Gateway ID',
+    });
+    // The Seg_Switch as deployed (rfdetr-seg-support Requirement 15.1):
+    // deploy-frontend.sh reads it with describe-stacks on this stack and
+    // writes config.json rfDetrSegEnabled from it. Deliberately no
+    // exportName — no other stack imports it (mcp-stack.test.ts counts the
+    // exported-and-imported ComputeStack outputs).
+    new cdk.CfnOutput(this, 'RfDetrSegEnabled', {
+      value: rfDetrSegEnvironment.PORTAL_RFDETR_SEG_ENABLED,
+      description:
+        'RF-DETR-Seg Seg_Switch (enableRfDetrSeg context): true unless an explicit false',
     });
 
     new cdk.CfnOutput(this, 'TrainingAlertTopicArn', {

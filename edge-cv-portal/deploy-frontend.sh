@@ -92,6 +92,16 @@ ASSISTANT_API_URL=$(aws cloudformation describe-stacks \
   --output text 2>/dev/null || echo "")
 if [ "$ASSISTANT_API_URL" = "None" ]; then ASSISTANT_API_URL=""; fi
 ASSISTANT_API_URL="${ASSISTANT_API_URL%/}"
+# The RF-DETR-Seg Seg_Switch as deployed (rfdetr-seg-support Requirement
+# 15.1): the RfDetrSegEnabled output lives on EdgeCVPortalComputeStack, the
+# stack the ApiUrl read above queries — 'true' or 'false'. Empty when the
+# deployed compute stack predates the output, in which case the config key
+# is dropped and the frontend applies its absent-means-on default.
+RFDETR_SEG_ENABLED=$(aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalComputeStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`RfDetrSegEnabled`].OutputValue' \
+  --output text 2>/dev/null || echo "")
+if [ "$RFDETR_SEG_ENABLED" = "None" ]; then RFDETR_SEG_ENABLED=""; fi
 
 if [ -n "$AUTH_CONFIG" ] && [ -n "$API_URL" ] && [ "$AUTH_CONFIG" != "None" ] && [ "$API_URL" != "None" ]; then
   USER_POOL_ID=$(echo "$AUTH_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
@@ -113,7 +123,7 @@ if [ -n "$AUTH_CONFIG" ] && [ -n "$API_URL" ] && [ "$AUTH_CONFIG" != "None" ] &&
     echo '{}' > public/config.json
   fi
   API_URL="$API_URL" USER_POOL_ID="$USER_POOL_ID" CLIENT_ID="$CLIENT_ID" REGION="$REGION" \
-  ASSISTANT_API_URL="$ASSISTANT_API_URL" python3 -c "
+  ASSISTANT_API_URL="$ASSISTANT_API_URL" RFDETR_SEG_ENABLED="$RFDETR_SEG_ENABLED" python3 -c "
 import json, os
 with open('public/config.json') as f:
     existing = json.load(f)
@@ -126,6 +136,13 @@ if assistant_url:
     existing['assistantApiUrl'] = assistant_url
 else:
     existing.pop('assistantApiUrl', None)
+# rfDetrSegEnabled mirrors the deployed Seg_Switch output ('true' / 'false');
+# absent output -> key dropped, which the frontend reads as ON.
+rfdetr_seg_enabled = os.environ.get('RFDETR_SEG_ENABLED', '')
+if rfdetr_seg_enabled in ('true', 'false'):
+    existing['rfDetrSegEnabled'] = (rfdetr_seg_enabled == 'true')
+else:
+    existing.pop('rfDetrSegEnabled', None)
 with open('public/config.json', 'w') as f:
     json.dump(existing, f, indent=2)
     f.write('\n')
@@ -134,6 +151,7 @@ with open('public/config.json', 'w') as f:
   echo "✅ config.json $CONFIG_VERB:"
   echo "   API URL:      $API_URL"
   echo "   Assistant:    ${ASSISTANT_API_URL:-not deployed}"
+  echo "   RF-DETR-Seg:  ${RFDETR_SEG_ENABLED:-output absent (frontend default: on)}"
   echo "   User Pool:    $USER_POOL_ID"
   echo "   Client ID:    $CLIENT_ID"
   echo "   Region:       $REGION"

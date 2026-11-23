@@ -88,6 +88,23 @@ export function mcpMutatingToolsEnabled(contextValue: unknown): string {
 export function assistantEnabled(contextValue: unknown): boolean {
   return groundedSamWorkerEnabled(contextValue);
 }
+/**
+ * Default-ON resolution for the `enableRfDetrSeg` CDK context flag — the
+ * Seg_Switch (rfdetr-seg-support Requirement 15.1, design DD7, owner
+ * decision O12 b). Same rule as {@link groundedSamWorkerEnabled}: only an
+ * explicit false (boolean `false`, or a string equal to 'false'
+ * case-insensitively after trimming) turns the RF-DETR-Seg feature off;
+ * absent, true and every other value ('0', 'no', 'off', typos) leave it on.
+ * The compute stack renders the result as the canonical 'true' / 'false'
+ * string in `PORTAL_RFDETR_SEG_ENABLED` on exactly the training, model
+ * converter and packaging handlers (never the shared lambdaEnvironment) and
+ * as the `RfDetrSegEnabled` stack output that deploy-frontend.sh copies
+ * into config.json `rfDetrSegEnabled`, where the frontend applies the same
+ * absent-means-on rule.
+ */
+export function rfDetrSegEnabled(contextValue: unknown): boolean {
+  return groundedSamWorkerEnabled(contextValue);
+}
 
 // ---------------------------------------------------------------------------
 // Synth-time enforcement acknowledgement (portal-authorization-and-iam-
