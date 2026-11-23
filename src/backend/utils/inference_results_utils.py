@@ -93,10 +93,32 @@ class GetInferenceResults():
                     'anomaly_threshold': dict_res.get("Anomaly_threshold"),
                     # Structured detections ({ "0": {class_index, class_label,
                     # bounding_box, confidence}, ... }); the boxes are already
-                    # drawn into the overlay image surfaced above.
+                    # drawn into the overlay image surfaced above. Instance
+                    # entries (rfdetr-seg-support Requirement 10.5a) carry
+                    # mask_rle / mask_area / mask_truncated and pass through
+                    # unchanged, in the map form the HMI live card reads.
                     'detections': detections_block.get("detections", {}),
                     'detection_count': dict_res.get("Detection_count"),
                 }
+                # The marshal writes the ceiling marker only when an entry lost
+                # its mask_rle, so it is copied only when present: a plain
+                # detection capture keeps exactly today's six-key dict.
+                if 'detections_truncated' in detections_block:
+                    infer_res['detections_truncated'] = bool(detections_block['detections_truncated'])
+                # Instance segmentation writes the Composite_Mask as mask.png
+                # beside the overlay; read it as the segmentation branch does,
+                # with the background and legend from the block's optional
+                # mask_color_map (absent after the marshal's palette-import
+                # fallback: then the mask alone, never a raise).
+                mask_image = self.get_mask_base64_image(output_list)
+                if mask_image:
+                    infer_res["mask_image"] = mask_image
+                    mask_color_map = detections_block.get("mask_color_map")
+                    if isinstance(mask_color_map, dict) and "0" in mask_color_map:
+                        infer_res["mask_background"] = convert_hex_color_to_rgb(mask_color_map["0"])
+                        infer_res["anomalies"] = {
+                            key: value for key, value in mask_color_map.items() if key != "0"
+                        }
             elif is_segmentation_model_output_result(output_list):
                 # Segmentation model
                 image_data_file_path = get_data_for_content_type(output_list, constants.INFERENCE_OUTPUT_IMAGE_CONTENT_TYPE, "data-ref") or \
