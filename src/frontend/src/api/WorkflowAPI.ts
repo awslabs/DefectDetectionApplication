@@ -120,6 +120,13 @@ export interface DetectionObject {
   // [x_min, y_min, x_max, y_max] in source-image pixels.
   bounding_box?: number[];
   confidence?: number;
+  // Instance-segmentation entries (rfdetr-seg-support Requirement 10.5a)
+  // also carry the instance mask: its Canonical_RLE at source resolution
+  // (absent when the device shed it at its size ceiling, then
+  // `mask_truncated` is true) and its foreground pixel count.
+  mask_rle?: string;
+  mask_area?: number;
+  mask_truncated?: boolean;
 }
 export interface Detections {
   [index: string]: DetectionObject;
