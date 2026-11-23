@@ -29,9 +29,10 @@ import os
 import json
 import glob
 import base64
+import logging
 import time
 import math
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 from datetime import datetime, timezone
 from dateutil import parser
@@ -40,6 +41,13 @@ from fastapi import HTTPException
 from utils import utils
 from utils import constants
 from utils.feature_configs_utils import get_default_configs_lfv
+
+logger = logging.getLogger(__name__)
+
+# The `job-name` the instance-manifest export stamps on every line
+# (rfdetr-seg-support Requirement 11.4, design §11 "Export").
+INSTANCE_MANIFEST_JOB_NAME = "inference-results-export"
+INSTANCE_MANIFEST_TYPE = "groundtruth/instance-segmentation"
 
 
 class GetInferenceResults():
@@ -419,6 +427,133 @@ def generate_smgt_format_manifest(inference_results_data_list: List[dict]):
         to_add["anomaly-label-metadata"] = anomaly_label_metadata
         manifest_data.append(to_add)
 
+    return manifest_data
+
+def _instance_entries(data: dict) -> List[dict]:
+    '''The row's Detection_List entries that still carry a Canonical_RLE
+    ``mask_rle`` (the DB column holds the list form, Requirement 10.5b; an
+    entry the DD4 ceiling truncated has none and is skipped).'''
+    detections = data.get("detections") or []
+    if not isinstance(detections, list):
+        return []
+    return [entry for entry in detections
+            if isinstance(entry, dict) and isinstance(entry.get("mask_rle"), str) and entry["mask_rle"]]
+
+def _entry_class_label(entry: dict) -> str:
+    label = entry.get("class_label")
+    if isinstance(label, str) and label:
+        return label
+    return str(entry.get("class_index", ""))
+
+def build_instance_class_map(inference_results_data_list: List[dict]) -> Dict[str, str]:
+    '''The export's ``class-map``: the distinct ``class_label``s of every
+    mask-carrying entry in the export, sorted, keyed ``"0"``, ``"1"``, ... --
+    one stable map for the whole manifest (rfdetr-seg-support Requirement
+    11.4; design §11 "Export").'''
+    labels = set()
+    for data in inference_results_data_list:
+        for entry in _instance_entries(data):
+            labels.add(_entry_class_label(entry))
+    return {str(index): label for index, label in enumerate(sorted(labels))}
+
+def _stored_image_size(image_path: str) -> Optional[Tuple[int, int]]:
+    '''``(width, height)`` from the stored image's header (the row carries no
+    dimensions), or None when the file cannot be read.'''
+    try:
+        from PIL import Image
+        with Image.open(image_path) as image:
+            width, height = image.size
+        return int(width), int(height)
+    except Exception as err:  # pylint: disable=broad-except
+        logger.warning("Instance manifest: cannot read the image size of %s (%s)", image_path, err)
+        return None
+
+def _ltwh_box(bounding_box) -> Optional[Dict[str, int]]:
+    '''``[x_min, y_min, x_max, y_max]`` -> ``left/top/width/height`` ints, or
+    None when the box is not four finite numbers.'''
+    if not isinstance(bounding_box, (list, tuple)) or len(bounding_box) != 4:
+        return None
+    try:
+        values = [float(value) for value in bounding_box]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    left, top, right, bottom = [int(round(value)) for value in values]
+    return {"left": left, "top": top, "width": max(0, right - left), "height": max(0, bottom - top)}
+
+def generate_instance_manifest(inference_results_data_list: List[dict],
+                               class_map: Optional[Dict[str, str]] = None) -> List[dict]:
+    '''One Instance_Manifest line per row whose stored Detection_List carries
+    at least one entry with a ``mask_rle`` (rfdetr-seg-support Requirement
+    11.4 scoped to the device export, design §11 "Export" / Data contracts
+    "Instance_Manifest line"): ``source-ref`` is the image basename (the
+    precedent rule of generate_smgt_format_manifest -- the zip places the
+    images beside the manifest), ``instance-segmentation`` carries the image
+    size read from the stored image and one annotation per mask-carrying
+    entry (``class_id`` into the export-wide ``class-map``, the box as
+    left/top/width/height ints, ``rle`` = the entry's ``mask_rle``), and
+    ``instance-segmentation-metadata`` the per-instance confidences, the
+    class-map, ``human-annotated: "no"`` and the fixed job name. Rows without
+    such an entry (no instance detections, or every entry truncated) and
+    entries without a mask yield nothing; both counts are logged at INFO.'''
+    if class_map is None:
+        class_map = build_instance_class_map(inference_results_data_list)
+    class_ids = {label: int(key) for key, label in class_map.items()}
+
+    manifest_data = []
+    skipped_rows = 0
+    skipped_entries = 0
+    for data in inference_results_data_list:
+        detections = data.get("detections") or []
+        entries = _instance_entries(data)
+        skipped_entries += max(0, len(detections) - len(entries)) if isinstance(detections, list) else 0
+        if not entries:
+            skipped_rows += 1
+            continue
+        image_path = data["inputImageFilePath"]
+        image_size = _stored_image_size(image_path)
+        if image_size is None:
+            skipped_rows += 1
+            continue
+        width, height = image_size
+
+        annotations = []
+        objects = []
+        for entry in entries:
+            box = _ltwh_box(entry.get("bounding_box"))
+            class_id = class_ids.get(_entry_class_label(entry))
+            if box is None or class_id is None:
+                skipped_entries += 1
+                continue
+            annotation = {"class_id": class_id}
+            annotation.update(box)
+            annotation["rle"] = entry["mask_rle"]
+            annotations.append(annotation)
+            objects.append({"confidence": entry.get("confidence", 0.0)})
+        if not annotations:
+            skipped_rows += 1
+            continue
+
+        to_add = {}
+        to_add["source-ref"] = os.path.basename(image_path)
+        to_add["instance-segmentation"] = {
+            "image_size": [{"width": width, "height": height, "depth": 3}],
+            "annotations": annotations,
+        }
+        to_add["instance-segmentation-metadata"] = {
+            "objects": objects,
+            "class-map": class_map,
+            "type": INSTANCE_MANIFEST_TYPE,
+            "human-annotated": "no",
+            "creation-date": convert_timestamp(data["inferenceCreationTime"]),
+            "job-name": INSTANCE_MANIFEST_JOB_NAME,
+        }
+        manifest_data.append(to_add)
+
+    logger.info("Instance manifest: %d line(s) written, %d row(s) without an instance mask skipped, "
+                "%d entry/entries without a mask skipped",
+                len(manifest_data), skipped_rows, skipped_entries)
     return manifest_data
 
 def convert_timestamp(timestamp):

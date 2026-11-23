@@ -317,6 +317,7 @@ def get_inference_result_data_for_retraining(
     inputImageLimit: int = 10,
     predictionResult: str = None,
     captureIdPath: str = Query(default=None, pattern=CAPTURED_IDS_PATH_PATTERN),
+    manifest_format: str = Query(default="classification", pattern=r"^(classification|instance)$"),
     token: str = None,
     db: Session = Depends(get_db)):
 
@@ -357,7 +358,16 @@ def get_inference_result_data_for_retraining(
             )
 
     now = datetime.now()
-    manifest_data = inference_results_utils.generate_smgt_format_manifest(inference_result_data_list)
+    # `manifest_format=instance` writes the Instance_Manifest (one line per row
+    # whose stored Detection_List carries instance masks, rfdetr-seg-support
+    # Requirement 11.4); the default keeps the classification manifest
+    # byte-identical. An unknown value is a 422 from the Query pattern above
+    # (the `captureIdPath` precedent; the route is also exercised lifted into
+    # a bare namespace by the export-path suites, so no new module-level name).
+    if manifest_format == "instance":
+        manifest_data = inference_results_utils.generate_instance_manifest(inference_result_data_list)
+    else:
+        manifest_data = inference_results_utils.generate_smgt_format_manifest(inference_result_data_list)
     manifest_file_name = "manifest-{}".format(now.strftime("%Y-%m-%d-%H-%M-%S"))
     manifest_file_path = os.path.join(DDA_SYSTEM_FOLDER, manifest_file_name)
     with open(manifest_file_path, "w") as json_file:
