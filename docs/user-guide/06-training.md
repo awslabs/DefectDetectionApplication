@@ -73,7 +73,7 @@ With the **RF-DETR (Roboflow)** source and **Model Type** **Instance Segmentatio
 | Field | What to enter | Default |
 |-------|---------------|---------|
 | **Base model** | A published RF-DETR-Seg COCO checkpoint, one of your completed RF-DETR-Seg models in this use case (to keep training it), or an imported fine-tunable RF-DETR-Seg checkpoint. A trained or imported base fixes the **Size**. | small |
-| **Size** | The RF-DETR-Seg checkpoint family: nano (native 312 px), small (384), medium (432), large (504), xlarge (624) or 2xlarge (768). Larger sizes are more accurate and slower on the device; all six are available (Apache 2.0). | `small` |
+| **Size** | The RF-DETR-Seg checkpoint family: nano (native 312 px), small (384), medium (432), large (504), xlarge (624) or 2xlarge (768). Larger sizes are more accurate and slower on the device; all six are available. | `small` |
 | **Resolution** | The square input the model trains and exports at: a multiple of 12 for nano, of 24 for every other size, between 240 and 1152. The size's native value is recommended and filled in when you pick the size. | the size's native |
 | **Epochs**, **Batch size**, **Gradient accumulation**, **Learning rate**, **Patience** | As for RF-DETR object detection. | `100`, `4`, `4`, `0.0001`, `10` |
 | **Score threshold** | Minimum confidence kept on the device, 0–1. | `0.5` |

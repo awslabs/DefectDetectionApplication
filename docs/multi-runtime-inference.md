@@ -824,10 +824,10 @@ model when it is trained, imported or packaged:
   record is exactly the LFV segmentation (anomaly) record (§24.11).
 
 The published checkpoints come in six sizes (nano 312, small 384, medium 432,
-large 504, xlarge 624, 2xlarge 768 — native square resolution in pixels),
-all Apache 2.0 in rfdetr 1.10.1 (owner decision D4); training, `.pth`
-conversion and ONNX Smart Import are described in the README and the trainer
-README. This section is the **device contract**.
+large 504, xlarge 624, 2xlarge 768 — native square resolution in pixels);
+their licence position, training, `.pth` conversion and ONNX Smart Import are
+described in the README's "Instance segmentation (RF-DETR-Seg)" sub-section
+and the trainer README. This section is the **device contract**.
 
 ### 24.1 Output contract (Seg_Output_Contract)
 
