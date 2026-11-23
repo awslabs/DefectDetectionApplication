@@ -30,7 +30,7 @@ import * as fs from "fs";
 import * as path from "path";
 import fc from "fast-check";
 
-import { buildExportUrl } from "./utils";
+import { buildExportUrl, hasInstanceMasks } from "./utils";
 
 const ENDPOINT = "https://host.invalid:5000/workflows";
 const WORKFLOW_ID = "wf-7";
@@ -112,6 +112,66 @@ describe("buildExportUrl", () => {
       ),
       { numRuns: 200 },
     );
+  });
+});
+
+// rfdetr-seg-support Requirement 11.4: the instance-manifest export adds
+// `manifest_format=instance` after captureIdPath and before the token; the
+// default classification manifest adds nothing, so today's URL is unchanged.
+describe("buildExportUrl manifestFormat", () => {
+  it("appends manifest_format=instance between captureIdPath and the token", () => {
+    const url = buildExportUrl({
+      workflowsEndpoint: ENDPOINT,
+      workflowId: WORKFLOW_ID,
+      captureIdPath: WRITER_PATH,
+      authEnabled: true,
+      token: "tok&en",
+      manifestFormat: "instance",
+    });
+    const parsed = new URL(url);
+    expect(Array.from(parsed.searchParams.keys())).toEqual(["captureIdPath", "manifest_format", "token"]);
+    expect(parsed.searchParams.get("manifest_format")).toBe("instance");
+    expect(parsed.searchParams.get("captureIdPath")).toBe(WRITER_PATH);
+    expect(parsed.searchParams.get("token")).toBe("tok&en");
+  });
+
+  it("adds no manifest parameter for the classification default or when omitted", () => {
+    const base = {
+      workflowsEndpoint: ENDPOINT,
+      workflowId: WORKFLOW_ID,
+      captureIdPath: WRITER_PATH,
+      authEnabled: false,
+      token: "",
+    };
+    const plain = buildExportUrl(base);
+    expect(buildExportUrl({ ...base, manifestFormat: "classification" })).toBe(plain);
+    expect(buildExportUrl({ ...base, manifestFormat: undefined })).toBe(plain);
+    expect(new URL(plain).searchParams.has("manifest_format")).toBe(false);
+  });
+});
+
+describe("hasInstanceMasks", () => {
+  it("is true only when a selected result's stored list carries a mask_rle", () => {
+    const row = { captureId: "c", workflowId: "w" };
+    expect(hasInstanceMasks([])).toBe(false);
+    expect(hasInstanceMasks([row])).toBe(false);
+    expect(hasInstanceMasks([{ ...row, detections: null }])).toBe(false);
+    expect(
+      hasInstanceMasks([
+        { ...row, detections: [{ class_index: "0", class_label: "a", bounding_box: [1, 2, 3, 4], confidence: 0.5 }] },
+      ]),
+    ).toBe(false);
+    expect(
+      hasInstanceMasks([
+        row,
+        {
+          ...row,
+          detections: [
+            { class_index: "0", class_label: "a", bounding_box: [1, 2, 3, 4], confidence: 0.5, mask_rle: "0 16" },
+          ],
+        },
+      ]),
+    ).toBe(true);
   });
 });
 

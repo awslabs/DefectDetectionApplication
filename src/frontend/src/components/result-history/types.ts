@@ -17,6 +17,7 @@
  */
 
 import { AnomalyLabel, MaskBackground } from "api/WorkflowAPI";
+import type { InstanceDetectionEntry } from "components/deployed-workflow/instanceDetections";
 import { PredictionType } from "components/image-source/types";
 
 export enum ImageCaptureResultType {
@@ -28,13 +29,6 @@ export enum HistoryResultPageType {
   INFERENCE_RESULT = "inference-result",
   CAPTURE_RESULT = "capture-result",
 };
-
-export interface DetectionResult {
-  // [x_min, y_min, x_max, y_max] in source-image pixels
-  boundingBox: number[];
-  objectClass: string;
-  confidence: number;
-}
 
 export interface InferenceResultHistory {
   confidence?: number | null;
@@ -57,10 +51,12 @@ export interface InferenceResultHistory {
   humanClassification?: PredictionType | null;
   humanReviewRequired?: boolean | null;
   captureType?: ImageCaptureResultType;
-  // Object-detection results (task=object_detection). The boxes are also drawn
-  // into the server-rendered overlay image; this carries the structured list
-  // for textual display / downstream use.
-  detections?: DetectionResult[] | null;
+  // The stored Detection_List in list form (rfdetr-seg-support Requirement
+  // 10.5b): the entries the device's marshal wrote - `class_index`,
+  // `class_label`, `bounding_box`, `confidence` and, for an instance
+  // segmentation result, `mask_rle` / `mask_area` / `mask_truncated`. The
+  // boxes are also drawn into the server-rendered overlay image.
+  detections?: InstanceDetectionEntry[] | null;
 }
 
 export interface FilterColumnConfig {

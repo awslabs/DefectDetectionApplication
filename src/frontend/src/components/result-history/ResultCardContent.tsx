@@ -46,6 +46,7 @@ import {
 } from "components/live-result/helpers";
 import OutputImageInCard from "./OutputImageInCard";
 import { AnomalyLabel, deleteWorkflowResult } from "api/WorkflowAPI";
+import type { ExportManifestFormat } from "api/WorkflowAPI";
 import AnomalyLabels from "components/live-result/AnomalyLabels";
 import ColoredInferenceBox from "./ColoredInferenceBox";
 import {
@@ -68,7 +69,7 @@ import {
 import DownloadModal from "./DownloadModal";
 import EditNotesModal from "./EditNotesModal";
 import { AppLayoutContext } from "components/layout/AppLayoutContext";
-import { buildExportUrl, getResultHistoryFilterParams } from "./utils";
+import { buildExportUrl, getResultHistoryFilterParams, hasInstanceMasks } from "./utils";
 import useAuth from "components/auth/authHook";
 import { APIList } from "config/Interface";
 import { AxiosError } from "axios";
@@ -285,9 +286,11 @@ export default function ResultCardContent({
     mutationFn: async ({
       resultIds,
       markAsDownloaded,
+      manifestFormat,
     }: {
       resultIds: string[];
       markAsDownloaded: boolean;
+      manifestFormat?: ExportManifestFormat;
     }) => {
       const result = await getDownloadUrl(workflowId, resultIds);
       if (markAsDownloaded) {
@@ -305,6 +308,7 @@ export default function ResultCardContent({
         captureIdPath: result.captureIdPath,
         authEnabled,
         token,
+        manifestFormat,
       });
       link.click();
       return { resultIds };
@@ -819,13 +823,17 @@ export default function ResultCardContent({
             clearTimeout(downloadPendingCallback)
           }
         }}
-        onDownload={(markAsDownloaded): void => {
+        onDownload={(markAsDownloaded, manifestFormat): void => {
           download({
             resultIds: selectedItems.map((item) => item.captureId),
             markAsDownloaded,
+            manifestFormat,
           });
         }}
         isDownloading={isDownloading || isDownloadPending}
+        // The instance-manifest download is offered only when a selected
+        // result stores an instance mask (rfdetr-seg-support Requirement 11.4).
+        instanceManifestAvailable={hasInstanceMasks(selectedItems)}
       />
       <EditNotesModal
         showModal={selectedNotesEditItemsCount > 0}

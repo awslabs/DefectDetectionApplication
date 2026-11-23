@@ -129,12 +129,21 @@ export enum PredictionResult {
   NORMAL = "Normal",
   ALL = "all",
 }
+/**
+ * The export's manifest: today's classification manifest (default) or the
+ * instance-segmentation manifest built from the stored masks
+ * (rfdetr-seg-support Requirement 11.4).
+ */
+export type ExportManifestFormat = "classification" | "instance";
+
 export interface RetrainInputImagesRequest {
   startTime: number;
   endTime: number;
   inputImageLimit: number;
   predictionResult: PredictionResult;
   token?: string;
+  /** Appended to the export URL only as `manifest_format=instance`. */
+  manifestFormat?: ExportManifestFormat;
 }
 
 export interface Anomalies {
@@ -175,8 +184,10 @@ export async function retryDioWorkflow(id: string) {
 }
 
 export function retrainInputImages(workflowId: string, config: RetrainInputImagesRequest): Promise<number> {
-  const { startTime, endTime, inputImageLimit, predictionResult, token } = config;
-  const retrainInputImagesAPI = `${APIList.workflows}/${workflowId}/results/export?startTime=${startTime}&endTime=${endTime}&predictionResult=${predictionResult}${token ? `&token=${encodeURIComponent(token)}` : ""}`
+  const { startTime, endTime, inputImageLimit, predictionResult, token, manifestFormat } = config;
+  // The default (classification) adds no parameter, so today's URL is byte-identical.
+  const manifestParam = manifestFormat === "instance" ? "&manifest_format=instance" : "";
+  const retrainInputImagesAPI = `${APIList.workflows}/${workflowId}/results/export?startTime=${startTime}&endTime=${endTime}&predictionResult=${predictionResult}${token ? `&token=${encodeURIComponent(token)}` : ""}${manifestParam}`
   const errorCheckingAPICall = `${retrainInputImagesAPI}&inputImageLimit=1`;
   const imageDownloadAPI = `${retrainInputImagesAPI}&inputImageLimit=${inputImageLimit}`;
   return new Promise(async (resolve, reject) => {

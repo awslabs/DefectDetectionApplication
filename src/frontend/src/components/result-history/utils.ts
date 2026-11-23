@@ -17,7 +17,8 @@
  */
 
 import { PropertyFilterToken } from "@cloudscape-design/collection-hooks";
-import { DownloadStatus, FeedbackRequiredFilterOptions, FeedbackFilterOptions, ListInferenceFilters, HistoryResultPageType } from "./types";
+import { DownloadStatus, FeedbackRequiredFilterOptions, FeedbackFilterOptions, ListInferenceFilters, HistoryResultPageType, InferenceResultHistory } from "./types";
+import type { ExportManifestFormat } from "api/WorkflowAPI";
 
 function isListInferenceFilters(value: string): value is ListInferenceFilters {
   return Object.values(ListInferenceFilters).includes(value as ListInferenceFilters);
@@ -62,6 +63,13 @@ interface ExportUrlParams {
   captureIdPath: string;
   authEnabled: boolean;
   token: string;
+  /**
+   * The export's manifest (rfdetr-seg-support Requirement 11.4): appended as
+   * `&manifest_format=instance` after captureIdPath and before the token;
+   * omitted for the default classification manifest, so today's URL is
+   * unchanged.
+   */
+  manifestFormat?: ExportManifestFormat;
 }
 
 /**
@@ -77,9 +85,19 @@ export const buildExportUrl = ({
   captureIdPath,
   authEnabled,
   token,
+  manifestFormat,
 }: ExportUrlParams): string => {
-  const url = `${workflowsEndpoint}/${workflowId}/results/export?captureIdPath=${encodeURIComponent(
+  const base = `${workflowsEndpoint}/${workflowId}/results/export?captureIdPath=${encodeURIComponent(
     captureIdPath,
   )}`;
+  const url = manifestFormat === "instance" ? `${base}&manifest_format=instance` : base;
   return authEnabled ? `${url}&token=${encodeURIComponent(token)}` : url;
 };
+
+/** Whether a selected result stores an instance mask the export can write. */
+export const hasInstanceMasks = (items: ReadonlyArray<InferenceResultHistory>): boolean =>
+  items.some((item) =>
+    (item.detections ?? []).some(
+      (entry) => typeof entry?.mask_rle === "string" && entry.mask_rle.length > 0,
+    ),
+  );

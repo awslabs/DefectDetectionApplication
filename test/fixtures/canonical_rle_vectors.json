@@ -2,7 +2,8 @@
   "description": "Canonical_RLE byte-identity vectors (rfdetr-seg-support DD5, Requirement 10.2). Each vector is a binary mask given as row-major strings of 0/1 (mask_rows, top row first, width = row length) and the exact string dda_manifest.rle_encode produces for it: space-separated run lengths over the column-major flattening, background run first (a leading 0 when the first pixel is foreground), summing to width*height. The Portal layer (edge-cv-portal/backend/layers/shared/python/dda_manifest.py) is the oracle; every other encoder of the format must reproduce these strings byte for byte.",
   "consumers": [
     "edge-cv-portal/backend/tests/test_dda_manifest_instance.py",
-    "test/backend-test/test_mask_rle.py"
+    "test/backend-test/test_mask_rle.py",
+    "src/frontend/src/components/deployed-workflow/instanceDetections.test.ts"
   ],
   "vectors": [
     {
