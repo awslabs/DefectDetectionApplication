@@ -4,6 +4,15 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Added - Build Fleet: optional NAT gateway for the build instances (2026-11-23)
+
+Build instances reach GitHub, container registries, Systems Manager and the other AWS endpoints through the build VPC's internet gateway. In an account where VPC Block Public Access blocks internet gateway traffic in ingress-only mode, they lose that path: dedicated build servers go offline in Systems Manager (ConnectionLost), and builds cannot run. Ingress-only mode still allows traffic through a NAT gateway, so the Build Fleet stack can now add one.
+
+- **A CDK context flag, off by default.** `buildFleetNatGateway` adds one NAT gateway with its own Elastic IP in the build VPC's second public subnet, and points the first subnet's default route at it; every build instance launches in the first subnet. The second subnet keeps its internet gateway route. There is no new subnet and no inbound rule. A deploy without the flag changes nothing.
+- **Turning it on and off.** `BUILD_FLEET_NAT_GATEWAY=true ./deploy-infrastructure.sh` turns it on and `BUILD_FLEET_NAT_GATEWAY=false` turns it off; `infrastructure/deploy_portal_fixes.sh` takes the same variable. With the variable unset, both scripts keep the deployed state (the Build Fleet stack's `BuildNatGatewayId` output), and they stop when they cannot read it. A hand-run `cdk deploy` must pass `-c buildFleetNatGateway=true` while the gateway is on.
+- **Cost and availability.** About $36.50 a month for the gateway and its Elastic IP, plus $0.045 per GB processed and $0.01 per GB each way between the two Availability Zones (us-east-1 prices). The build instances then depend on the gateway's Availability Zone as well as their own. See [Build Fleet NAT gateway](ADMIN_GUIDE.md#build-fleet-nat-gateway).
+- **Execution policy.** `iam/portal-cfn-execution-network-policy.json` allows `ec2:CreateNatGateway` and `ec2:AllocateAddress` only with the `dda-portal:managed` tag in the request, and `ec2:DeleteNatGateway` and `ec2:ReleaseAddress` only on resources that carry it. The portal tags both new resource types at creation. An account set up with `iam/setup-account.sh portal` before this change must run it again before turning the gateway on. The permissions boundary is unchanged.
+
 ### Fixed - Synthetic data: generation passes longer than the worker's 15-minute limit (2026-11-22)
 
 A variation costs about 25 s (20 s of model time plus 3–5 s of image work: resize, restore to the source size, PNG upload), so a pass of 10 source images × 5 variations needs about 20 minutes against the generation worker's 900 s Lambda limit. Pass 2 of session 6115b94c ran 43 of its 50 tasks and hit the limit; Lambda's default asynchronous retry policy (two retries, the function had no explicit setting) re-ran the whole plan from the start twice, producing 130 failed previews for 50 tasks with the same seeds, and because the worker only reported **Awaiting review** after the last task the session stayed in **Generating** with **Regenerate** disabled.

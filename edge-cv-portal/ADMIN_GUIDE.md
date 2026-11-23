@@ -964,6 +964,32 @@ aws iam attach-role-policy \
 - Monitor deployment status
 - Each device or thing group has one current deployment, and a new deployment for the same target replaces it. Change it with **Revise Deployment** ([README: Revise a Deployment](../README.md#revise-a-deployment))
 
+### Build Fleet NAT gateway
+
+Build instances launch into the build VPC's first public subnet and reach GitHub, container registries, AWS Systems Manager and the other AWS endpoints through its internet gateway. When VPC Block Public Access blocks internet gateway traffic in ingress-only mode, that path stops: dedicated build servers show **ConnectionLost** in Systems Manager, and builds cannot run. Ingress-only mode still allows traffic through a NAT gateway. Bidirectional mode blocks that too.
+
+The Build Fleet stack can add a NAT gateway for this case. It is off by default. Run from `edge-cv-portal`:
+
+```bash
+BUILD_FLEET_NAT_GATEWAY=true ./deploy-infrastructure.sh    # turn the NAT gateway on
+BUILD_FLEET_NAT_GATEWAY=false ./deploy-infrastructure.sh   # turn it off
+```
+
+- With `BUILD_FLEET_NAT_GATEWAY` unset, `deploy-infrastructure.sh` and `infrastructure/deploy_portal_fixes.sh` keep the deployed state. They pass `-c buildFleetNatGateway=true` while `EdgeCVPortalBuildFleetStack` has its `BuildNatGatewayId` output and `false` while it has none. When they cannot read the stack, they stop and ask for an explicit value. `deploy-frontend.sh` does not deploy the Build Fleet stack.
+- `1`, `true`, `yes`, `on` and `enabled`, in any case, turn the gateway on. Any other value turns it off.
+- A hand-run `npx cdk deploy`, `--all` included, must pass `-c buildFleetNatGateway=true` while the gateway is on. Without it, the CDK default (off) removes the gateway. The same holds for `cdk diff`, which otherwise shows the gateway being removed. The value the deploy scripts pass on the command line overrides one in `cdk.json`.
+- An account set up with `iam/setup-account.sh portal` before this option existed must run it again before turning the gateway on. Its CloudFormation execution policy then allows the tagged NAT gateway and Elastic IP. Without the re-run, the Build Fleet deploy fails and rolls back.
+
+**Layout.** One NAT gateway, with its own Elastic IP, sits in the second public subnet, which keeps its internet gateway route. The first subnet's `0.0.0.0/0` route goes to the NAT gateway. There is no new subnet and no inbound rule. The build instances keep their public IP addresses, which then carry no traffic. Turning the option on or off replaces that one route in place, and offline build servers reconnect within minutes.
+
+**Cost** (us-east-1 prices, see [Amazon VPC pricing](https://aws.amazon.com/vpc/pricing/)):
+
+- $0.045 an hour for the NAT gateway and $0.005 an hour for its Elastic IP: about $36.50 a month, whether builds run or not.
+- $0.045 for each GB the NAT gateway processes, in either direction: image pulls, ECR pushes and component publishing.
+- $0.01 per GB in each direction between the two Availability Zones, because the build instances and the NAT gateway are in different ones.
+
+**Availability.** With the NAT gateway on, the build instances depend on its Availability Zone as well as their own.
+
 ---
 
 ## Troubleshooting

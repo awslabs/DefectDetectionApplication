@@ -10,7 +10,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
-import { portalRegistryEnforced } from './context-helpers';
+import { buildFleetNatGatewayEnabled, portalRegistryEnforced } from './context-helpers';
 import * as crypto from 'crypto';
 import * as path from 'path';
 
@@ -65,9 +65,11 @@ export interface BuildFleetStackProps extends cdk.StackProps {
  *   role creation (design §10). Fixed physical names (`dda-build-role`)
  *   keep the handlers' defaults valid.
  * - A self-contained public-subnet VPC for build compute: instances get a
- *   public IP (outbound internet for git/docker/publish and the SSM
- *   endpoints) behind a security group with NO inbound rules — all access
- *   is IAM-audited SSM, no SSH key pair (design §2).
+ *   public IP and reach the internet (git/docker/publish and the SSM
+ *   endpoints) through the internet gateway, or through one NAT gateway
+ *   when the CDK context `buildFleetNatGateway` turns that option on
+ *   (default off), behind a security group with NO inbound rules — all
+ *   access is IAM-audited SSM, no SSH key pair (design §2).
  * - API Gateway routes registered against the imported portal Rest API
  *   with a Cognito authorizer, exactly like the other portal route stacks
  *   (fresh deployment re-points the existing stage; logical id salted
@@ -205,7 +207,9 @@ export class BuildFleetStack extends cdk.Stack {
     // Greengrass/ECR publishing, and SSM connects over the public
     // endpoints). The security group has NO inbound rules — combined with
     // "no key pair" in the RunInstances calls, all access is SSM
-    // (design §2). No NAT gateways: zero idle network cost.
+    // (design §2). No NAT gateway by default: zero idle network cost. The
+    // optional one below is created only when the CDK context
+    // buildFleetNatGateway turns it on.
     // ------------------------------------------------------------------
     const buildVpc = new ec2.Vpc(this, 'BuildVpc', {
       maxAzs: 2,
@@ -225,6 +229,42 @@ export class BuildFleetStack extends cdk.Stack {
         'DDA build compute (dedicated servers + ephemeral runners): no inbound rules, SSM only',
       allowAllOutbound: true,
     });
+
+    // Optional NAT gateway (CDK context buildFleetNatGateway, default off;
+    // buildFleetNatGatewayEnabled in lib/context-helpers.ts). VPC Block
+    // Public Access in ingress-only mode drops the instances' traffic
+    // through the internet gateway, so builds and the SSM agent lose their
+    // way out; traffic through a NAT gateway is the outbound path that mode
+    // still allows. When on: one zonal NAT gateway with its own Elastic IP in
+    // the second public subnet, which keeps its internet gateway route, and
+    // the first subnet's default route re-pointed at it. The first subnet is
+    // where every build instance launches (BUILD_SUBNET_ID below). It costs
+    // the gateway's hours and its Elastic IP whether builds run or not, plus
+    // data processing and the cross-AZ transfer between the two subnets.
+    let buildNatGateway: ec2.CfnNatGateway | undefined;
+    if (buildFleetNatGatewayEnabled(this.node.tryGetContext('buildFleetNatGateway'))) {
+      const [buildSubnet, natSubnet] = buildVpc.publicSubnets;
+      if (!(natSubnet instanceof ec2.PublicSubnet)) {
+        throw new Error(
+          'buildFleetNatGateway: the build VPC has no second public subnet to hold the NAT gateway',
+        );
+      }
+      // Creates the Elastic IP and makes the gateway depend on the second
+      // subnet's internet route.
+      buildNatGateway = natSubnet.addNatGateway();
+      // Re-point the first subnet's existing 0.0.0.0/0 route (same logical
+      // id, so CloudFormation replaces the route in place) instead of adding
+      // a second one. A CDK upgrade that renames or reshapes the route fails
+      // the synth here rather than silently keeping the internet gateway.
+      const defaultRoute = buildSubnet.node.findChild('DefaultRoute');
+      if (!(defaultRoute instanceof ec2.CfnRoute)) {
+        throw new Error(
+          "buildFleetNatGateway: the first build subnet's DefaultRoute is not an AWS::EC2::Route",
+        );
+      }
+      defaultRoute.gatewayId = undefined;
+      defaultRoute.natGatewayId = buildNatGateway.ref;
+    }
 
     // ------------------------------------------------------------------
     // Build instance role + profile: the extended dda-build-role
@@ -944,5 +984,14 @@ export class BuildFleetStack extends cdk.Stack {
       value: buildSecurityGroup.securityGroupId,
       description: 'No-inbound security group for build compute',
     });
+    // Present only while the NAT gateway is on: the deploy scripts read it
+    // to keep that setting when BUILD_FLEET_NAT_GATEWAY is unset
+    // (scripts/portal-build-fleet-nat.sh).
+    if (buildNatGateway) {
+      new cdk.CfnOutput(this, 'BuildNatGatewayId', {
+        value: buildNatGateway.ref,
+        description: 'NAT gateway of the build subnet (CDK context buildFleetNatGateway)',
+      });
+    }
   }
 }

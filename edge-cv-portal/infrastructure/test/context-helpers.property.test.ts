@@ -19,6 +19,7 @@
 
 import * as fc from 'fast-check';
 import {
+  buildFleetNatGatewayEnabled,
   groundedSamWorkerEnabled,
   mcpMutatingToolsEnabled,
   mcpServerEnabled,
@@ -224,5 +225,57 @@ describe('Feature: mcp-servers, MCP context flags (deployMcpServer default on, m
       RUNS,
     );
     expect(mcpMutatingToolsEnabled(undefined)).toBe('false');
+  });
+});
+
+// The Build Fleet's optional NAT gateway (lib/build-fleet-stack.ts): default off.
+describe('Build Fleet NAT gateway context flag (buildFleetNatGateway, default off)', () => {
+  const TRUTHY = ['1', 'true', 'yes', 'on', 'enabled'];
+
+  /** Per-character case flips plus surrounding whitespace of one word. */
+  const decorated = (words: string[]) =>
+    fc
+      .tuple(
+        fc.constantFrom(...words),
+        fc.array(fc.boolean(), { minLength: 8, maxLength: 8 }),
+        whitespaceArb,
+        whitespaceArb,
+      )
+      .map(
+        ([word, flips, left, right]) =>
+          left +
+          word
+            .split('')
+            .map((ch, i) => (flips[i] ? ch.toUpperCase() : ch))
+            .join('') +
+          right,
+      );
+
+  const contextValueArb: fc.Arbitrary<unknown> = fc.oneof(
+    fc.constantFrom<unknown>(undefined, null, true, false, '', 'true', 'false', '0', 'no', 'off'),
+    decorated(['true', 'false', ...TRUTHY, '0', 'no', 'off', 'disabled']),
+    fc.string(),
+    fc.integer(),
+    fc.object(),
+  );
+
+  it('is on exactly for boolean true or a truthy word in any case and padding', () => {
+    const truthy = (value: unknown): boolean =>
+      value === true ||
+      (typeof value === 'string' && TRUTHY.includes(value.trim().toLowerCase()));
+    fc.assert(
+      fc.property(contextValueArb, (value) => {
+        expect(buildFleetNatGatewayEnabled(value)).toBe(truthy(value));
+      }),
+      RUNS,
+    );
+  });
+
+  it('is off when absent, false or unrecognized, and on for true and a padded Yes', () => {
+    for (const value of [undefined, false, 'false', '0', 'true --all']) {
+      expect(buildFleetNatGatewayEnabled(value)).toBe(false);
+    }
+    expect(buildFleetNatGatewayEnabled(true)).toBe(true);
+    expect(buildFleetNatGatewayEnabled(' Yes ')).toBe(true);
   });
 });
