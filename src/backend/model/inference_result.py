@@ -33,7 +33,7 @@ class InferenceResult:
                  anomalyThreshod, inputImageFilePath, modelId, anomalyLabels=None, maskImage="",
                  maskBackground=None, outputImageFilePath="", modelName="", flagForReview=False,
                  downloaded=False, humanClassification=None, textNote=None, humanReviewRequired=False,
-                 modelConfidenceThresholds={}):
+                 modelConfidenceThresholds={}, detections=None):
         self.captureId = captureId
         self.captureType = captureType
         self.workflowId = workflowId
@@ -55,6 +55,8 @@ class InferenceResult:
         self.textNote = textNote
         self.humanReviewRequired = humanReviewRequired
         self.modelConfidenceThresholds = modelConfidenceThresholds
+        # Detection_List in list form, or None (rfdetr-seg-support Req 10.5b).
+        self.detections = detections
 
     def get(self, attr_name, default=None):
         return getattr(self, attr_name, default)
@@ -101,6 +103,11 @@ class InferenceResultSchema(Schema):
     textNote = fields.Str(validate=validate.Length(max=DB_TEXT_NOTE_MAX_LENGTH), required=False)
     humanReviewRequired = fields.Bool(required=False)
     modelConfidenceThresholds = fields.Dict(required=False)
+    # Detection_List in list form (rfdetr-seg-support Requirement 10.5b, DD13):
+    # one dict per entry, {class_index, class_label, bounding_box, confidence}
+    # plus mask_rle / mask_area when the model produced instance masks. The
+    # marshal's map form and detection_count stay rejected as unknown fields.
+    detections = fields.List(fields.Dict(), required=False)
 
 
     @post_load

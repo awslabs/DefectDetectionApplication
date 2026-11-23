@@ -157,6 +157,10 @@ class InferenceResultHistoryModel(BaseModel):
     humanClassification: Optional[str] = None
     textNote: Optional[str] = Field(None, max_length = DB_TEXT_NOTE_MAX_LENGTH)
     humanReviewRequired: Optional[bool] = False
+    # Detection_List in list form (rfdetr-seg-support Requirement 10.5b): the
+    # stored `detections` column, so GET /workflows/{id}/results items carry
+    # instance boxes and masks (null for rows without it).
+    detections: Optional[List[dict]] = None
 
     class Config:
         from_attributes = True

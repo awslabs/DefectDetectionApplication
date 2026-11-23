@@ -144,6 +144,13 @@ class InferenceResult(BaseMetadata):
     textNote = Column(String)
     humanReviewRequired = Column(Boolean)
     modelConfidenceThresholds = Column(JSON)
+    # Detection_List in list form (rfdetr-seg-support Requirement 10.5b, DD13):
+    # the marshal's map entries in ascending key order, each
+    # {class_index, class_label, bounding_box, confidence} plus mask_rle /
+    # mask_area when the model produced instance masks. Nullable; added by the
+    # Alembic revision chained to 37b6e36641e7. NULL for every row stored by
+    # a classification / anomaly model and for pre-upgrade rows.
+    detections = Column(JSON)
 
 
 class WorkflowMetadata(BaseMetadata):

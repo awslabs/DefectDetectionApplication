@@ -349,6 +349,12 @@ def convert_hex_color_to_rgb(mask_background):
             mask[key] = mask_background[key]
     return mask
 
+def _detections_key_order(key):
+    '''Sort key for the marshal's detections map: numeric keys ("0", "1", ...)
+    ascending, any non-numeric straggler after them, lexicographic.'''
+    text = str(key)
+    return (0, int(text), "") if text.isdigit() else (1, 0, text)
+
 def convert_inference_res_to_save_in_db(inference_res, workflow):
     model_config = get_default_configs_lfv(workflow.get("featureConfigurations")[0].get("modelName"))
 
@@ -377,6 +383,16 @@ def convert_inference_res_to_save_in_db(inference_res, workflow):
     anomaly_labels = inference_res["inferenceResult"].get("anomalies")
     if anomaly_labels:
         db_inference_res["anomalyLabels"] = [anomaly_labels[key] for key in anomaly_labels]
+
+    # Detection_List in list form (rfdetr-seg-support Requirement 10.5b, DD13):
+    # the live dict's map entries in ascending integer key order, so the
+    # result history carries boxes and instance masks. An empty map or a
+    # non-detection result writes no key (stripped with every other None).
+    detections_map = inference_res["inferenceResult"].get("detections")
+    if isinstance(detections_map, dict) and detections_map:
+        db_inference_res["detections"] = [
+            detections_map[key] for key in sorted(detections_map, key=_detections_key_order)
+        ]
 
     # Remove all None values to match schema
     db_inference_res_schema = {k: v for k, v in db_inference_res.items() if v is not None}
