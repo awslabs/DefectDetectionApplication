@@ -48,7 +48,8 @@ Everything is verified here before anything is written:
   * the graph loads and runs on onnxruntime 1.16.3 itself (separate venv) and
     on the exporter's current onnxruntime, and on both its outputs match the
     source model's on the same inputs (the Parity_Check; RF-DETR compares
-    emitted detections, not raw query slots -- see PARITY_TOLERANCE).
+    emitted detections, not raw query slots, and RF-DETR-Seg additionally the
+    IoU of the binarised masks of every matched pair -- see PARITY_TOLERANCE).
 
 Portal-trained artifacts are the shape contract: the metadata carries the keys
 packaging.package_trained_detection_component reads, so a converted import is
@@ -191,11 +192,22 @@ RFDETR_SEG_MASK_DOWNSAMPLE = 4
 # Worst measured over the spike fixtures (both runtimes, both inputs): YOLO box
 # 0.0063 px / score 3.2e-6; RF-DETR detections box 8.1e-6 / score 2.0e-5, slot
 # agreement >= 0.95.
+#   rf_detr_seg -- the rf_detr rules unchanged plus a mask term (spec
+#              rfdetr-seg-support Req 7.5, DD17, O10 a): for every matched
+#              query/class pair of rule (1) the IoU of `sigmoid(mask) >
+#              mask_threshold` between the source model and the runtime on the
+#              native R/4 grid (no upsampling, so the term measures the
+#              exporter, not the resize) must be >= mask_iou; the measured
+#              minimum is written to the metadata. The Seg spike (S4) measured
+#              a minimum of 1.0 over 7 matched queries on the published
+#              Seg-Nano + bus.jpg on both image runtimes (mask logits within
+#              6.7e-3), so the design default 0.99 holds.
 PARITY_TOLERANCE = {
     "yolo": {"box_atol": 0.1, "score_atol": 1e-3},
     "rf_detr": {"box_atol": 1e-3, "score_atol": 5e-3, "score_floor": 0.25,
                 "min_slot_agreement": 0.75},
 }
+PARITY_TOLERANCE["rf_detr_seg"] = {**PARITY_TOLERANCE["rf_detr"], "mask_iou": 0.99}
 PARITY_SEED = 20260925
 FAILURE_MAX_CHARS = 1024
 
@@ -693,25 +705,57 @@ def _rfdetr_slot_agreement(rb: Any, rp: Any, gb: Any, gp: Any, box_atol: float,
             float(score_d[rows, cols].max()))
 
 
-def compare_rfdetr_parity(reference: Dict[str, List[Any]], got: Dict[str, List[Any]],
-                          num_classes: int, tolerance: Dict[str, float],
-                          runtime: str) -> Dict[str, Any]:
-    """Detection-level (permutation-invariant) plus slot-agreement parity; see
-    PARITY_TOLERANCE. Pure numpy; FATAL beyond tolerance."""
+def _mask_iou(ref_logits: Any, got_logits: Any, mask_threshold: float) -> float:
+    """IoU of the two binarised masks `sigmoid(logits) > mask_threshold` on
+    the grid they were predicted on (pure numpy). Two empty masks agree (1.0)."""
     import numpy as np
 
+    a = _sigmoid(ref_logits) > mask_threshold
+    b = _sigmoid(got_logits) > mask_threshold
+    union = int(np.logical_or(a, b).sum())
+    if union == 0:
+        return 1.0
+    return float(np.logical_and(a, b).sum()) / union
+
+
+def compare_rfdetr_parity(reference: Dict[str, List[Any]], got: Dict[str, List[Any]],
+                          num_classes: int, tolerance: Dict[str, float],
+                          runtime: str, task: str = "detection",
+                          mask_threshold: float = 0.5) -> Dict[str, Any]:
+    """Detection-level (permutation-invariant) plus slot-agreement parity; see
+    PARITY_TOLERANCE. Pure numpy; FATAL beyond tolerance.
+
+    `task='segmentation'` (RF-DETR-Seg, spec rfdetr-seg-support Req 7.5 /
+    DD17) adds the mask term: the reference list is the forward_export tuple
+    (boxes, logits, masks) and the runtime's mask is the only rank-4 array
+    (both lists are in graph order, so boxes / logits still pair by shape and,
+    for a three-class model whose two rank-3 arrays share [1, Q, 4], by
+    position); for every matched pair of rule (1) the IoU of `sigmoid(mask) >
+    mask_threshold` on the native R/4 grid must reach tolerance['mask_iou'],
+    and the measured minimum is reported as `mask_iou_min` (None when no pair
+    reached score_floor on that input)."""
+    import numpy as np
+
+    seg = task == "segmentation"
     box_atol, score_atol = tolerance["box_atol"], tolerance["score_atol"]
     floor = tolerance["score_floor"]
     report: Dict[str, Any] = {}
     for key, ref_list in reference.items():
-        ref_boxes, ref_logits = (np.asarray(a, dtype=np.float64) for a in ref_list)
+        ref_arrays = [np.asarray(a, dtype=np.float64) for a in ref_list]
+        ref_boxes, ref_logits = ref_arrays[:2]
+        ref_masks = ref_arrays[2] if seg else None
         outs = [np.asarray(a, dtype=np.float64) for a in got[key]]
         got_boxes = next((a for a in outs if a.shape == ref_boxes.shape), None)
         got_logits = next((a for a in outs if a.shape == ref_logits.shape and a is not got_boxes),
                           None)
-        if got_boxes is None or got_logits is None:
+        got_masks = next((a for a in outs if a.ndim == 4), None) if seg else None
+        expected = f"{list(ref_boxes.shape)} + {list(ref_logits.shape)}"
+        if seg:
+            expected += f" + {list(ref_masks.shape)}"
+        if got_boxes is None or got_logits is None or (
+                seg and (got_masks is None or got_masks.shape != ref_masks.shape)):
             fatal(f"parity: {runtime} {key} outputs {[list(a.shape) for a in outs]} do not match "
-                  f"the source model's {list(ref_boxes.shape)} + {list(ref_logits.shape)}")
+                  f"the source model's {expected}")
         rb, gb = ref_boxes[0], got_boxes[0]
         rp = _sigmoid(ref_logits[0][:, :num_classes])
         gp = _sigmoid(got_logits[0][:, :num_classes])
@@ -727,14 +771,16 @@ def compare_rfdetr_parity(reference: Dict[str, List[Any]], got: Dict[str, List[A
         used: set = set()
         worst_box = worst_score = 0.0
         missing = []
+        # (3) Seg: the mask IoU of every matched pair, worst first
+        mask_ious: List[Tuple[float, int, int, float, int]] = []
         for q, c, p, box in ref_pairs:
             best = None
-            for j, (_q2, c2, p2, box2) in enumerate(candidates):
+            for j, (q2, c2, p2, box2) in enumerate(candidates):
                 if j in used or c2 != c:
                     continue
                 d = float(np.abs(box - box2).max())
                 if best is None or d < best[0]:
-                    best = (d, j, p2)
+                    best = (d, j, p2, q2)
             if best is None or best[0] > box_atol or abs(p - best[2]) > score_atol:
                 missing.append({"query": q, "class": c, "score": round(p, 4),
                                 "nearest_box_diff": None if best is None else round(best[0], 5),
@@ -742,6 +788,9 @@ def compare_rfdetr_parity(reference: Dict[str, List[Any]], got: Dict[str, List[A
                 continue
             used.add(best[1])
             worst_box, worst_score = max(worst_box, best[0]), max(worst_score, abs(p - best[2]))
+            if seg:
+                iou = _mask_iou(ref_masks[0][q], got_masks[0][best[3]], mask_threshold)
+                mask_ious.append((iou, q, c, p, best[3]))
         extra = [{"query": q2, "class": c2, "score": round(p2, 4)}
                  for j, (q2, c2, p2, _b) in enumerate(candidates)
                  if j not in used and p2 >= floor + score_atol]
@@ -750,6 +799,9 @@ def compare_rfdetr_parity(reference: Dict[str, List[Any]], got: Dict[str, List[A
                  "slot_agreement": round(agreement, 4),
                  "slot_box_max_abs": slot_box_max,
                  "slot_score_max_abs": slot_score_max}
+        if seg:
+            mask_ious.sort(key=lambda m: m[0])
+            entry["mask_iou_min"] = mask_ious[0][0] if mask_ious else None
         report[key] = entry
         if missing or extra:
             fatal(f"parity: {runtime} detections on the {key} input differ from the source "
@@ -762,16 +814,27 @@ def compare_rfdetr_parity(reference: Dict[str, List[Any]], got: Dict[str, List[A
                   f"{tolerance['min_slot_agreement']:.0%} within box {box_atol} / score "
                   f"{score_atol}; worst box {entry['slot_box_max_abs']:.4g}, score "
                   f"{entry['slot_score_max_abs']:.4g})")
+        if seg and mask_ious and mask_ious[0][0] < tolerance["mask_iou"]:
+            iou, q, c, p, q2 = mask_ious[0]
+            fatal(f"parity: {runtime} mask IoU {iou:.4f} on the {key} input is below "
+                  f"{tolerance['mask_iou']} (masks binarised at {mask_threshold} on the native "
+                  f"grid; worst pair: source query {q} class {c} score {p:.3f} matched to "
+                  f"runtime query {q2})")
     return report
 
 
-def parity_summary(results: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, float]:
-    """Worst box / score difference over every runtime and input (pure)."""
-    box = max((e["box_max_abs"] for per_input in results.values() for e in per_input.values()),
-              default=0.0)
-    score = max((e["score_max_abs"] for per_input in results.values() for e in per_input.values()),
-                default=0.0)
-    return {"box_max_abs": box, "score_max_abs": score}
+def parity_summary(results: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Any]:
+    """Worst box / score difference over every runtime and input (pure); plus
+    the lowest `mask_iou_min` when the entries carry one (RF-DETR-Seg only --
+    a detection summary keeps exactly its two keys)."""
+    entries = [e for per_input in results.values() for e in per_input.values()]
+    box = max((e["box_max_abs"] for e in entries), default=0.0)
+    score = max((e["score_max_abs"] for e in entries), default=0.0)
+    summary: Dict[str, Any] = {"box_max_abs": box, "score_max_abs": score}
+    if any("mask_iou_min" in e for e in entries):
+        measured = [e["mask_iou_min"] for e in entries if e.get("mask_iou_min") is not None]
+        summary["mask_iou_min"] = min(measured) if measured else None
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1214,11 +1277,15 @@ def run(env: Dict[str, str]) -> Dict[str, Any]:
     current = run_on_export_runtime(result.onnx_path, inputs)
     floor = run_on_fleet_floor(result.onnx_path, inputs)
     compare = compare_yolo_parity if cfg.arch == "yolo" else compare_rfdetr_parity
+    # The DETR-family comparator takes the task (the mask term runs for
+    # segmentation only) and the record's mask threshold (Req 7.5).
+    compare_kwargs = {} if cfg.arch == "yolo" else {"task": cfg.task,
+                                                    "mask_threshold": cfg.mask_threshold}
     parity: Dict[str, Any] = {}
     for runtime in (current, floor):
         label = f"onnxruntime {runtime.ort}"
         parity[label] = compare(reference, runtime.outputs, cfg.num_classes,
-                                PARITY_TOLERANCE[cfg.arch], label)
+                                PARITY_TOLERANCE[cfg.arch], label, **compare_kwargs)
         log(f"parity vs {label} OK: {json.dumps(parity[label])}")
 
     onnx_sha = sha256_file(result.onnx_path)

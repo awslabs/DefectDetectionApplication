@@ -912,11 +912,143 @@ def test_rfdetr_parity_requires_both_tensors(scipy_stub):
         ec.compare_rfdetr_parity, {"i": ref}, {"i": [ref[0]]}, 2, ec.PARITY_TOLERANCE["rf_detr"], "rt")
 
 
+# --- RF-DETR-Seg: the mask term (spec rfdetr-seg-support task 7.4, Req 7.5) ---
+
+def _rf_seg_outputs(q=6, c=2, grid=8, confident=((0, 0, 0.9), (1, 1, 0.7))):
+    """boxes + logits as _rf_outputs, plus mask logits [1, q, grid, grid]:
+    background everywhere except a half-plane blob on every confident slot."""
+    boxes, logits = _rf_outputs(q, c, confident)
+    rng = np.random.default_rng(5)
+    masks = rng.uniform(-4.0, -2.0, (1, q, grid, grid))
+    for slot, _cls, _p in confident:
+        masks[0, slot, : grid // 2, :] = 3.0
+    return [boxes, logits, masks]
+
+
+def test_rfdetr_seg_tolerance_extends_the_detection_one():
+    assert ec.PARITY_TOLERANCE["rf_detr_seg"] == {**ec.PARITY_TOLERANCE["rf_detr"], "mask_iou": 0.99}
+    assert set(ec.PARITY_TOLERANCE) == {"yolo", "rf_detr", "rf_detr_seg"}
+
+
+def test_rfdetr_seg_parity_reports_the_minimum_mask_iou_per_matched_pair(scipy_stub):
+    tol = ec.PARITY_TOLERANCE["rf_detr_seg"]
+    ref = _rf_seg_outputs()
+    report = ec.compare_rfdetr_parity({"image": ref}, {"image": [a.copy() for a in ref]}, 2, tol,
+                                      "onnxruntime 1.16.3", task="segmentation", mask_threshold=0.5)
+    entry = report["image"]
+    assert (entry["detections"], entry["matched"], entry["mask_iou_min"]) == (2, 2, 1.0)
+    # The runtime may emit the same proposals in other slots: the IoU is taken
+    # between the MATCHED pair's masks, never between equal slot indices.
+    swapped = [a[:, [1, 0, 2, 3, 4, 5]].copy() for a in ref]
+    report = ec.compare_rfdetr_parity({"image": ref}, {"image": swapped}, 2, tol, "rt",
+                                      task="segmentation")
+    assert (report["image"]["mask_iou_min"], report["image"]["slot_agreement"]) == (1.0, 1.0)
+    # The detection task is untouched: no mask key in its entries.
+    det = ec.compare_rfdetr_parity({"image": ref[:2]}, {"image": [a.copy() for a in ref[:2]]}, 2,
+                                   ec.PARITY_TOLERANCE["rf_detr"], "rt")
+    assert "mask_iou_min" not in det["image"]
+    assert set(det["image"]) == {"detections", "matched", "box_max_abs", "score_max_abs",
+                                 "slot_agreement", "slot_box_max_abs", "slot_score_max_abs"}
+
+
+def test_rfdetr_seg_parity_fails_below_the_mask_iou_floor_quoting_the_pair(scipy_stub):
+    tol = ec.PARITY_TOLERANCE["rf_detr_seg"]
+    ref = _rf_seg_outputs()
+    drifted = [a.copy() for a in ref]
+    drifted[2][0, 1, 0, :] = -3.0  # the confident slot 1 loses one of its four mask rows
+    message = fatal_message(ec.compare_rfdetr_parity, {"image": ref}, {"image": drifted}, 2, tol,
+                            "onnxruntime 1.16.3", task="segmentation")
+    assert "onnxruntime 1.16.3 mask IoU 0.7500 on the image input is below 0.99" in message
+    assert "source query 1 class 1 score 0.700 matched to runtime query 1" in message
+    # The box / score rules still run first and are unchanged.
+    moved = [a.copy() for a in drifted]
+    moved[0][0, 0] += 0.01
+    assert "unmatched" in fatal_message(ec.compare_rfdetr_parity, {"i": ref}, {"i": moved}, 2, tol,
+                                        "rt", task="segmentation")
+    # A drifted mask on a slot below score_floor is not a detection pair: never measured.
+    tail = [a.copy() for a in ref]
+    tail[2][0, 5] = 3.0
+    report = ec.compare_rfdetr_parity({"image": ref}, {"image": tail}, 2, tol, "rt",
+                                      task="segmentation")
+    assert report["image"]["mask_iou_min"] == 1.0
+
+
+def test_rfdetr_seg_parity_binarises_at_the_records_mask_threshold(scipy_stub):
+    tol = ec.PARITY_TOLERANCE["rf_detr_seg"]
+    ref = _rf_seg_outputs()
+    ref[2][0, 0] = 1.0  # sigmoid 0.73 on the whole grid of slot 0
+    hotter = [a.copy() for a in ref]
+    hotter[2][0, 0] = 3.0  # sigmoid 0.95: the same mask at 0.5, the opposite one at 0.9
+    report = ec.compare_rfdetr_parity({"i": ref}, {"i": hotter}, 2, tol, "rt", task="segmentation",
+                                      mask_threshold=0.5)
+    assert report["i"]["mask_iou_min"] == 1.0
+    message = fatal_message(ec.compare_rfdetr_parity, {"i": ref}, {"i": hotter}, 2, tol, "rt",
+                            task="segmentation", mask_threshold=0.9)
+    assert "mask IoU 0.0000" in message and "binarised at 0.9" in message
+    # Two empty masks agree.
+    assert ec._mask_iou(np.full((4, 4), -9.0), np.full((4, 4), -9.0), 0.5) == 1.0
+
+
+def test_rfdetr_seg_parity_requires_the_mask_tensor_on_the_reference_grid(scipy_stub):
+    tol = ec.PARITY_TOLERANCE["rf_detr_seg"]
+    ref = _rf_seg_outputs()
+    message = fatal_message(ec.compare_rfdetr_parity, {"i": ref}, {"i": ref[:2]}, 2, tol, "rt",
+                            task="segmentation")
+    assert "do not match the source model's [1, 6, 4] + [1, 6, 3] + [1, 6, 8, 8]" in message
+    other_grid = [ref[0], ref[1], np.zeros((1, 6, 4, 4))]
+    assert "[[1, 6, 4], [1, 6, 3], [1, 6, 4, 4]] do not match" in fatal_message(
+        ec.compare_rfdetr_parity, {"i": ref}, {"i": other_grid}, 2, tol, "rt", task="segmentation")
+
+
+def test_rfdetr_seg_parity_pairs_a_three_class_model_by_position(scipy_stub):
+    # num_classes + 1 == 4: boxes and logits share [1, Q, 4]. Both lists are in
+    # graph order (the forward_export tuple; sess.run(None, ...)), so the first
+    # [1, Q, 4] array is the boxes and the next one the logits, and the mask is
+    # the only rank-4 array wherever it sits.
+    tol = ec.PARITY_TOLERANCE["rf_detr_seg"]
+    ref = _rf_seg_outputs(c=3, confident=((0, 0, 0.9), (1, 2, 0.7)))
+    assert ref[0].shape == ref[1].shape == (1, 6, 4)
+    report = ec.compare_rfdetr_parity({"i": ref}, {"i": [a.copy() for a in ref]}, 3, tol, "rt",
+                                      task="segmentation")
+    assert (report["i"]["detections"], report["i"]["matched"], report["i"]["mask_iou_min"]) == (2, 2, 1.0)
+    mask_first = [ref[2].copy(), ref[0].copy(), ref[1].copy()]
+    report = ec.compare_rfdetr_parity({"i": ref}, {"i": mask_first}, 3, tol, "rt", task="segmentation")
+    assert (report["i"]["matched"], report["i"]["mask_iou_min"]) == (2, 1.0)
+    # The detection three-class pair is matched the same way, byte-identically to today.
+    det = ec.compare_rfdetr_parity({"i": ref[:2]}, {"i": [a.copy() for a in ref[:2]]}, 3,
+                                   ec.PARITY_TOLERANCE["rf_detr"], "rt")
+    assert det["i"]["matched"] == 2 and "mask_iou_min" not in det["i"]
+
+
+def test_rfdetr_seg_parity_without_a_confident_pair_measures_no_mask(scipy_stub):
+    tol = ec.PARITY_TOLERANCE["rf_detr_seg"]
+    ref = _rf_seg_outputs(confident=())
+    report = ec.compare_rfdetr_parity({"synthetic": ref}, {"synthetic": [a.copy() for a in ref]}, 2,
+                                      tol, "rt", task="segmentation")
+    assert report["synthetic"]["detections"] == 0 and report["synthetic"]["mask_iou_min"] is None
+    # ... and a broken export is still caught by the slot-agreement rule.
+    broken = [np.random.default_rng(9).uniform(0, 1, a.shape) for a in ref]
+    broken[1] = _logit(np.full(ref[1].shape, 0.02))
+    assert "query slots agree" in fatal_message(ec.compare_rfdetr_parity, {"s": ref}, {"s": broken},
+                                                2, tol, "rt", task="segmentation")
+
+
 def test_parity_summary_is_the_worst_case():
     results = {"a": {"x": {"box_max_abs": 0.1, "score_max_abs": 1e-6},
                      "y": {"box_max_abs": 0.3, "score_max_abs": 1e-7}},
                "b": {"x": {"box_max_abs": 0.2, "score_max_abs": 2e-6}}}
     assert ec.parity_summary(results) == {"box_max_abs": 0.3, "score_max_abs": 2e-6}
+
+
+def test_parity_summary_carries_the_lowest_measured_mask_iou():
+    results = {"a": {"x": {"box_max_abs": 0.1, "score_max_abs": 1e-6, "mask_iou_min": 0.995},
+                     "y": {"box_max_abs": 0.3, "score_max_abs": 1e-7, "mask_iou_min": None}},
+               "b": {"x": {"box_max_abs": 0.2, "score_max_abs": 2e-6, "mask_iou_min": 0.992}}}
+    assert ec.parity_summary(results) == {"box_max_abs": 0.3, "score_max_abs": 2e-6,
+                                          "mask_iou_min": 0.992}
+    unmeasured = {"a": {"x": {"box_max_abs": 0.1, "score_max_abs": 1e-6, "mask_iou_min": None}}}
+    assert ec.parity_summary(unmeasured) == {"box_max_abs": 0.1, "score_max_abs": 1e-6,
+                                             "mask_iou_min": None}
 
 
 # ---------------------------------------------------------------------------
@@ -1006,3 +1138,122 @@ def test_write_artifact_leaves_exactly_two_members(tmp_path):
     assert sorted(p.name for p in model_dir.iterdir()) == ["model.onnx", "training_metadata.json"]
     assert (model_dir / "model.onnx").read_bytes() == b"graph"
     assert json.loads((model_dir / "training_metadata.json").read_text()) == {"a": 1}
+
+
+# ---------------------------------------------------------------------------
+# run(): the whole job with the converter, the ONNX reader and both runtimes
+# stubbed (spec rfdetr-seg-support tasks 7.4 / 7.6). The stub "model" answers
+# every parity input with the same fixed arrays on the torch side and on both
+# runtimes, so the real comparators see identical tensors.
+# ---------------------------------------------------------------------------
+
+def _seg_summary(q, c, size, names=("dets", "labels", "masks")):
+    g = size // 4
+    return summary(inputs=[("input", [1, 3, size, size], "FLOAT")],
+                   outputs=[(names[0], [1, q, 4], "FLOAT"), (names[1], [1, q, c + 1], "FLOAT"),
+                            (names[2], [1, q, g, g], "FLOAT")])
+
+
+def _det_summary(q, c, size):
+    return summary(inputs=[("input", [1, 3, size, size], "FLOAT")],
+                   outputs=[("dets", [1, q, 4], "FLOAT"), ("labels", [1, q, c + 1], "FLOAT")])
+
+
+def _run_job(monkeypatch, tmp_path, *, env_overrides, outputs, onnx_summary, describe):
+    """ec.run(env) with convert_rfdetr, normalize_ir_version, onnx_summary and
+    the two runtime runners stubbed; returns (metadata, calls) where `calls`
+    records the contract verifier that ran and every compare_rfdetr_parity
+    keyword set."""
+    channel = tmp_path / "channel"
+    channel.mkdir()
+    (channel / "checkpoint.pth").write_bytes(b"ckpt")
+    sha = hashlib.sha256(b"ckpt").hexdigest()
+    monkeypatch.setattr(ec, "INPUT_DIR", channel)
+    monkeypatch.setattr(ec, "WORK", tmp_path / "work")
+    monkeypatch.setattr(ec, "MODEL_DIR", tmp_path / "model")
+    calls = {"verifier": [], "compare": [], "convert_cfg": []}
+
+    def fake_convert(local, cfg):
+        calls["convert_cfg"].append(cfg)
+        onnx = tmp_path / "work" / "exported.onnx"
+        onnx.write_bytes(b"graph")
+        seg = cfg.task == "segmentation"
+        return SimpleNamespace(onnx_path=onnx, reference=lambda batch: [a.copy() for a in outputs],
+                               describe=describe, exporter="rfdetr 1.10.1", torch="2.5.1+cpu",
+                               trainer=train_rfdetr, trainer_seg=train_rfdetr_seg if seg else None)
+
+    def runtime(ort):
+        def run_graph(path, inputs):
+            return SimpleNamespace(ort=ort, output_names=[n for n, _s, _t in onnx_summary["outputs"]],
+                                   outputs={k: [a.copy() for a in outputs] for k in inputs})
+        return run_graph
+
+    real_seg_contract, real_det_contract = ec.verify_rfdetr_seg_contract, ec.verify_rfdetr_contract
+    real_compare = ec.compare_rfdetr_parity
+
+    def seg_contract(*a, **kw):
+        calls["verifier"].append("verify_rfdetr_seg_contract")
+        return real_seg_contract(*a, **kw)
+
+    def det_contract(*a, **kw):
+        calls["verifier"].append("verify_rfdetr_contract")
+        return real_det_contract(*a, **kw)
+
+    def compare(*a, **kw):
+        calls["compare"].append(dict(kw))
+        return real_compare(*a, **kw)
+
+    monkeypatch.setattr(ec, "convert_rfdetr", fake_convert)
+    monkeypatch.setattr(ec, "normalize_ir_version", lambda path: (8, 8))
+    monkeypatch.setattr(ec, "onnx_summary", lambda path: onnx_summary)
+    monkeypatch.setattr(ec, "run_on_export_runtime", runtime("1.30.0"))
+    monkeypatch.setattr(ec, "run_on_fleet_floor", runtime("1.16.3"))
+    monkeypatch.setattr(ec, "verify_rfdetr_seg_contract", seg_contract)
+    monkeypatch.setattr(ec, "verify_rfdetr_contract", det_contract)
+    monkeypatch.setattr(ec, "compare_rfdetr_parity", compare)
+    metadata = ec.run(env(EXPECTED_SHA256=sha, **env_overrides))
+    return metadata, calls
+
+
+SEG_DESCRIBE = {"size": "small", "model_class": "RFDETRSegSmall", "num_classes": 1,
+                "class_names": ["blue_plate"], "resolution": 384}
+DET_DESCRIBE = {"size": "small", "model_class": "RFDETRSmall", "num_classes": 1,
+                "class_names": ["blue_plate"], "resolution": 512}
+
+
+def test_run_passes_the_task_and_mask_threshold_to_the_seg_parity_check(tmp_path, monkeypatch,
+                                                                       scipy_stub):
+    outputs = _rf_seg_outputs(q=6, c=1, grid=96, confident=((0, 0, 0.9),))
+    metadata, calls = _run_job(
+        monkeypatch, tmp_path,
+        env_overrides=dict(DETECTION_ARCH="rf_detr_seg", NETWORK_INPUT="384", EXPECTED_NUM_CLASSES="1",
+                           TASK="segmentation", MASK_THRESHOLD="0.4", RFDETR_SIZE="small"),
+        outputs=outputs, onnx_summary=_seg_summary(6, 1, 384), describe=SEG_DESCRIBE)
+    # one comparison per runtime, both with the record's task and threshold
+    assert calls["compare"] == [{"task": "segmentation", "mask_threshold": 0.4}] * 2
+    assert calls["convert_cfg"][0].mask_threshold == 0.4
+    parity = metadata["parity"]
+    assert parity["tolerance"] == ec.PARITY_TOLERANCE["rf_detr_seg"]
+    assert set(parity["runtimes"]) == {"onnxruntime 1.30.0", "onnxruntime 1.16.3"}
+    for per_input in parity["runtimes"].values():
+        assert per_input["synthetic"]["mask_iou_min"] == 1.0  # the measured minimum, per runtime
+    assert parity["max_abs"] == {"box_max_abs": 0.0, "score_max_abs": 0.0, "mask_iou_min": 1.0}
+    assert parity["inputs"] == ["synthetic"]  # no bundled image on this host (ultralytics blocked)
+    assert metadata["mask_threshold"] == 0.4 and metadata["detection_arch"] == "rf_detr_seg"
+    assert sorted(p.name for p in (tmp_path / "model").iterdir()) == ["model.onnx", "training_metadata.json"]
+    json.dumps(metadata)
+
+
+def test_run_keeps_the_detection_parity_call_and_metadata_free_of_mask_terms(tmp_path, monkeypatch,
+                                                                            scipy_stub):
+    outputs = _rf_outputs(q=6, c=1, confident=((0, 0, 0.9),))
+    metadata, calls = _run_job(
+        monkeypatch, tmp_path,
+        env_overrides=dict(DETECTION_ARCH="rf_detr", NETWORK_INPUT="512", EXPECTED_NUM_CLASSES="1"),
+        outputs=outputs, onnx_summary=_det_summary(6, 1, 512), describe=DET_DESCRIBE)
+    assert calls["compare"] == [{"task": "detection", "mask_threshold": 0.5}] * 2
+    parity = metadata["parity"]
+    assert parity["tolerance"] == ec.PARITY_TOLERANCE["rf_detr"]
+    assert parity["max_abs"] == {"box_max_abs": 0.0, "score_max_abs": 0.0}
+    assert "mask_iou_min" not in json.dumps(parity)
+    assert "mask_threshold" not in metadata
