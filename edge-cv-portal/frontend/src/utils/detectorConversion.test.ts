@@ -70,6 +70,26 @@ const RF_SMALL: CheckpointAssessment = {
   reasons: [],
 };
 
+/** An RF-DETR-Seg small checkpoint (rfdetr-seg-support): the probe saw the mask head. */
+const SEG_SMALL: CheckpointAssessment = {
+  kind: 'rfdetr_checkpoint',
+  arch: 'rf_detr_seg',
+  task: 'segmentation',
+  model_class: 'RFDETRSegSmall',
+  head_classes: [],
+  num_classes: 1,
+  class_names: ['crack'],
+  train_input_size: 384,
+  framework: 'rfdetr',
+  framework_version: null,
+  rfdetr_size: null,
+  model_type: 'instance_segmentation',
+  rfdetr_seg_size: 'small',
+  num_queries: 100,
+  convertible: true,
+  reasons: [],
+};
+
 /** A YOLO segmentation checkpoint: recognised, not convertible. */
 const YOLO_SEG: CheckpointAssessment = {
   ...PPE,
@@ -197,6 +217,15 @@ describe('Checkpoint panel labels', () => {
     expect(checkpointFamilyLabel(null)).toBe('Unrecognised file');
   });
 
+  it('names an RF-DETR-Seg checkpoint by its Seg size (rfdetr-seg-support Req 12.5)', () => {
+    expect(checkpointFamilyLabel(SEG_SMALL)).toBe('RF-DETR-Seg (small)');
+    expect(checkpointFamilyLabel({ ...SEG_SMALL, rfdetr_seg_size: '2xlarge' })).toBe('RF-DETR-Seg (2xlarge)');
+    expect(checkpointFamilyLabel({ ...SEG_SMALL, rfdetr_seg_size: null })).toBe('RF-DETR-Seg');
+    // The detection size never leaks into the Seg label, and vice versa.
+    expect(checkpointFamilyLabel({ ...SEG_SMALL, rfdetr_seg_size: null, rfdetr_size: 'small' })).toBe('RF-DETR-Seg');
+    expect(checkpointFamilyLabel({ ...RF_SMALL, rfdetr_seg_size: 'small' })).toBe('RF-DETR (small)');
+  });
+
   it('names the saving library and version', () => {
     expect(checkpointLibraryLabel(PPE)).toBe('ultralytics 8.4.2');
     expect(checkpointLibraryLabel(RF_SMALL)).toBe('rfdetr (version not recorded)');
@@ -265,6 +294,42 @@ describe('conversionLocksFor (Requirement 10.3)', () => {
     expect(conversionLocksFor({ ...PPE, num_classes: 0 })).toBeNull();
     expect(conversionLocksFor(null)).toBeNull();
   });
+
+  // rfdetr-seg-support Requirement 7.3 / 12.5 (design section 8 "Seg checkpoint locks").
+  it('RF-DETR-Seg with a known size: instance_segmentation, its one native, step 1, both thresholds, no IoU', () => {
+    const locks = conversionLocksFor(SEG_SMALL)!;
+    expect(locks).toMatchObject({
+      arch: 'rf_detr_seg',
+      modelType: 'instance_segmentation',
+      exportFormat: 'onnx',
+      numClasses: 1,
+      classNames: ['crack'],
+      networkInput: 384,
+      inputBounds: { min: 240, max: 1152, step: 1 },
+      allowedInputs: [384],
+      rfdetrSize: null,
+      rfdetrSegSize: 'small',
+      scoreThreshold: 0.5,
+      maskThreshold: 0.5,
+      iouThreshold: null,
+      preserveAspect: false,
+      geometry: CONVERSION_GEOMETRY.rf_detr_seg.label,
+      geometryReason: CONVERSION_GEOMETRY.rf_detr_seg.reason,
+    });
+  });
+
+  it('RF-DETR-Seg of unknown size offers the six natives and leaves the choice to the user', () => {
+    const locks = conversionLocksFor({ ...SEG_SMALL, rfdetr_seg_size: null, train_input_size: null })!;
+    expect(locks.allowedInputs).toEqual([312, 384, 432, 504, 624, 768]);
+    expect(locks.networkInput).toBeNull();
+    expect(locks.rfdetrSegSize).toBeNull();
+    expect(conversionLocksFor({ ...SEG_SMALL, rfdetr_seg_size: null, train_input_size: 624 })!.networkInput).toBe(624);
+    // A training size that is not a native is not pre-filled.
+    expect(conversionLocksFor({ ...SEG_SMALL, rfdetr_seg_size: null, train_input_size: 512 })!.networkInput).toBeNull();
+    // The detection locks carry the Seg-only fields as null.
+    expect(conversionLocksFor(RF_SMALL)!).toMatchObject({ rfdetrSegSize: null, maskThreshold: null, modelType: 'object_detection' });
+    expect(conversionLocksFor(PPE)!).toMatchObject({ rfdetrSegSize: null, maskThreshold: null });
+  });
 });
 
 describe('validateClassNames (Requirement 4.4)', () => {
@@ -310,6 +375,20 @@ describe('networkInputProblem and thresholdProblem', () => {
     expect(networkInputProblem(rfUnknown, '640')).toBe(
       'RF-DETR converts only at a native resolution (384, 512, 576, 704); got 640'
     );
+  });
+
+  it('RF-DETR-Seg: its native resolution only, never the step-of-32 rule (rfdetr-seg-support Req 7.3)', () => {
+    const seg = conversionLocksFor(SEG_SMALL)!;
+    const segUnknown = conversionLocksFor({ ...SEG_SMALL, rfdetr_seg_size: null, train_input_size: null })!;
+    expect(networkInputProblem(seg, '384')).toBeNull();
+    expect(networkInputProblem(seg, 512)).toBe('RF-DETR-Seg small converts only at its native 384px; got 512');
+    expect(networkInputProblem(seg, '312')).toBe('RF-DETR-Seg small converts only at its native 384px; got 312');
+    // 312 / 432 / 504 / 624 are not multiples of 32 and are accepted for an unknown size.
+    for (const native of [312, 384, 432, 504, 624, 768]) expect(networkInputProblem(segUnknown, native)).toBeNull();
+    expect(networkInputProblem(segUnknown, '320')).toBe(
+      'RF-DETR-Seg converts only at a native resolution (312, 384, 432, 504, 624, 768); got 320'
+    );
+    expect(networkInputProblem(segUnknown, '')).toBe('Enter the network input size in pixels');
   });
 
   it('thresholds are strictly between 0 and 1', () => {
