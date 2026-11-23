@@ -617,7 +617,7 @@ class TestDeploymentAudit:
         monkeypatch.setattr(
             mods.deployments, "check_local_server_compatibility",
             lambda client, things, min_version, by_arch=None,
-            stream_features=False: [])
+            stream_features=False, rfdetr_seg=False: [])
 
         def deploy(user):
             event = env.event("POST", "/deployments", user, body={
