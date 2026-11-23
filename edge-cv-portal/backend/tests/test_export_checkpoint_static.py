@@ -14,7 +14,8 @@ Covered: the environment contract; the single-file and sha256 gates; AutoUpdate
 off before ultralytics is used; the pinned export arguments (no half,
 dynamic=False, simplify=True, opset 17, nms=None) and that checkpoint
 overrides cannot change them; the detector gates; RF-DETR size inference,
-PML / segmentation / legacy rejection and the strict load; the pure contract
+PML / preview / keypoint / legacy rejection, the RF-DETR-Seg task gate and
+Seg size table (spec rfdetr-seg-support, task 7.3) and the strict load; the pure contract
 verifiers (embedded NMS, (1, 300, 6), segmentation-shaped and fp16 graphs);
 the IR clamp; the fleet-floor subprocess; both parity comparators; the
 failure-file writer; and the metadata keys, checked against what
@@ -78,6 +79,7 @@ os.environ.pop("YOLO_AUTOINSTALL", None)
 os.environ.pop("YOLO_OFFLINE", None)
 ec = _import_export_module()
 import train_rfdetr  # noqa: E402  (real module; its heavy imports are lazy too)
+import train_rfdetr_seg  # noqa: E402  (the Seg trainer; convert_rfdetr imports it for the Seg task)
 
 SHA = "a00b6fce124e63c5d23f44792593983b70e646008b58bc54cf5b0a1c87ba2119"
 
@@ -280,8 +282,8 @@ def _install_ultralytics(monkeypatch, tmp_path, log, *, task="detect", model_cls
 
 
 def _cfg(**kw):
-    base = dict(arch="yolo", network_input=640, num_classes=4, opset=17, expected_sha256=SHA,
-                rfdetr_size=None)
+    base = dict(arch="yolo", task="detection", network_input=640, num_classes=4, opset=17,
+                expected_sha256=SHA, rfdetr_size=None, mask_threshold=0.5)
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -369,13 +371,26 @@ class T:
         self.shape = tuple(shape)
 
 
-def _rf_state(size, num_classes):
-    dec = {"nano": 2, "small": 3, "medium": 4, "large": 4}[size]
-    grid = {"nano": 24, "small": 32, "medium": 36, "large": 44}[size]
+# Stub architectures: one distinct shape signature per size. Detection sizes
+# keep their grids; the six Seg sizes (patch 12) get theirs plus the mask head,
+# so a Seg state never matches a detection shell and vice versa.
+_SEG_GRID = {"nano": 26, "small": 32, "medium": 36, "large": 42, "xlarge": 52, "2xlarge": 64}
+_SEG_NATIVES = dict(ec.RFDETR_SEG_NATIVE_INPUTS)
+
+
+def _rf_state(size, num_classes, seg=False):
+    if seg:
+        dec, grid = 2, _SEG_GRID[size]
+    else:
+        dec = {"nano": 2, "small": 3, "medium": 4, "large": 4}[size]
+        grid = {"nano": 24, "small": 32, "medium": 36, "large": 44}[size]
     sd = {"class_embed.weight": T(num_classes + 1, 256), "class_embed.bias": T(num_classes + 1),
           "backbone.0.encoder.embeddings.position_embeddings": T(1, grid * grid + 1, 384)}
     for i in range(dec):
         sd[f"transformer.decoder.layers.{i}.self_attn.in_proj_weight"] = T(768, 256)
+    if seg:
+        sd["segmentation_head.bias"] = T(1)
+        sd["segmentation_head.spatial_features_proj.weight"] = T(256, 256)
     return sd
 
 
@@ -400,15 +415,18 @@ class _Module:
 def _install_rfdetr(monkeypatch, tmp_path, ckpt, log, *, loaded_state=None):
     rfdetr = types.ModuleType("rfdetr")
     natives = {"nano": 384, "small": 512, "medium": 576, "large": 704}
-    for size, cls_name in ec.RFDETR_SIZE_CLASSES.items():
-        def make(size=size, cls_name=cls_name):
+    tables = [(size, cls_name, False, natives[size]) for size, cls_name in ec.RFDETR_SIZE_CLASSES.items()]
+    tables += [(size, cls_name, True, _SEG_NATIVES[size])
+               for size, cls_name in ec.RFDETR_SEG_SIZE_CLASSES.items()]
+    for size, cls_name, seg, native in tables:
+        def make(size=size, cls_name=cls_name, seg=seg, native=native):
             class Model:
                 def __init__(self, pretrain_weights=None, num_classes=None, trust_checkpoint=False):
                     log.append((cls_name, pretrain_weights))
-                    state = _rf_state(size, num_classes)
+                    state = _rf_state(size, num_classes, seg=seg)
                     if pretrain_weights is not None and loaded_state is not None:
                         state = loaded_state
-                    self.model = SimpleNamespace(model=_Module(state), resolution=natives[size])
+                    self.model = SimpleNamespace(model=_Module(state), resolution=native)
 
                 def export(self, output_dir, **kwargs):
                     log.append(("export", kwargs))
@@ -427,17 +445,33 @@ def _install_rfdetr(monkeypatch, tmp_path, ckpt, log, *, loaded_state=None):
     monkeypatch.setattr(ec, "WORK", tmp_path / "work")
 
 
-def _rf_ckpt(size="small", num_classes=1, **top):
-    ckpt = {"model": _rf_state(size, num_classes), "args": {"class_names": ["blue_plate"]}}
+def _rf_ckpt(size="small", num_classes=1, seg=False, **top):
+    ckpt = {"model": _rf_state(size, num_classes, seg=seg), "args": {"class_names": ["blue_plate"]}}
     ckpt.update(top)
     return ckpt
 
 
 def _rf_cfg(**kw):
-    base = dict(arch="rf_detr", network_input=512, num_classes=1, opset=17, expected_sha256=SHA,
-                rfdetr_size=None)
+    base = dict(arch="rf_detr", task="detection", network_input=512, num_classes=1, opset=17,
+                expected_sha256=SHA, rfdetr_size=None, mask_threshold=0.5)
     base.update(kw)
     return SimpleNamespace(**base)
+
+
+def _seg_cfg(**kw):
+    base = dict(arch="rf_detr_seg", task="segmentation", network_input=384, num_classes=1)
+    base.update(kw)
+    return _rf_cfg(**base)
+
+
+@pytest.fixture
+def seg_stamp(monkeypatch):
+    """Stub train_rfdetr_seg.stamp_static_output_dims (it needs onnx /
+    onnxruntime, blocked here) and record the path it was asked to stamp."""
+    stamped = []
+    monkeypatch.setattr(train_rfdetr_seg, "stamp_static_output_dims",
+                        lambda path: stamped.append(Path(path)) or {"masks": [1, 100, 96, 96]})
+    return stamped
 
 
 def test_rfdetr_size_is_inferred_by_an_exact_architecture_match(tmp_path, monkeypatch):
@@ -462,7 +496,9 @@ def test_rfdetr_model_name_is_tried_first_and_only_matches_count(tmp_path, monke
 
 @pytest.mark.parametrize("model_name,fragment", [
     ("RFDETRXLarge", "PML-licensed"), ("RFDETR2XLarge", "PML-licensed"),
-    ("RFDETRSegSmall", "only RF-DETR object detection"),
+    # RFDETRSegSmall left this list in rfdetr-seg-support task 7.3 (Req 7.2):
+    # a Seg checkpoint converts, see test_rfdetr_seg_checkpoint_converts_through_the_seg_table.
+    ("RFDETRSegPreview", "deprecated preview size"),
     ("RFDETRKeypointPreview", "only RF-DETR object detection"),
     ("RFDETRBase", "legacy RFDETRBase"),
 ])
@@ -472,12 +508,51 @@ def test_rfdetr_named_variants_are_rejected(tmp_path, monkeypatch, model_name, f
     assert fragment in fatal_message(ec.convert_rfdetr, tmp_path / "c.pth", _rf_cfg())
 
 
-def test_rfdetr_segmentation_keys_class_count_and_resolution(tmp_path, monkeypatch):
+def test_rfdetr_seg_checkpoint_converts_through_the_seg_table(tmp_path, monkeypatch, seg_stamp):
+    """rfdetr-seg-support Req 7.2 / 7.4 (the rewritten RFDETRSegSmall row): a
+    Seg checkpoint under a Seg config matches a Seg size shell, exports with
+    the detection kwargs, and the raw export is stamped static (M-1) before
+    anything reads it."""
+    log = []
+    _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt("small", seg=True, model_name="RFDETRSegSmall"), log)
+    result = ec.convert_rfdetr(tmp_path / "checkpoint.pth", _seg_cfg())
+    assert result.describe == {"size": "small", "model_class": "RFDETRSegSmall", "num_classes": 1,
+                               "class_names": ["blue_plate"], "resolution": 384}
+    shells = [entry[0] for entry in log if entry[1] is None]
+    assert shells == ["RFDETRSegSmall"]  # the named size is tried first and alone
+    export_kwargs = next(entry[1] for entry in log if entry[0] == "export")
+    assert export_kwargs["opset_version"] == 17 and export_kwargs["batch_size"] == 1
+    assert seg_stamp == [result.onnx_path] and result.trainer_seg is train_rfdetr_seg
+    # Nameless: the shell signature alone picks the Seg size (xlarge, D4).
+    log.clear()
+    seg_stamp.clear()
+    _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt("xlarge", seg=True), log)
+    result = ec.convert_rfdetr(tmp_path / "checkpoint.pth", _seg_cfg(network_input=624))
+    assert result.describe["size"] == "xlarge" and result.describe["model_class"] == "RFDETRSegXLarge"
+    assert len(seg_stamp) == 1
+    # A detection conversion never stamps and keeps trainer_seg None.
+    seg_stamp.clear()
+    _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt("small"), log)
+    result = ec.convert_rfdetr(tmp_path / "checkpoint.pth", _rf_cfg())
+    assert seg_stamp == [] and result.trainer_seg is None
+
+
+def test_rfdetr_task_gate_both_ways(tmp_path, monkeypatch):
+    """rfdetr-seg-support Req 7.4: the record's task and the state dict must
+    agree (this replaced the unconditional segmentation-head fatal)."""
     log = []
     seg = _rf_ckpt()
     seg["model"]["segmentation_head.conv.weight"] = T(1, 1)
     _install_rfdetr(monkeypatch, tmp_path, seg, log)
-    assert "segmentation head" in fatal_message(ec.convert_rfdetr, tmp_path / "c.pth", _rf_cfg())
+    message = fatal_message(ec.convert_rfdetr, tmp_path / "c.pth", _rf_cfg())
+    assert "carries a segmentation head; the import recorded a detection checkpoint" in message
+    _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt("small"), log)
+    message = fatal_message(ec.convert_rfdetr, tmp_path / "c.pth", _seg_cfg())
+    assert "recorded an RF-DETR-Seg checkpoint but the state dict has no segmentation head" in message
+
+
+def test_rfdetr_class_count_and_resolution(tmp_path, monkeypatch):
+    log = []
     _install_rfdetr(monkeypatch, tmp_path, _rf_ckpt(num_classes=3), log)
     assert "head has 3 classes; the import recorded 1" in fatal_message(
         ec.convert_rfdetr, tmp_path / "c.pth", _rf_cfg())

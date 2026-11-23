@@ -11,12 +11,20 @@ happen. A malicious checkpoint can at worst write a bad artifact, which the
 portal re-validates as untrusted before packaging (Requirement 8).
 
 Contract (environment, set by the portal's build_conversion_job_request):
-  DETECTION_ARCH        'yolo' | 'rf_detr'
-  NETWORK_INPUT         square export size S (multiple of 32)
+  DETECTION_ARCH        'yolo' | 'rf_detr' | 'rf_detr_seg'
+  NETWORK_INPUT         square export size S (multiple of 32; for rf_detr_seg
+                        the native resolution of a Seg size: 312, 384, 432,
+                        504, 624 or 768)
   EXPECTED_NUM_CLASSES  C the portal recorded from its own probe
   EXPECTED_SHA256       sha256 of the one checkpoint in the input channel
   ONNX_OPSET            default 17 (must be <= FLEET_MAX_OPSET)
-  RFDETR_SIZE           optional nano|small|medium|large (inferred otherwise)
+  RFDETR_SIZE           optional nano|small|medium|large (rf_detr) or
+                        nano|small|medium|large|xlarge|2xlarge (rf_detr_seg);
+                        inferred from the state dict otherwise
+  TASK                  'detection' (default) | 'segmentation'; must agree
+                        with DETECTION_ARCH (segmentation iff rf_detr_seg)
+  MASK_THRESHOLD        rf_detr_seg only: the Parity_Check's mask threshold
+                        in (0, 1), default 0.5 (spec rfdetr-seg-support)
 
 Input:  /opt/ml/input/data/checkpoint/<exactly one file>
 Output: /opt/ml/model/{model.onnx, training_metadata.json} -- exactly these two
@@ -30,7 +38,9 @@ Everything is verified here before anything is written:
     the state_dict key-for-key and shape-for-shape;
   * the class count equals the record's;
   * the graph honours the Device_Output_Contract (YOLO: one [1, 4+C, N] output,
-    no embedded NMS, no one-to-one head; RF-DETR: [1,Q,4] + [1,Q,C+1]),
+    no embedded NMS, no one-to-one head; RF-DETR: [1,Q,4] + [1,Q,C+1];
+    RF-DETR-Seg: [1,Q,4] + [1,Q,C+1] + [1,Q,S/4,S/4] mask logits, the
+    Seg_Output_Contract of train_rfdetr_seg.verify_seg_outputs),
     float32 I/O, static [1, 3, S, S] input;
   * IR version <= 9 and default-domain opset <= 19, only the default operator
     domain, no external data (the fleet floor: onnxruntime 1.16.3 on JP5 and
@@ -68,7 +78,8 @@ FAILURE_FILE = Path(os.environ.get("FAILURE_FILE", "/opt/ml/output/failure"))
 # On the job's attached volume (the trainers' WORK lives under the same root).
 WORK = Path(os.environ.get("EXPORT_WORK_DIR", "/opt/ml/input/work/export"))
 
-ARCHES = ("yolo", "rf_detr")
+ARCHES = ("yolo", "rf_detr", "rf_detr_seg")
+TASKS = ("detection", "segmentation")
 # Fleet_Floor_Runtime: the oldest onnxruntime among the default packaging
 # targets (JP5 GPU build, CPU / x86 images).
 FLEET_FLOOR_ORT = "1.16.3"
@@ -81,7 +92,10 @@ TARGET_IR = 8
 DEFAULT_OPSET = 17
 ALLOWED_OP_DOMAINS = ("ai.onnx",)
 INPUT_STEP = 32
-INPUT_BOUNDS = {"yolo": (320, 2048), "rf_detr": (224, 1120)}
+# rf_detr_seg bounds are for error wording only: a Seg input must be a size's
+# native resolution and the % INPUT_STEP test never applies to it (312, 432,
+# 504 and 624 are not multiples of 32; Seg spec Req 7.3).
+INPUT_BOUNDS = {"yolo": (320, 2048), "rf_detr": (224, 1120), "rf_detr_seg": (240, 1152)}
 
 # ultralytics: the only model class / head classes the device's
 # YoloDetectionPostProcessor decodes correctly (spike: docs/detector-checkpoint-import-spike.md).
@@ -104,8 +118,8 @@ YOLO_EXPORT_ARGS = {
 }
 
 # RF-DETR: the Apache-2.0 detection sizes (the trainers' RFDETR_SIZES). The
-# PML-licensed XLarge / 2XLarge, the legacy Base / LargeDeprecated and the
-# segmentation variants are never candidates.
+# PML-licensed XLarge / 2XLarge and the legacy Base / LargeDeprecated are never
+# candidates; the Seg sizes are candidates for the segmentation task only.
 RFDETR_SIZE_CLASSES = {
     "nano": "RFDETRNano",
     "small": "RFDETRSmall",
@@ -143,8 +157,17 @@ RFDETR_IGNORED_KEYS = ("_kp_active_mask",)
 # and `:193-197` applies the PML notice to exactly those; the PyPI README for
 # rfdetr 1.10.1 lists every RF-DETR-Seg size as Apache-2.0 (Seg spec D4).
 RFDETR_PML_MODEL_NAMES = ("RFDETRXLarge", "RFDETR2XLarge")
-RFDETR_NON_DETECTION_PREFIXES = ("RFDETRSeg", "RFDETRKeypoint")
+# Keypoint models never convert; the Seg names left this tuple when the task
+# gate below took over (spec rfdetr-seg-support task 7.3, mismatch M-4) and
+# only the deprecated preview size is still rejected by name.
+RFDETR_NON_DETECTION_PREFIXES = ("RFDETRKeypoint",)
+RFDETR_REJECTED_SEG_NAMES = ("RFDETRSegPreview",)
 RFDETR_LEGACY_MODEL_NAMES = ("RFDETRBase", "RFDETRLargeDeprecated")
+# RF-DETR-Seg mask head (rfdetr 1.10.1 LWDETR.segmentation_head; no mask_
+# prefix exists) -- the task gate's state-dict signal -- and the mask grid
+# (R/4; mirrors train_rfdetr_seg.MASK_DOWNSAMPLE).
+RFDETR_SEG_HEAD_PREFIXES = ("segmentation_head.",)
+RFDETR_SEG_MASK_DOWNSAMPLE = 4
 
 # Parity tolerances (spike-measured; see docs/detector-checkpoint-import-spike.md).
 #   yolo    -- element-wise over the whole [1, 4+C, N] tensor: the one-to-many
@@ -239,7 +262,14 @@ def read_config(env: Dict[str, str]) -> SimpleNamespace:
 
     network_input = as_int("NETWORK_INPUT")
     low, high = INPUT_BOUNDS[arch]
-    if network_input % INPUT_STEP or not low <= network_input <= high:
+    if arch == "rf_detr_seg":
+        # The native-only rule of detector_conversion.validate_conversion_request
+        # mirrored in the job: no % INPUT_STEP test for Seg.
+        if network_input not in RFDETR_SEG_NATIVE_INPUTS.values():
+            fatal(f"NETWORK_INPUT must be the native resolution of an RF-DETR-Seg size "
+                  f"({', '.join(str(n) for n in RFDETR_SEG_NATIVE_INPUTS.values())}); "
+                  f"got {network_input}")
+    elif network_input % INPUT_STEP or not low <= network_input <= high:
         fatal(f"NETWORK_INPUT must be a multiple of {INPUT_STEP} in [{low}, {high}] "
               f"for {arch}; got {network_input}")
     num_classes = as_int("EXPECTED_NUM_CLASSES")
@@ -253,12 +283,32 @@ def read_config(env: Dict[str, str]) -> SimpleNamespace:
     if len(expected_sha) != 64 or any(c not in "0123456789abcdef" for c in expected_sha):
         fatal("EXPECTED_SHA256 must be the 64-character hex sha256 of the checkpoint")
     size = (env.get("RFDETR_SIZE") or "").strip().lower() or None
-    if size is not None and (arch != "rf_detr" or size not in RFDETR_SIZE_CLASSES):
-        fatal(f"RFDETR_SIZE must be one of {', '.join(RFDETR_SIZE_CLASSES)} "
-              f"(and only for rf_detr); got {size!r}")
-    return SimpleNamespace(arch=arch, network_input=network_input,
+    size_classes = RFDETR_SEG_SIZE_CLASSES if arch == "rf_detr_seg" else RFDETR_SIZE_CLASSES
+    if size is not None and (arch == "yolo" or size not in size_classes):
+        fatal(f"RFDETR_SIZE must be one of {', '.join(size_classes)} "
+              f"(and only for rf_detr / rf_detr_seg); got {size!r}")
+    if arch == "rf_detr_seg" and size is not None and network_input != RFDETR_SEG_NATIVE_INPUTS[size]:
+        fatal(f"NETWORK_INPUT must be the native resolution of an RF-DETR-Seg size "
+              f"({', '.join(str(n) for n in RFDETR_SEG_NATIVE_INPUTS.values())}); RF-DETR-Seg "
+              f"{size} converts only at {RFDETR_SEG_NATIVE_INPUTS[size]}; got {network_input}")
+    # The task (spec rfdetr-seg-support, C26): the portal sends TASK=segmentation
+    # for rf_detr_seg only; the default is detection, and the two must agree.
+    task = (env.get("TASK") or "detection").strip().lower()
+    if task not in TASKS:
+        fatal(f"TASK must be one of {', '.join(TASKS)}; got {task!r}")
+    if (task == "segmentation") != (arch == "rf_detr_seg"):
+        fatal(f"TASK {task} contradicts DETECTION_ARCH {arch}")
+    raw_mask = env.get("MASK_THRESHOLD", "0.5")
+    try:
+        mask_threshold = float(str(raw_mask).strip())
+    except (TypeError, ValueError):
+        mask_threshold = float("nan")
+    if not 0.0 < mask_threshold < 1.0:
+        fatal(f"MASK_THRESHOLD must be a number strictly between 0 and 1; got {raw_mask!r}")
+    return SimpleNamespace(arch=arch, task=task, network_input=network_input,
                            num_classes=num_classes, opset=opset,
-                           expected_sha256=expected_sha, rfdetr_size=size)
+                           expected_sha256=expected_sha, rfdetr_size=size,
+                           mask_threshold=mask_threshold)
 
 
 def single_input_file(directory: Path) -> Path:
@@ -514,12 +564,12 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 def parity_inputs(arch: str, size: int) -> Dict[str, Any]:
     """Deterministic parity inputs: a seeded synthetic tensor and a real image
     preprocessed the way the device does (YOLO: letterbox, pad 114, /255;
-    RF-DETR: square resize, /255, ImageNet mean/std)."""
+    RF-DETR and RF-DETR-Seg: square resize, /255, ImageNet mean/std)."""
     import numpy as np
 
     rng = np.random.default_rng(PARITY_SEED)
     synthetic = rng.random((1, 3, size, size), dtype=np.float32)
-    if arch == "rf_detr":
+    if arch in ("rf_detr", "rf_detr_seg"):
         mean = np.array(IMAGENET_MEAN, dtype=np.float32).reshape(1, 3, 1, 1)
         std = np.array(IMAGENET_STD, dtype=np.float32).reshape(1, 3, 1, 1)
         synthetic = (synthetic - mean) / std
@@ -860,6 +910,11 @@ def rfdetr_architecture_mismatch(expected: Dict[str, Tuple[int, ...]],
 
 
 def convert_rfdetr(checkpoint: Path, cfg: SimpleNamespace) -> SimpleNamespace:
+    """Both DETR archs: `cfg.task` selects the size table (the detection
+    sizes, or the six RF-DETR-Seg sizes for 'segmentation'), the task gate
+    requires the state dict to agree with the record, and for Seg the raw
+    export's symbolic mask dims are stamped static before any reader sees
+    the graph (spec rfdetr-seg-support s7, DD17, mismatch M-1)."""
     import copy
 
     import rfdetr
@@ -867,6 +922,11 @@ def convert_rfdetr(checkpoint: Path, cfg: SimpleNamespace) -> SimpleNamespace:
 
     import train_rfdetr as trainer  # the trainer's pure export/verify helpers
 
+    seg = cfg.task == "segmentation"
+    trainer_seg = None
+    if seg:
+        import train_rfdetr_seg as trainer_seg  # the Seg trainer's stamp / verifier
+    size_classes = RFDETR_SEG_SIZE_CLASSES if seg else RFDETR_SIZE_CLASSES
     try:
         # Isolated job: this is the one place a full unpickle is permitted.
         ckpt = torch.load(str(checkpoint), map_location="cpu", weights_only=False)  # nosem: runs only inside the network-isolated, credential-less Conversion_Job
@@ -876,26 +936,35 @@ def convert_rfdetr(checkpoint: Path, cfg: SimpleNamespace) -> SimpleNamespace:
     num_classes = trainer.checkpoint_num_classes(ckpt)
     if num_classes != cfg.num_classes:
         fatal(f"checkpoint head has {num_classes} classes; the import recorded {cfg.num_classes}")
-    if any(k.startswith(("segmentation_head.", "mask_")) for k in state):
-        fatal("checkpoint carries a segmentation head; only RF-DETR detection converts")
+    # The task gate (Req 7.4): the record's task and the state dict must agree;
+    # the mask head is the authoritative signal, exactly as in the probe.
+    has_mask_head = any(k.startswith(RFDETR_SEG_HEAD_PREFIXES) for k in state)
+    if seg and not has_mask_head:
+        fatal("the import recorded an RF-DETR-Seg checkpoint but the state dict has no "
+              "segmentation head")
+    if has_mask_head and not seg:
+        fatal("checkpoint carries a segmentation head; the import recorded a detection checkpoint")
     ckpt_sig = _shape_signature(state)
 
-    candidates = [cfg.rfdetr_size] if cfg.rfdetr_size else list(RFDETR_SIZE_CLASSES)
+    candidates = [cfg.rfdetr_size] if cfg.rfdetr_size else list(size_classes)
     model_name = ckpt.get("model_name") if isinstance(ckpt, dict) else None
     if model_name in RFDETR_PML_MODEL_NAMES:
         fatal(f"checkpoint is {model_name}, a PML-licensed RF-DETR size (rfdetr_plus); only the "
-              f"Apache-2.0 sizes {', '.join(RFDETR_SIZE_CLASSES.values())} convert")
+              f"Apache-2.0 sizes {', '.join(size_classes.values())} convert")
     if isinstance(model_name, str) and model_name.startswith(RFDETR_NON_DETECTION_PREFIXES):
         fatal(f"checkpoint is {model_name}; only RF-DETR object detection converts")
+    if model_name in RFDETR_REJECTED_SEG_NAMES:
+        fatal(f"checkpoint is {model_name}, a deprecated preview size; re-export with a current "
+              f"Seg size")
     if model_name in RFDETR_LEGACY_MODEL_NAMES:
-        fatal(f"checkpoint is the legacy {model_name}; only {', '.join(RFDETR_SIZE_CLASSES.values())} "
+        fatal(f"checkpoint is the legacy {model_name}; only {', '.join(size_classes.values())} "
               f"convert (rfdetr 1.10.1 sizes)")
-    named = next((s for s, c in RFDETR_SIZE_CLASSES.items() if c == model_name), None)
+    named = next((s for s, c in size_classes.items() if c == model_name), None)
     if named and not cfg.rfdetr_size:
         candidates = [named] + [c for c in candidates if c != named]
     matches, tried = [], {}
     for size in candidates:
-        Model = getattr(rfdetr, RFDETR_SIZE_CLASSES[size])
+        Model = getattr(rfdetr, size_classes[size])
         try:
             shell = Model(pretrain_weights=None, num_classes=num_classes)
         except Exception as e:  # noqa: BLE001
@@ -912,37 +981,47 @@ def convert_rfdetr(checkpoint: Path, cfg: SimpleNamespace) -> SimpleNamespace:
         fatal(f"checkpoint matches {len(matches)} Apache-2.0 RF-DETR sizes ({matches or 'none'}); "
               f"per-size key/shape differences: {tried}")
     size = matches[0]
-    Model = getattr(rfdetr, RFDETR_SIZE_CLASSES[size])
+    Model = getattr(rfdetr, size_classes[size])
     try:
         model = Model(pretrain_weights=str(checkpoint), trust_checkpoint=True, num_classes=num_classes)
     except Exception as e:  # noqa: BLE001
-        fatal(f"could not load weights into {RFDETR_SIZE_CLASSES[size]}: {type(e).__name__}: {e}")
+        fatal(f"could not load weights into {size_classes[size]}: {type(e).__name__}: {e}")
     native = int(model.model.resolution)
     if cfg.network_input != native:
         fatal(f"RF-DETR exports at the checkpoint's own resolution ({native} for {size}); "
               f"the import requested {cfg.network_input}")
     loaded = rfdetr_architecture_mismatch(_shape_signature(model.model.model.state_dict()), ckpt_sig)
     if any(loaded.values()):
-        fatal(f"weights did not load key-for-key into {RFDETR_SIZE_CLASSES[size]}: {loaded}")
+        fatal(f"weights did not load key-for-key into {size_classes[size]}: {loaded}")
 
     export_cfg = SimpleNamespace(opset=cfg.opset)
     produced = trainer.export_onnx(model, export_cfg, WORK / "rfdetr_export")
+    if seg:
+        # The raw rfdetr 1.10.1 export declares the four `masks` dims
+        # symbolically (M-1); onnx_summary would read them as None and every
+        # contract check below would reject the graph. The stamp runs the
+        # graph once on zeros and writes the observed static dims in place,
+        # before onnx_summary and the two runtimes read it.
+        trainer_seg.stamp_static_output_dims(Path(produced))
 
     reference_module = copy.deepcopy(model.model.model).cpu().eval()
     reference_module.export()
+    n_outputs = 3 if seg else 2
 
     def reference(batch: Any) -> List[Any]:
+        # After .export() the forward is forward_export: a tuple
+        # (pred_boxes, pred_logits[, pred_masks]) in ONNX output order (DD17).
         with torch.no_grad():
             out = reference_module(torch.from_numpy(batch))
         if isinstance(out, dict):
             out = (out["pred_boxes"], out["pred_logits"])
-        return [t.detach().cpu().numpy() for t in out[:2]]
+        return [t.detach().cpu().numpy() for t in out[:n_outputs]]
 
-    desc = {"size": size, "model_class": RFDETR_SIZE_CLASSES[size], "num_classes": num_classes,
+    desc = {"size": size, "model_class": size_classes[size], "num_classes": num_classes,
             "class_names": trainer.checkpoint_class_names(ckpt), "resolution": native}
     return SimpleNamespace(onnx_path=Path(produced), reference=reference, describe=desc,
                            exporter=f"rfdetr {distribution_version('rfdetr')}",
-                           torch=torch.__version__, trainer=trainer)
+                           torch=torch.__version__, trainer=trainer, trainer_seg=trainer_seg)
 
 
 def verify_rfdetr_contract(summary: Dict[str, Any], network_input: int, num_classes: int,
@@ -959,6 +1038,28 @@ def verify_rfdetr_contract(summary: Dict[str, Any], network_input: int, num_clas
     except ValueError as e:
         fatal(str(e).removeprefix("FATAL: "))
     return {"input_shape": input_shape, "output_shapes": [boxes, logits], "top_k": queries}
+
+
+def verify_rfdetr_seg_contract(summary: Dict[str, Any], network_input: int, num_classes: int,
+                               trainer_seg: Any) -> Dict[str, Any]:
+    """The Seg_Output_Contract (spec rfdetr-seg-support Req 7.4): the input
+    contract, float32 on all three outputs and the Seg trainer's
+    verify_seg_outputs -- exactly three static outputs sharing Q, boxes
+    [1, Q, 4], logits [1, Q, num_classes + 1], masks [1, Q, S/4, S/4], the
+    three-class case settled by the dets / labels names (pure apart from the
+    trainer import). Returns the shapes in boxes / logits / masks order plus
+    the graph-order output names the metadata records."""
+    input_shape = verify_input_contract(summary, network_input)
+    for name, _shape, dtype in summary["outputs"]:
+        if dtype != "FLOAT":
+            fatal(f"ONNX output {name} is {dtype}; expected float32 (FLOAT)")
+    try:
+        queries, boxes, logits, masks, names = trainer_seg.verify_seg_outputs(
+            [(n, list(s)) for n, s, _t in summary["outputs"]], num_classes, network_input)
+    except ValueError as e:
+        fatal(str(e).removeprefix("FATAL: "))
+    return {"input_shape": input_shape, "output_shapes": [boxes, logits, masks],
+            "output_names": list(names), "top_k": queries}
 
 
 # ---------------------------------------------------------------------------
@@ -1005,6 +1106,37 @@ def build_conversion_metadata(cfg: SimpleNamespace, result: SimpleNamespace,
                 "layout": "yolo",
                 "iou_threshold": 0.45,
                 "score_threshold": 0.25,
+            },
+        }
+    if cfg.task == "segmentation":
+        # The Seg data contract (spec rfdetr-seg-support, Data contracts /
+        # Req 7.6): the Seg trainer's keys. The hints name the default
+        # output_mode; the record's mode wins at packaging (6.2).
+        boxes, logits, masks = contract["output_shapes"]
+        return {
+            **common,
+            "rfdetr_seg_size": desc["size"],
+            "model_type": "instance_segmentation",
+            "model_class": desc["model_class"],
+            "resolution": cfg.network_input,
+            "onnx_input_shape": contract["input_shape"],
+            "onnx_output_shapes": [boxes, logits, masks],
+            "onnx_output_names": list(contract["output_names"]),
+            "logits_slots": int(logits[2]),
+            "background_slot": int(logits[2]) - 1,
+            "mask_downsample_ratio": RFDETR_SEG_MASK_DOWNSAMPLE,
+            "mask_threshold": cfg.mask_threshold,
+            "top_k": int(contract["top_k"]),
+            "device_manifest_hints": {
+                "layout": "rf_detr",
+                "stage_type": "rf_detr_instance_segmentation",
+                "output_mode": "instance",
+                "network_input": cfg.network_input,
+                "preserve_aspect": False,
+                "normalize": True,
+                "score_threshold": 0.5,
+                "mask_threshold": cfg.mask_threshold,
+                "top_k": int(contract["top_k"]),
             },
         }
     boxes, logits = contract["output_shapes"]
@@ -1070,6 +1202,9 @@ def run(env: Dict[str, str]) -> Dict[str, Any]:
     verify_fleet_structure(summary)
     if cfg.arch == "yolo":
         contract = verify_yolo_contract(summary, cfg.network_input, cfg.num_classes)
+    elif cfg.arch == "rf_detr_seg":
+        contract = verify_rfdetr_seg_contract(summary, cfg.network_input, cfg.num_classes,
+                                              result.trainer_seg)
     else:
         contract = verify_rfdetr_contract(summary, cfg.network_input, cfg.num_classes, result.trainer)
     log(f"contract OK: {json.dumps(contract)}")

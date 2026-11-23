@@ -192,6 +192,19 @@ def test_output_mode_and_detr_family_mirrors_agree():
     assert not set(dc.RFDETR_REJECTED_SEG_CLASSES) & set(dc.RFDETR_SEG_CLASS_FOR_SIZE.values())
 
 
+def test_conversion_job_mirrors_agree():
+    # export_checkpoint.py (task 7.3): the job's arch vocabulary, Seg bounds,
+    # name gates and mask grid agree with the shared layer and the Seg trainer.
+    assert ec.ARCHES == dt.DETECTION_ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg')
+    assert ec.TASKS == ('detection', 'segmentation')
+    assert ec.INPUT_BOUNDS['rf_detr_seg'] == dc.INPUT_BOUNDS['rf_detr_seg'] == (240, 1152)
+    assert set(ec.INPUT_BOUNDS) == set(dc.INPUT_BOUNDS) == set(dt.DETECTION_ARCHES)
+    assert ec.RFDETR_REJECTED_SEG_NAMES == dc.RFDETR_REJECTED_SEG_CLASSES == ('RFDETRSegPreview',)
+    assert ec.RFDETR_NON_DETECTION_PREFIXES == ('RFDETRKeypoint',)
+    assert ec.RFDETR_SEG_MASK_DOWNSAMPLE == ts.MASK_DOWNSAMPLE == dc.RFDETR_SEG_MASK_DOWNSAMPLE == 4
+    assert ec.RFDETR_SEG_HEAD_PREFIXES == ('segmentation_head.',)
+
+
 def test_stage_type_constants_agree():
     assert dt.STAGE_TYPE_FOR_ARCH['rf_detr_seg'] == dt.RFDETR_SEG_INSTANCE_STAGE_TYPE == \
         'rf_detr_instance_segmentation'
