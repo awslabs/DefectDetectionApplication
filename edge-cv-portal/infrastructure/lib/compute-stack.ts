@@ -1414,6 +1414,11 @@ export class ComputeStack extends cdk.Stack {
       environment: lambdaEnvironment,
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
+      // A captures page parses up to `limit` Detection_Lists (an instance
+      // capture's list may reach the device's 4 MiB ceiling) on a bounded
+      // thread pool: 1024 MB over the 128 MB default (rfdetr-seg-support
+      // Req 11.1 / 14.3, design "Page cost"). No IAM or environment change.
+      memorySize: 1024,
     });
     // captures.py lists and reads the default inference-results bucket
     // (list_objects_v2, get_object and a presigned get_object URL signed with
