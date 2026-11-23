@@ -884,23 +884,46 @@ def build_detection_device_manifest(
                defaults to False because RF-DETR trains on an aspect-destroying
                square resize — letterboxing would be the same geometry
                mismatch in the other direction.
+    - rf_detr_seg (Seg spec §6, Req 6.1): the rf_detr manifest with the stage
+               type resolved by `stage_type_for(arch, output_mode)` (instance
+               -> rf_detr_instance_segmentation, semantic ->
+               rf_detr_semantic_segmentation; `output_mode` defaults to
+               DEFAULT_OUTPUT_MODE), `normalize: True`, `preserve_aspect`
+               defaulting to False, no `iou_threshold`. The TOP-LEVEL
+               `detection` block is the rf_detr block (`layout: 'rf_detr'`,
+               the decoder family) plus `mask_threshold` (default 0.5),
+               `output_mode`, `output_names` (when given) and, last,
+               `class_names` (when given) — never a stage-level block: the
+               Triton base model merges the top-level one into the stage with
+               setdefault. `model_graph.pixel_level_classes` = `['background']`
+               + the class names (or `class_<i>` placeholders where the trainer
+               path has none), exactly num_classes + 1 names in both modes,
+               because both modes write a Composite_Mask through the
+               anomaly-mask utilities. Instance mode keeps `task:
+               'object_detection'`; semantic mode omits `task` (the anomaly
+               default), the only other difference between the two modes.
+               `output_mode`, `mask_threshold` and `output_names` are ignored
+               for yolo / rf_detr.
 
-    `output_shape` is nominal for both arches ([1, C+4, 8400], exactly what
+    `output_shape` is nominal for every arch ([1, C+4, 8400], exactly what
     Smart Import writes; the device does not read it) — packaging replaces it
-    with the real exported shape recorded in training_metadata.json.
+    with the real exported shape(s) recorded in training_metadata.json.
 
-    rf_detr_seg (Seg spec §6): a DETR-family manifest whose stage type is
-    resolved by `stage_type_for(arch, output_mode)`. `output_mode`,
-    `mask_threshold` and `output_names` are the Seg-only inputs of the Seg
-    `detection` block and `pixel_level_classes`, written by Seg spec task 6.1;
-    they are accepted here so callers are written against the final signature
-    and are ignored for yolo / rf_detr.
+    Key order is fixed by construction (runtime, runtime_artifact, model_graph,
+    input_shape, preprocessing, [task], detection, dataset) and shared with
+    generate_dda_package, so the parity test can compare json.dumps output.
     """
     arch = normalize_detection_arch(detection_arch)
+    is_seg = arch == 'rf_detr_seg'
     if preserve_aspect is None:
         preserve_aspect = arch == 'yolo'
     if not is_detr_family(arch) and iou_threshold is None:
         raise ValueError("iou_threshold is required for a yolo detection manifest")
+    mode = None
+    if is_seg:
+        mode = DEFAULT_OUTPUT_MODE if output_mode is None else str(output_mode).strip().lower()
+        if mask_threshold is None:
+            mask_threshold = RFDETR_SEG_DEFAULTS['mask_threshold']
 
     image_width = int(image_width)
     image_height = int(image_height)
@@ -909,7 +932,7 @@ def build_detection_device_manifest(
     output_shape = [1, num_classes + 4, 8400]
 
     stage = {
-        'type': stage_type_for(arch, output_mode),
+        'type': stage_type_for(arch, mode),
         'input_shape': input_shape,
         'output_shape': output_shape,
         'image_width': image_width,
@@ -920,7 +943,7 @@ def build_detection_device_manifest(
         'num_classes': num_classes,
     }
     detection: Dict[str, Any] = {
-        'layout': arch,
+        'layout': 'rf_detr' if is_seg else arch,
         'num_classes': num_classes,
         'score_threshold': float(score_threshold),
         'network_input': image_width,
@@ -930,24 +953,41 @@ def build_detection_device_manifest(
         detection['top_k'] = int(top_k)
     else:
         detection['iou_threshold'] = float(iou_threshold)
+    if is_seg:
+        detection['mask_threshold'] = float(mask_threshold)
+        detection['output_mode'] = mode
+        if output_names:
+            detection['output_names'] = [str(n) for n in output_names]
+    model_graph: Dict[str, Any] = {
+        'model_graph_type': 'single_stage_model_graph',
+        'stages': [stage],
+    }
+    if is_seg:
+        # Index 0 = background, index i + 1 = class i; exactly num_classes + 1
+        # names whatever the caller handed in (names are truncated to or
+        # padded up to num_classes with placeholders).
+        labels = [str(c) for c in (class_names or [])][:num_classes]
+        labels += [f'class_{i}' for i in range(len(labels), num_classes)]
+        model_graph['pixel_level_classes'] = {
+            'names': ['background'] + labels,
+            'normal_ids': [0],
+        }
     manifest: Dict[str, Any] = {
         'runtime': 'onnx',
         'runtime_artifact': 'model.onnx',
-        'model_graph': {
-            'model_graph_type': 'single_stage_model_graph',
-            'stages': [stage],
-        },
+        'model_graph': model_graph,
         'input_shape': input_shape,
         'preprocessing': {
             'resize': [image_width, image_height],
             'channel_order': 'RGB',
         },
-        'task': MODEL_TYPE_OBJECT_DETECTION,
-        'detection': detection,
-        'dataset': {
-            'image_width': image_width,
-            'image_height': image_height,
-        },
+    }
+    if not (is_seg and mode == OUTPUT_MODE_SEMANTIC):
+        manifest['task'] = MODEL_TYPE_OBJECT_DETECTION
+    manifest['detection'] = detection
+    manifest['dataset'] = {
+        'image_width': image_width,
+        'image_height': image_height,
     }
     if class_names:
         manifest['detection']['class_names'] = [str(c) for c in class_names]

@@ -6,9 +6,10 @@ Pure module — imported directly, no moto needed. conftest puts the shared
 layer on sys.path.
 
 # Validates: Requirements 2.2, 2.3, 2.4, 2.6, 3.2, 3.8, 3.9, 4.4, 5.3
-# Validates (rfdetr-seg-support): Requirements 1.1, 1.2, 1.3, 3.5, 4.7, 5.4, 15.3, 17.1, 17.3
+# Validates (rfdetr-seg-support): Requirements 1.1, 1.2, 1.3, 3.5, 4.7, 5.4, 6.1, 15.3, 17.1, 17.3
 """
 import io
+import json
 import os
 import re
 import tarfile
@@ -1420,6 +1421,135 @@ def test_rfdetr_device_manifest_property(k, n, score):
     assert m['detection']['network_input'] == k * 32
     assert m['detection']['class_names'] == names
     assert 'iou_threshold' not in set(_walk_keys(m))
+
+
+# ---------------------------------------------------------------------------
+# RF-DETR-Seg device manifest (Seg spec Req 6.1; task 6.1)
+# ---------------------------------------------------------------------------
+
+SEG_NAMES = ['scratch', 'dent']
+
+
+def _seg_manifest(**overrides):
+    kwargs = dict(image_width=384, image_height=384, num_classes=2, class_names=SEG_NAMES,
+                  score_threshold=0.5, detection_arch='rf_detr_seg', top_k=100,
+                  output_names=['dets', 'labels', 'masks'])
+    kwargs.update(overrides)
+    return dt.build_detection_device_manifest(**kwargs)
+
+
+def test_seg_device_manifest_instance_mode_is_the_data_contract():
+    """design.md Data contracts 'Device manifest (Seg)', instance mode, apart
+    from the output shapes the packager writes from the real graph."""
+    m = _seg_manifest()
+    assert json.dumps(m) == json.dumps({
+        'runtime': 'onnx', 'runtime_artifact': 'model.onnx',
+        'model_graph': {
+            'model_graph_type': 'single_stage_model_graph',
+            'stages': [{'type': 'rf_detr_instance_segmentation', 'input_shape': [1, 3, 384, 384],
+                        'output_shape': [1, 6, 8400], 'image_width': 384, 'image_height': 384,
+                        'image_range_scale': True, 'normalize': True, 'threshold': 0.5,
+                        'num_classes': 2}],
+            'pixel_level_classes': {'names': ['background', 'scratch', 'dent'], 'normal_ids': [0]},
+        },
+        'input_shape': [1, 3, 384, 384],
+        'preprocessing': {'resize': [384, 384], 'channel_order': 'RGB'},
+        'task': 'object_detection',
+        'detection': {'layout': 'rf_detr', 'num_classes': 2, 'score_threshold': 0.5,
+                      'network_input': 384, 'preserve_aspect': False, 'top_k': 100,
+                      'mask_threshold': 0.5, 'output_mode': 'instance',
+                      'output_names': ['dets', 'labels', 'masks'], 'class_names': ['scratch', 'dent']},
+        'dataset': {'image_width': 384, 'image_height': 384},
+    })
+    assert 'detection' not in m['model_graph']['stages'][0]
+    assert 'iou_threshold' not in set(_walk_keys(m))
+
+
+def test_seg_device_manifest_semantic_mode_differs_in_exactly_three_places():
+    instance = _seg_manifest(output_mode='instance')
+    semantic = _seg_manifest(output_mode='semantic')
+    assert semantic['model_graph']['stages'][0]['type'] == 'rf_detr_semantic_segmentation'
+    assert 'task' not in semantic
+    assert semantic['detection']['output_mode'] == 'semantic'
+    # Everything else, including the key order, is the instance manifest.
+    assert list(semantic) == ['runtime', 'runtime_artifact', 'model_graph', 'input_shape',
+                              'preprocessing', 'detection', 'dataset']
+    instance['model_graph']['stages'][0]['type'] = 'rf_detr_semantic_segmentation'
+    del instance['task']
+    instance['detection']['output_mode'] = 'semantic'
+    assert json.dumps(instance, sort_keys=True) == json.dumps(semantic, sort_keys=True)
+    assert 'detection' not in semantic['model_graph']['stages'][0]
+
+
+def test_seg_device_manifest_defaults_mode_mask_threshold_and_preserve_aspect():
+    m = _seg_manifest(output_mode=None, mask_threshold=None, preserve_aspect=None)
+    assert m['model_graph']['stages'][0]['type'] == dt.stage_type_for('rf_detr_seg', dt.DEFAULT_OUTPUT_MODE)
+    assert m['detection']['output_mode'] == dt.DEFAULT_OUTPUT_MODE == 'instance'
+    assert m['detection']['mask_threshold'] == 0.5
+    assert m['detection']['preserve_aspect'] is False
+    assert m['task'] == 'object_detection'
+    explicit = _seg_manifest(mask_threshold=0.3, preserve_aspect=True)
+    assert explicit['detection']['mask_threshold'] == 0.3
+    assert explicit['detection']['preserve_aspect'] is True
+
+
+def test_seg_device_manifest_optional_keys_are_written_only_when_given():
+    m = _seg_manifest(output_names=None, class_names=None)
+    assert 'output_names' not in m['detection'] and 'class_names' not in m['detection']
+    assert list(m['detection']) == ['layout', 'num_classes', 'score_threshold', 'network_input',
+                                    'preserve_aspect', 'top_k', 'mask_threshold', 'output_mode']
+    # With both: output_names before class_names, class_names last.
+    full = _seg_manifest()
+    assert list(full['detection'])[-2:] == ['output_names', 'class_names']
+
+
+@pytest.mark.parametrize('mode', ['instance', 'semantic'])
+@pytest.mark.parametrize('size', sorted(dt.RFDETR_SEG_SIZES))
+@pytest.mark.parametrize('names', [None, ['a', 'b', 'c']])
+def test_seg_device_manifest_pixel_level_classes_has_num_classes_plus_one_names(mode, size, names):
+    res = dt.RFDETR_SEG_SIZES[size]
+    m = _seg_manifest(image_width=res, image_height=res, num_classes=3, class_names=names,
+                      output_mode=mode, top_k=dt.RFDETR_SEG_QUERIES_FOR_SIZE[size])
+    plc = m['model_graph']['pixel_level_classes']
+    expected = ['background'] + (names if names else ['class_0', 'class_1', 'class_2'])
+    assert plc == {'names': expected, 'normal_ids': [0]}
+    assert len(plc['names']) == 3 + 1
+    assert m['detection']['num_classes'] == 3 and m['detection']['top_k'] == dt.RFDETR_SEG_QUERIES_FOR_SIZE[size]
+    assert m['input_shape'] == [1, 3, res, res] and m['preprocessing']['resize'] == [res, res]
+    assert ('task' in m) == (mode == 'instance')
+
+
+def test_seg_device_manifest_pixel_level_classes_pads_or_truncates_to_num_classes():
+    short = _seg_manifest(num_classes=3, class_names=['only'])
+    assert short['model_graph']['pixel_level_classes']['names'] == ['background', 'only', 'class_1', 'class_2']
+    assert short['detection']['class_names'] == ['only']   # the detection block keeps what was given
+    long = _seg_manifest(num_classes=1, class_names=['a', 'b'])
+    assert long['model_graph']['pixel_level_classes']['names'] == ['background', 'a']
+
+
+def test_seg_device_manifest_rejects_an_unknown_output_mode():
+    with pytest.raises(ValueError) as exc:
+        _seg_manifest(output_mode='panoptic')
+    assert 'output_mode' in str(exc.value)
+
+
+def test_seg_only_arguments_are_ignored_for_yolo_and_rf_detr():
+    """Preservation: output_mode / mask_threshold / output_names never reach
+    a yolo or rf_detr manifest, which stays the pre-Seg shape byte for byte."""
+    rf = dict(image_width=512, image_height=512, num_classes=2, class_names=['a', 'b'],
+              score_threshold=0.5, detection_arch='rf_detr')
+    plain = dt.build_detection_device_manifest(**rf)
+    with_seg = dt.build_detection_device_manifest(
+        output_mode='semantic', mask_threshold=0.3, output_names=['dets', 'labels'], **rf)
+    assert json.dumps(plain) == json.dumps(with_seg)
+    assert 'pixel_level_classes' not in plain['model_graph'] and 'task' in plain
+    assert not {'mask_threshold', 'output_mode', 'output_names'} & set(_walk_keys(plain))
+    yolo = dict(image_width=640, image_height=640, num_classes=1, class_names=['x'],
+                score_threshold=0.25, iou_threshold=0.45)
+    assert json.dumps(dt.build_detection_device_manifest(**yolo)) == json.dumps(
+        dt.build_detection_device_manifest(output_mode='semantic', mask_threshold=0.3, **yolo))
+    assert list(plain) == ['runtime', 'runtime_artifact', 'model_graph', 'input_shape',
+                           'preprocessing', 'task', 'detection', 'dataset']
 
 
 # ---------------------------------------------------------------------------
