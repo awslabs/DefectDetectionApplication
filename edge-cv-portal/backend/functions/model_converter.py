@@ -38,8 +38,19 @@ import hashlib
 import re
 import time
 import detector_conversion as dconv
-# The RF-DETR-Seg configuration-only off switch (rfdetr-seg-support DD7).
-from detection_training import rfdetr_seg_enabled
+# The RF-DETR-Seg configuration-only off switch (rfdetr-seg-support DD7) and,
+# for an RF-DETR-Seg ONNX import, the shared device-manifest builder packaging
+# uses for a portal-trained Seg model (DD6, Req 6.2): one builder, one manifest.
+from detection_training import (
+    MODEL_TYPE_INSTANCE_SEGMENTATION,
+    RFDETR_SEG_MASK_DOWNSAMPLE,
+    RFDETR_SEG_QUERIES_FOR_SIZE,
+    RFDETR_SEG_SIZES,
+    RFDETR_TOP_K,
+    build_detection_device_manifest,
+    rfdetr_seg_enabled,
+    stage_type_for,
+)
 from s3_cors import ensure_bucket_cors
 from botocore.config import Config
 
@@ -853,6 +864,10 @@ def generate_dda_package(
     iou_threshold: float = 0.45,
     detection_arch: str = 'yolo',
     preserve_aspect: bool = False,
+    output_mode: Optional[str] = None,
+    mask_threshold: Optional[float] = None,
+    num_queries: Optional[int] = None,
+    output_names: Optional[List[str]] = None,
 ) -> str:
     """
     Generate a DDA-compatible package from a raw model file.
@@ -877,19 +892,48 @@ def generate_dda_package(
         lfv_model_template.__load_model_graph_config merges into every stage so
         BasicPreProcessor._preserve_aspect finds it. Defaults to False to keep
         existing squash-trained imports byte-identical.
+    :param output_mode/mask_threshold/num_queries/output_names: RF-DETR-Seg
+        ONNX only (model_type 'instance_segmentation'; rfdetr-seg-support
+        Req 6.2 / 8.2): the Output_Mode ('instance' default, or 'semantic'),
+        the mask binarisation threshold (default 0.5), the graph's query
+        count Q (default: the Seg size whose native resolution is the input,
+        else RFDETR_TOP_K) and the graph's output names in order. The
+        manifest is built by detection_training.build_detection_device_manifest
+        -- the builder packaging uses for a portal-trained Seg model -- with
+        the three real output shapes [1, Q, 4] / [1, Q, C + 1] /
+        [1, Q, R/4, R/4] on the stage, so the two manifests are byte-identical
+        (pinned by tests/test_detection_manifest_parity.py). Ignored for every
+        other model type.
     """
     temp_dir = None
     is_onnx = str(export_format).lower() == 'onnx'
     is_detection = model_type == 'object_detection'
     detection_arch = str(detection_arch or 'yolo').lower()
-    # RF-DETR instance-segmentation ONNX -> rendered as a semantic mask through
-    # the existing anomaly-localization path (colored mask + overlay + color map).
-    is_rf_detr_seg = is_onnx and model_type == 'segmentation' and detection_arch == 'rf_detr'
+    # RF-DETR-Seg ONNX (rfdetr-seg-support Req 6.2): the shared builder writes
+    # the manifest. convert_model rewrites the legacy alias (model_type
+    # 'segmentation' + detection_arch 'rf_detr') to this type before the call.
+    is_rf_detr_seg = is_onnx and model_type == MODEL_TYPE_INSTANCE_SEGMENTATION
     # Map the detection architecture to the on-device stage type / decoder.
     detection_stage_type = (
         'rf_detr_object_detection' if detection_arch == 'rf_detr'
         else 'yolo_object_detection'
     )
+    seg_shapes = None
+    if is_rf_detr_seg:
+        # The Seg_Output_Contract's three shapes from what the caller knows
+        # about the graph (inspect_onnx_model: Q, C = S - 1, the input R).
+        seg_num_classes = int(num_classes) if num_classes else len(class_names or [])
+        if seg_num_classes < 1:
+            raise ValueError("instance_segmentation needs num_classes or class_names")
+        num_classes = seg_num_classes
+        if num_queries:
+            queries = int(num_queries)
+        else:
+            queries = next((RFDETR_SEG_QUERIES_FOR_SIZE[size] for size, native in RFDETR_SEG_SIZES.items()
+                            if native == int(image_width)), RFDETR_TOP_K)
+        grid = int(image_width) // RFDETR_SEG_MASK_DOWNSAMPLE
+        seg_shapes = ([1, queries, 4], [1, queries, seg_num_classes + 1], [1, queries, grid, grid])
+        seg_stage_type = stage_type_for('rf_detr_seg', output_mode)
 
     try:
         # Create temp directory
@@ -901,7 +945,9 @@ def generate_dda_package(
         input_shape = [1, 3, image_height, image_width]
         
         # Determine output shape based on model type
-        if model_type == 'classification':
+        if is_rf_detr_seg:
+            output_shape = list(seg_shapes[1])  # the logits tensor, as packaging writes it
+        elif model_type == 'classification':
             output_shape = [1, num_classes or 2]
         elif model_type == 'object_detection':
             # YOLO-style output
@@ -930,7 +976,10 @@ def generate_dda_package(
             yaml.dump(config, f, default_flow_style=False)
         
         # 2. Create mochi.json
-        mochi_stage_type = detection_stage_type if (is_onnx and is_detection) else model_type
+        if is_rf_detr_seg:
+            mochi_stage_type = seg_stage_type
+        else:
+            mochi_stage_type = detection_stage_type if (is_onnx and is_detection) else model_type
         mochi = {
             'stages': [
                 {
@@ -954,26 +1003,48 @@ def generate_dda_package(
             json.dump(mochi, f, indent=2)
         
         # 3. Create manifest.json
-        if is_onnx:
+        if is_rf_detr_seg:
+            # RF-DETR-Seg ONNX (rfdetr-seg-support DD6, Req 6.2): the manifest
+            # the shared builder writes for a portal-trained Seg model -- the
+            # stage type per Output_Mode, normalize: True, the top-level
+            # detection block (layout rf_detr, top_k, mask_threshold,
+            # output_mode, output_names, class_names), pixel_level_classes
+            # with exactly num_classes + 1 names -- minus the `dataset` block
+            # (kept in config.yaml; package_onnx_component merges it later),
+            # plus the three real output shapes packaging writes on the stage.
+            artifact_filename = "model.onnx"
+            manifest = build_detection_device_manifest(
+                image_width=image_width,
+                image_height=image_height,
+                num_classes=num_classes,
+                class_names=list(class_names) if class_names else None,
+                score_threshold=score_threshold,
+                preserve_aspect=bool(preserve_aspect),
+                detection_arch='rf_detr_seg',
+                top_k=seg_shapes[0][1],
+                output_mode=output_mode,
+                mask_threshold=mask_threshold,
+                output_names=list(output_names) if output_names else None,
+            )
+            manifest.pop('dataset')
+            stage = manifest["model_graph"]["stages"][0]
+            stage["output_shape"] = list(seg_shapes[1])
+            stage["output_shapes"] = [list(s) for s in seg_shapes]
+        elif is_onnx:
             # ONNX package for the pluggable ONNX Runtime engine. For detection
             # models, wire the object-detection task path the device serving
             # code (Phases B/C) reads.
             artifact_filename = "model.onnx"
             # Map the user-facing model_type to the device stage type and graph.
-            if is_detection:
-                stage_type = detection_stage_type
-            elif is_rf_detr_seg:
-                stage_type = 'rf_detr_semantic_segmentation'
-            else:
-                stage_type = model_type
+            stage_type = detection_stage_type if is_detection else model_type
             # Preprocessing differs by architecture:
             #  - YOLO: 0..1 scaling only (image_range_scale), NO ImageNet
             #    mean/std normalization.
-            #  - RF-DETR (DETR-family, detection AND segmentation): 0..1 scaling
-            #    THEN ImageNet mean/std normalization, i.e. (pixel/255 - mean)/std.
-            #    BasicPreProcessor applies the ImageNet MEAN/STD when
-            #    normalize=True; omitting it yields garbage output.
-            detection_normalize = (is_detection and detection_arch == 'rf_detr') or is_rf_detr_seg
+            #  - RF-DETR (DETR-family): 0..1 scaling THEN ImageNet mean/std
+            #    normalization, i.e. (pixel/255 - mean)/std. BasicPreProcessor
+            #    applies the ImageNet MEAN/STD when normalize=True; omitting it
+            #    yields garbage output.
+            detection_normalize = is_detection and detection_arch == 'rf_detr'
             stage = {
                 "type": stage_type,
                 "input_shape": input_shape,
@@ -999,30 +1070,7 @@ def generate_dda_package(
                     "channel_order": "RGB",
                 },
             }
-            if is_rf_detr_seg:
-                # Semantic segmentation via the anomaly-localization path: the
-                # task stays "anomaly" (default) so the base model emits the
-                # colored mask + overlay + per-class color map. pixel_level_classes
-                # (index 0 = background) enables localization and provides the
-                # class name / color-map labels.
-                seg_num_classes = int(num_classes or 91)  # RF-DETR-seg-nano COCO default
-                if class_names and len(class_names) >= seg_num_classes:
-                    class_labels = list(class_names[:seg_num_classes])
-                else:
-                    class_labels = [f"class_{i}" for i in range(seg_num_classes)]
-                manifest["model_graph"]["pixel_level_classes"] = {
-                    "names": ["background"] + class_labels,
-                    "normal_ids": [0],
-                }
-                # Seg decoder config (read from the stage by the post-processor).
-                stage["detection"] = {
-                    "layout": "rf_detr",
-                    "num_classes": seg_num_classes,
-                    "score_threshold": score_threshold,
-                    "mask_threshold": 0.5,
-                    "network_input": image_width,
-                }
-            elif is_detection:
+            if is_detection:
                 manifest["task"] = "object_detection"
                 manifest["detection"] = {
                     "layout": detection_arch,  # 'yolo' | 'rf_detr' (decoder family)
