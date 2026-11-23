@@ -13,7 +13,8 @@ test_detection_manifest_parity.py plays for the device manifest.
 Grows with the plan, each assertion in the commit that creates the constant it
 pins: the arch-vocabulary mirrors join in 7.1 (`checkpoint_probe.ARCHES`),
 7.3 (`export_checkpoint.ARCHES` and `INPUT_BOUNDS['rf_detr_seg']`) and 8.3
-(`model_import.FINE_TUNABLE_ARCHES`).
+(`model_import.FINE_TUNABLE_ARCHES`, the handler module imported from
+`functions/` as the other handler suites do).
 
 # Validates: Requirements 1.4, 1.6
 """
@@ -25,6 +26,7 @@ import sys
 import checkpoint_probe as cp
 import detection_training as dt
 import detector_conversion as dc
+import model_import as mi
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DETECTION_TRAINING = os.path.abspath(
@@ -177,6 +179,12 @@ def test_arch_vocabulary_mirrors_agree():
     assert cp.ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg', None)
     assert set(cp.ARCHES) - {None} == set(dt.DETECTION_ARCHES)
     assert dt.DETECTION_ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg')
+    # model_import.FINE_TUNABLE_ARCHES (task 8.3, C25): the import boundary's
+    # mirror of the probe's archs, so the sidecar descriptor of every
+    # fine-tunable checkpoint kind -- a Seg .pth included -- is admitted.
+    assert mi.FINE_TUNABLE_ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg')
+    assert mi.FINE_TUNABLE_ARCHES == dt.DETECTION_ARCHES == tuple(a for a in cp.ARCHES if a is not None)
+    assert mi.FINE_TUNABLE_KINDS == cp.FINE_TUNABLE_KINDS == ('ultralytics_checkpoint', 'rfdetr_checkpoint')
 
 
 def test_output_mode_and_detr_family_mirrors_agree():

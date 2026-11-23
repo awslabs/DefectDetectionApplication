@@ -1207,8 +1207,10 @@ def validate_model(event: Dict, context: Any) -> Dict:
         return create_response(500, {'error': 'Internal server error'})
 
 
-# Arch each fine-tunable checkpoint kind belongs to (mirrors checkpoint_probe).
-FINE_TUNABLE_ARCHES = ('yolo', 'rf_detr')
+# Arch each fine-tunable checkpoint kind belongs to (mirrors checkpoint_probe.
+# ARCHES minus its trailing None; rfdetr-seg-support C25 adds rf_detr_seg, the
+# arch the probe assigns a Seg checkpoint, so its sidecar descriptor imports).
+FINE_TUNABLE_ARCHES = ('yolo', 'rf_detr', 'rf_detr_seg')
 
 
 def validate_fine_tunable(raw: Any, usecase_bucket: str) -> Tuple[Any, str]:
@@ -1282,13 +1284,24 @@ def import_model(event: Dict, context: Any) -> Dict:
         "auto_compile": true,  // optional, default false
         "compilation_targets": ["x86_64-cpu", "jetson-xavier-jp5"],  // optional
         "fine_tunable": {  // optional; set by Smart Import when it kept the checkpoint
-            "arch": "yolo" | "rf_detr",
+            "arch": "yolo" | "rf_detr" | "rf_detr_seg",
             "kind": "ultralytics_checkpoint" | "rfdetr_checkpoint",
             "checkpoint_s3": "s3://<usecase bucket>/converted-models/.../checkpoint.pt",
             "class_names": ["..."] | null,
             "num_classes": 1 | null
-        }
+        },
+        "model_type": "instance_segmentation",  // optional override of the artifact's type
+        "detection": { ... }  // optional; the record block Smart Import sends for an
+                              // RF-DETR-Seg ONNX import (rfdetr-seg-support Req 8.3)
     }
+
+    `model_type` and `detection` cross the same trust boundary `fine_tunable`
+    does (the Internal_Invocation body of model_converter.convert_model, or a
+    direct POST by a DataScientist) and are written on the record as given:
+    `detection.{detection_arch, num_classes, class_names, score_threshold,
+    mask_threshold, top_k, network_input_*, preserve_aspect, output_mode}` so
+    Model Detail and the Base model control read a Seg import like a Seg
+    training. Absent, the record is exactly what it was before.
     """
     try:
         # Extract user info
@@ -1337,6 +1350,16 @@ def import_model(event: Dict, context: Any) -> Dict:
             raw_fine_tunable, usecase.get('s3_bucket', ''))
         if ft_error:
             return create_response(400, {'error': ft_error})
+
+        # Optional record block and model_type override of an RF-DETR-Seg ONNX
+        # Smart Import (rfdetr-seg-support Req 8.3; same boundary as above).
+        detection_block = body.get('detection')
+        if detection_block is not None and not isinstance(detection_block, dict):
+            return create_response(400, {'error': 'detection must be an object or null'})
+        model_type_override = body.get('model_type')
+        if model_type_override is not None and (
+                not isinstance(model_type_override, str) or not model_type_override.strip()):
+            return create_response(400, {'error': 'model_type must be a non-empty string or null'})
         
         # Bind the artifact's bucket to the use case's configured buckets
         # before any credential step (use-case bucket configuration, §3);
@@ -1363,16 +1386,24 @@ def import_model(event: Dict, context: Any) -> Dict:
         # Shallow copy so validation_result (also persisted and echoed in the
         # response) keeps its original shape.
         metadata = dict(validation_result['metadata'])
-        model_type = metadata.get('model_type', 'imported')
+        # The caller's override (Smart Import's Seg import) wins over the
+        # artifact's stages[0].type; absent, the type is read as before.
+        model_type = (model_type_override.strip() if model_type_override is not None
+                      else metadata.get('model_type', 'imported'))
         # Always explicit (null when Smart Import kept nothing / direct import)
         # so Model Detail and resolve_base_model never have to guess.
         metadata['fine_tunable'] = fine_tunable
         
-        # Map model type to standard types if possible
+        # Map model type to standard types if possible. validate_mochi_json
+        # returns stages[0].type, which for an RF-DETR-Seg package is the
+        # Seg_Stage_Type of its Output_Mode (rfdetr-seg-support Req 8.3, 8.5).
         model_type_mapping = {
             'anomaly_detection': 'classification',
             'segmentation': 'segmentation',
-            'classification': 'classification'
+            'classification': 'classification',
+            'instance_segmentation': 'instance_segmentation',
+            'rf_detr_instance_segmentation': 'instance_segmentation',
+            'rf_detr_semantic_segmentation': 'instance_segmentation',
         }
         normalized_model_type = model_type_mapping.get(model_type.lower(), model_type)
         
@@ -1400,6 +1431,10 @@ def import_model(event: Dict, context: Any) -> Dict:
             'auto_compile': auto_compile,
             'compilation_targets': compilation_targets
         }
+        if detection_block is not None:
+            # The Seg import's record block (Req 8.3), floats as Decimal for
+            # DynamoDB; no key on every other import (Req 17.1).
+            training_item['detection'] = _to_dynamo_compatible(detection_block)
         
         table.put_item(Item=training_item)
         

@@ -127,6 +127,23 @@ def test_null_class_names_and_num_classes_are_accepted(harness):
     assert harness.items[0]["metadata"]["fine_tunable"] == desc
 
 
+def test_rfdetr_seg_descriptor_is_accepted_and_persisted(harness):
+    """rfdetr-seg-support task 8.3 (Req 7.7, 8.3; C25): the sidecar descriptor
+    Smart Import posts for an RF-DETR-Seg .pth (`arch` from the probe:
+    rf_detr_seg, kind rfdetr_checkpoint) imports with 201 and lands on
+    metadata.fine_tunable verbatim -- the arch the Base model control of a
+    Seg training resolves against."""
+    desc = dict(VALID, arch="rf_detr_seg", kind="rfdetr_checkpoint",
+                checkpoint_s3=f"s3://{BUCKET}/converted-models/disc_seg-00000002/checkpoint.pth",
+                class_names=["disc", "block"], num_classes=2)
+    status, body = _import({"fine_tunable": desc})
+    assert status == 201, body
+    assert harness.items[0]["metadata"]["fine_tunable"] == desc
+    assert harness.items[0]["metadata"]["fine_tunable"]["arch"] == "rf_detr_seg"
+    # Absent model_type / detection: the record is exactly what it was before.
+    assert harness.items[0]["model_type"] == "object_detection" and "detection" not in harness.items[0]
+
+
 def test_absent_field_persists_explicit_null(harness):
     status, body = _import(omit_fine_tunable=True)
     assert status == 201, body
@@ -189,3 +206,16 @@ def test_validate_fine_tunable_returns_normalised_copy():
     assert value == VALID  # unknown keys dropped, known keys kept verbatim
     assert mi.validate_fine_tunable(None, BUCKET) == (None, "")
     assert mi.FINE_TUNABLE_KINDS == ("ultralytics_checkpoint", "rfdetr_checkpoint")
+
+
+def test_validate_fine_tunable_normalises_the_rfdetr_seg_descriptor():
+    """rfdetr-seg-support task 8.3 (C25): the third arch; kinds, the prefix
+    rule and the class_names / num_classes checks are unchanged."""
+    desc = dict(VALID, arch="rf_detr_seg", kind="rfdetr_checkpoint",
+                checkpoint_s3=f"s3://{BUCKET}/converted-models/disc_seg-00000002/checkpoint.pth",
+                class_names=["disc", "block"], num_classes=2)
+    value, err = mi.validate_fine_tunable(dict(desc, extra="ignored"), BUCKET)
+    assert err == "" and value == desc
+    assert mi.FINE_TUNABLE_ARCHES == ("yolo", "rf_detr", "rf_detr_seg")
+    _value, err = mi.validate_fine_tunable(dict(desc, kind="ultralytics_checkpoint", arch="detr"), BUCKET)
+    assert "arch" in err
