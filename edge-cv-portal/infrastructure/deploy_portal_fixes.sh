@@ -17,13 +17,16 @@
 # Portal_Identity enforcement is kept at its deployed value unless
 # PORTAL_REGISTRY_ENFORCED=true|false says otherwise (see
 # ../scripts/portal-registry-enforcement.sh); without it the CDK default
-# would turn enforcement off for every stack deployed here.
+# would turn enforcement off for every stack deployed here. The Build Fleet
+# NAT gateway is kept the same way unless BUILD_FLEET_NAT_GATEWAY=true|false
+# says otherwise (see ../scripts/portal-build-fleet-nat.sh).
 #
 # Usage:
 #   ./deploy_portal_fixes.sh
 #   TRUSTED_USECASE_ACCOUNT_IDS="111111111111,222222222222" ./deploy_portal_fixes.sh
 #   CDK_STACKS="EdgeCVPortalComputeStack" ./deploy_portal_fixes.sh   # subset
 #   PORTAL_REGISTRY_ENFORCED=true ./deploy_portal_fixes.sh           # turn on
+#   BUILD_FLEET_NAT_GATEWAY=true ./deploy_portal_fixes.sh            # Build Fleet NAT gateway on
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,6 +103,14 @@ if ! BOUNDARY=$(portal_permissions_boundary "$REGION"); then
   exit 1
 fi
 if [ -n "$BOUNDARY" ]; then ENFORCED_ARGS+=(-c "ddaPermissionsBoundary=$BOUNDARY"); fi
+# The Build Fleet's optional NAT gateway: keep the deployed state unless
+# BUILD_FLEET_NAT_GATEWAY=true|false says otherwise. See
+# scripts/portal-build-fleet-nat.sh.
+. "$SCRIPT_DIR/../scripts/portal-build-fleet-nat.sh"
+if ! BUILD_FLEET_NAT=$(portal_build_fleet_nat_for_deploy "$REGION"); then
+  exit 1
+fi
+if [ -n "$BUILD_FLEET_NAT" ]; then ENFORCED_ARGS+=(-c "buildFleetNatGateway=$BUILD_FLEET_NAT"); fi
 
 # The deploy itself needs no build (cdk.json runs bin/app.ts through ts-node);
 # the build writes lib/context-helpers.js, from which the data-plane scoping
@@ -112,6 +123,7 @@ echo "  account=$ACCOUNT region=$REGION"
 echo "  trustedUseCaseAccountIds=$TRUSTED"
 echo "  dataBucketAllowlist=${DATA_BUCKET_ALLOWLIST:-<unset>}"
 echo "  portalRegistryEnforced=${ENFORCED:-<CDK default (off)>}"
+echo "  buildFleetNatGateway=${BUILD_FLEET_NAT:-<CDK default (off)>}"
 echo "  stacks=$CDK_STACKS"
 echo "$ENFORCEMENT_PROVENANCE"
 echo "Data-plane scoping: $(node -e "console.log(require('./lib/context-helpers').DATA_PLANE_SCOPING)")"

@@ -2271,7 +2271,14 @@ DATA: Tuple[ToolSpec, ...] = (
         backend='syntheticData', handler_module='synthetic_data',
         handler_function='get_session', method='GET',
         resource='/synthetic/sessions/{id}', param_map={'session_id': 'id'},
-        permissions=('manage_datasets',), handler_audits_denials=True),
+        permissions=('manage_datasets',), handler_audits_denials=True,
+        # fix-synthetic-worker-deadline: the GET's lazy reap moves a
+        # `generating` session whose worker passed its deadline without
+        # reporting to `failed` -- the same write the web UI's 2 s poll
+        # performs; the same lazy-reap shape as
+        # portal_workflows_generation_job_get's record_job_failure.
+        **_status_sync(AcceptedWrite('synthetic_data._reap_stale_generation',
+                                     'update_item', '_sessions_table()', 1))),
     ToolSpec(
         name='portal_data_synthetic_prompt_templates_set', domain='data',
         title='Set a synthetic prompt template',

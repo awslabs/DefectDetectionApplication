@@ -6,12 +6,16 @@
  *
  * - tagExecPolicyManagedResources tags each governed type, and only those.
  * - The stacks that hold KMS keys or network resources (node designer, test
- *   runner, build fleet), tagged as bin/app.ts tags the app, carry the tag on
- *   every governed resource, and every other KMS or EC2 type they hold is one
- *   the policies authorize through a tagged parent.
+ *   runner, build fleet with its optional NAT gateway on), tagged as
+ *   bin/app.ts tags the app, carry the tag on every governed resource, and
+ *   every other KMS or EC2 type they hold is one the policies authorize
+ *   through a tagged parent.
  * - bin/app.ts applies the tags to the whole app.
  * - The policy files, MANAGED_TAG_TYPES in iam/setup-account.sh and the
- *   governed type list agree.
+ *   governed type lists agree: setup-account.sh tags the types an earlier
+ *   deploy created, and not the NAT gateway and Elastic IP, which carry the
+ *   tag from their first deploy. The network policy creates those two only
+ *   with the tag in the request and deletes them only when they carry it.
  */
 import * as cdk from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
@@ -24,6 +28,8 @@ import * as path from 'path';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
 import {
   EXEC_POLICY_TAGGED_RESOURCE_TYPES,
+  EXEC_POLICY_TYPES_TAGGED_BY_SETUP,
+  EXEC_POLICY_TYPES_TAGGED_FROM_CREATION,
   MANAGED_TAG_KEY,
   MANAGED_TAG_VALUE,
   tagExecPolicyManagedResources,
@@ -66,6 +72,7 @@ describe('tagExecPolicyManagedResources', () => {
     });
     vpc.addGatewayEndpoint('S3', { service: ec2.GatewayVpcEndpointAwsService.S3 });
     vpc.addInterfaceEndpoint('Logs', { service: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS });
+    (vpc.publicSubnets[0] as ec2.PublicSubnet).addNatGateway();
     new kms.Key(stack, 'Key', { alias: 'dda-portal/fixture' });
     new s3.Bucket(stack, 'Bucket');
     tagExecPolicyManagedResources(app);
@@ -85,7 +92,8 @@ describe('portal stacks with KMS keys or network resources', () => {
   let stacks: cdk.Stack[];
 
   beforeAll(() => {
-    const app = new cdk.App();
+    // The Build Fleet's optional NAT gateway on, so its gateway and Elastic IP are checked too.
+    const app = new cdk.App({ context: { buildFleetNatGateway: 'true' } });
     const deps = new cdk.Stack(app, 'Deps');
     const table = (id: string) =>
       new dynamodb.Table(deps, id, { partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING } });
@@ -134,6 +142,13 @@ describe('portal stacks with KMS keys or network resources', () => {
     expect(governed).toBeGreaterThan(20);
   });
 
+  test('the build fleet stack holds the NAT gateway and its Elastic IP, so the tag checks cover them', () => {
+    const buildFleet = stacks.find((s) => s.stackName === 'BuildFleet')!;
+    const types = Object.values(resourcesOf(buildFleet)).map((r) => r.Type);
+    expect(types.filter((t) => t === 'AWS::EC2::NatGateway')).toHaveLength(1);
+    expect(types.filter((t) => t === 'AWS::EC2::EIP')).toHaveLength(1);
+  });
+
   test('every other KMS or EC2 type is authorized through a tagged parent', () => {
     for (const stack of stacks) {
       for (const [id, r] of Object.entries(resourcesOf(stack))) {
@@ -170,7 +185,9 @@ describe('wiring and policy files', () => {
     const script = fs.readFileSync(path.join(IAM_DIR, 'setup-account.sh'), 'utf-8');
     const match = script.match(/MANAGED_TAG_TYPES=\(([^)]*)\)/);
     expect(match).not.toBeNull();
-    expect(match![1].trim().split(/\s+/).sort()).toEqual([...EXEC_POLICY_TAGGED_RESOURCE_TYPES].sort());
+    const tagged = match![1].trim().split(/\s+/);
+    expect([...tagged].sort()).toEqual([...EXEC_POLICY_TYPES_TAGGED_BY_SETUP].sort());
+    for (const type of EXEC_POLICY_TYPES_TAGGED_FROM_CREATION) expect(tagged).not.toContain(type);
   });
 
   test('the network policy creates only tagged resources and tags only at creation or when tagged', () => {
@@ -194,6 +211,27 @@ describe('wiring and policy files', () => {
       expect(s.Sid).toBe('RulesOfTaggedSecurityGroups');
       expect(asArray(s.Resource)).toEqual(['arn:aws:ec2:REGION:ACCOUNT_ID:security-group-rule/*']);
     }
+  });
+
+  test('the NAT gateway and its Elastic IP: created only with the managed tag in the request, deleted only when tagged', () => {
+    const doc = policy('portal-cfn-execution-network-policy.json');
+    const sidsWith = (action: string): string[] =>
+      doc.Statement.filter((s: any) => asArray(s.Action).includes(action)).map((s: any) => s.Sid).sort();
+    expect(sidsWith('ec2:AllocateAddress')).toEqual(['CreateTaggedVpcsAndGateways']);
+    // The new gateway needs the tag in the request; the subnet, Elastic IP and
+    // VPC it is created with must already carry it.
+    expect(sidsWith('ec2:CreateNatGateway')).toEqual(['CreateTaggedVpcsAndGateways', 'ManageTaggedNetworking']);
+    expect(sidsWith('ec2:DeleteNatGateway')).toEqual(['ManageTaggedNetworking']);
+    expect(sidsWith('ec2:ReleaseAddress')).toEqual(['ManageTaggedNetworking']);
+    // The stack sets no property that needs these.
+    for (const action of ['ec2:AssociateAddress', 'ec2:DisassociateAddress',
+      'ec2:AssociateNatGatewayAddress', 'ec2:DisassociateNatGatewayAddress']) {
+      expect({ action, sids: sidsWith(action) }).toEqual({ action, sids: [] });
+    }
+    expect(asArray(statement(doc, 'CreateTaggedVpcsAndGateways').Resource)).toEqual(expect.arrayContaining([
+      'arn:aws:ec2:REGION:ACCOUNT_ID:natgateway/*',
+      'arn:aws:ec2:REGION:ACCOUNT_ID:elastic-ip/*',
+    ]));
   });
 
   test('KMS key management needs the tag on the key, and new keys must carry it', () => {

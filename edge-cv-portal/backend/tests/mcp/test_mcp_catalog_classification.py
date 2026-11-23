@@ -48,7 +48,11 @@ PIN_WRITERS = REVISION_9_WRITERS + (
     'user_roles_dao.UserRolesDAO.remove_all_usecase_assignments',
 )
 
-# The ten status-sync tools and their eleven entries (twelve call sites).
+# The eleven status-sync tools and their twelve entries (thirteen call
+# sites). portal_data_synthetic_session_get joined with
+# fix-synthetic-worker-deadline: the GET's lazy reap of a `generating`
+# session whose worker passed its deadline (the same lazy-reap shape as
+# portal_workflows_generation_job_get's record_job_failure).
 STATUS_SYNC = {
     'portal_models_get': {('models.get_model', 'update_item', 'training_table'): 1},
     'portal_models_training_get': {
@@ -74,6 +78,9 @@ STATUS_SYNC = {
          'module_cache_table()'): 1},
     'portal_workflows_build_servers_list': {
         ('build_fleet.apply_observed_state', 'update_item', 'servers_table()'): 1},
+    'portal_data_synthetic_session_get': {
+        ('synthetic_data._reap_stale_generation', 'update_item',
+         '_sessions_table()'): 1},
 }
 
 AUDITED_READS = (
@@ -155,8 +162,8 @@ def test_status_sync_tools_carry_exactly_their_entries():
         assert spec.accepted_writes_note == STATUS_SYNC_NOTE, name
         assert {(a.function, a.call, a.receiver): a.count
                 for a in spec.accepted_writes} == entries, name
-    assert sum(len(e) for e in STATUS_SYNC.values()) == 11
-    assert sum(sum(e.values()) for e in STATUS_SYNC.values()) == 12
+    assert sum(len(e) for e in STATUS_SYNC.values()) == 12
+    assert sum(sum(e.values()) for e in STATUS_SYNC.values()) == 13
     carrying = {s.name for s in cat.CATALOG if s.accepted_writes}
     assert carrying == set(STATUS_SYNC)
 

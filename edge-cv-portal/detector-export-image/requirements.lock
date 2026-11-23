@@ -40,7 +40,7 @@ onnxsim==0.7.3
 onnxslim==0.1.96
 opencv-python==5.0.0.93
 packaging==26.3
-pillow==12.3.0
+pillow==13.0.0
 polars==1.44.2
 polars-runtime-32==1.44.2
 polygraphy==0.53.6
