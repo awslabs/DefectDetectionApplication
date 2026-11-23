@@ -361,9 +361,10 @@ def get_inference_result_data_for_retraining(
     # `manifest_format=instance` writes the Instance_Manifest (one line per row
     # whose stored Detection_List carries instance masks, rfdetr-seg-support
     # Requirement 11.4); the default keeps the classification manifest
-    # byte-identical. An unknown value is a 422 from the Query pattern above
-    # (the `captureIdPath` precedent; the route is also exercised lifted into
-    # a bare namespace by the export-path suites, so no new module-level name).
+    # byte-identical. An unknown value fails the Query pattern above and the
+    # app's validation handler answers 400 (the `captureIdPath` precedent; the
+    # route is also exercised lifted into a bare namespace by the export-path
+    # suites, so no new module-level name).
     if manifest_format == "instance":
         manifest_data = inference_results_utils.generate_instance_manifest(inference_result_data_list)
     else:
