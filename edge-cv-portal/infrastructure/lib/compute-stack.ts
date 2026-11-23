@@ -824,6 +824,30 @@ export class ComputeStack extends cdk.Stack {
         ? 'true'
         : 'false',
     };
+    // The RF-DETR-Seg FEATURE floor (rfdetr-seg-support Requirement 14.8,
+    // design DD8): per arch, the first LocalServer build carrying the Seg
+    // device contract (the rf_detr_instance_segmentation stage type, mask_rle
+    // in the Detection_List, the detections column, the mask-forwarding
+    // marshal). An older LocalServer fails a Seg workflow at model load in
+    // instance mode and runs the pre-Seg decoder in semantic mode. The
+    // Component_Packager (WorkflowPackagingHandler) and the pre-submit
+    // deployment gate (DeploymentsHandler) read this one literal, so they
+    // cannot disagree; the packager resolves a Seg workflow's floors as the
+    // maximum of the lineage, stream and Seg floors. Absent / empty FAILS
+    // CLOSED: a workflow referencing a Seg model is rejected for every arch
+    // with RFDETR_SEG_UNSUPPORTED_ARCH until the entries exist. Owner-filled
+    // from tasks.md (group 20) in ONE change after the six Requirement 14.5
+    // builds exist, keyed by workflow_core arch id: arm64_cpu, arm64_jp5,
+    // arm64_jp6, arm64_jp7, x86_64 and x86_64_nvidia (both of the last two
+    // run aws.edgeml.dda.LocalServer.amd64, so both take the .amd64 build's
+    // version; the .amd64Nvidia component is outside the arch map). An arch
+    // whose build or hardware verification is late is listed in
+    // tests/test_rfdetr_seg_feature_floor_coverage.py's unverified set
+    // instead of here. WORKFLOW_MIN_LOCAL_SERVER_VERSIONS above and the
+    // stream literal are not raised for Seg.
+    const rfDetrSegFeatureFloorEnvironment = {
+      WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({}),
+    };
 
     // Per-model Model_Image_Limit overrides for `llm:` auto-label requests
     // (llm-autolabel-prompt-tuning Req 7.1): a JSON object keyed by model
@@ -1321,6 +1345,7 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         ...streamCameraFeatureFloorEnvironment,
+        ...rfDetrSegFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-04-deployments',
       },
       // workflow_core: the manual-override path of validate_camera_bindings
@@ -3330,6 +3355,7 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         ...streamCameraFeatureFloorEnvironment,
+        ...rfDetrSegFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-25-workflow-packaging',
       },
       layers: [sharedLayer, workflowCoreLayer],
