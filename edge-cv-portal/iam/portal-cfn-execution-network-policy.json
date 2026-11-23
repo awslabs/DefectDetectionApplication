@@ -17,11 +17,15 @@
       "Effect": "Allow",
       "Action": [
         "ec2:CreateVpc",
-        "ec2:CreateInternetGateway"
+        "ec2:CreateInternetGateway",
+        "ec2:CreateNatGateway",
+        "ec2:AllocateAddress"
       ],
       "Resource": [
         "arn:aws:ec2:REGION:ACCOUNT_ID:vpc/*",
-        "arn:aws:ec2:REGION:ACCOUNT_ID:internet-gateway/*"
+        "arn:aws:ec2:REGION:ACCOUNT_ID:internet-gateway/*",
+        "arn:aws:ec2:REGION:ACCOUNT_ID:natgateway/*",
+        "arn:aws:ec2:REGION:ACCOUNT_ID:elastic-ip/*"
       ],
       "Condition": {
         "StringEquals": {
@@ -64,7 +68,9 @@
             "CreateSubnet",
             "CreateRouteTable",
             "CreateSecurityGroup",
-            "CreateVpcEndpoint"
+            "CreateVpcEndpoint",
+            "CreateNatGateway",
+            "AllocateAddress"
           ]
         }
       }
@@ -77,6 +83,7 @@
         "ec2:CreateRouteTable",
         "ec2:CreateSecurityGroup",
         "ec2:CreateVpcEndpoint",
+        "ec2:CreateNatGateway",
         "ec2:DeleteVpc",
         "ec2:ModifyVpcAttribute",
         "ec2:DeleteSubnet",
@@ -100,6 +107,8 @@
         "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
         "ec2:ModifyVpcEndpoint",
         "ec2:DeleteVpcEndpoints",
+        "ec2:DeleteNatGateway",
+        "ec2:ReleaseAddress",
         "ec2:CreateTags",
         "ec2:DeleteTags"
       ],

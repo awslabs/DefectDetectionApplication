@@ -98,6 +98,21 @@ if ! BOUNDARY=$(portal_permissions_boundary "$AWS_REGION"); then
   exit 1
 fi
 if [ -n "$BOUNDARY" ]; then CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c ddaPermissionsBoundary=$BOUNDARY"; fi
+# The Build Fleet's optional NAT gateway (CDK context buildFleetNatGateway,
+# default off), for accounts where VPC Block Public Access blocks the build
+# instances' internet gateway traffic (ADMIN_GUIDE.md "Build Fleet NAT gateway"):
+#
+#   BUILD_FLEET_NAT_GATEWAY=true ./deploy-infrastructure.sh    # turn on
+#   BUILD_FLEET_NAT_GATEWAY=false ./deploy-infrastructure.sh   # turn off
+#
+# Unset keeps the deployed state (the Build Fleet stack's BuildNatGatewayId
+# output), so a routine deploy never removes the gateway; a fresh install gets
+# the CDK default, off. See scripts/portal-build-fleet-nat.sh.
+. "$SCRIPT_DIR/scripts/portal-build-fleet-nat.sh"
+if ! BUILD_FLEET_NAT=$(portal_build_fleet_nat_for_deploy "$AWS_REGION"); then
+  exit 1
+fi
+if [ -n "$BUILD_FLEET_NAT" ]; then CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c buildFleetNatGateway=$BUILD_FLEET_NAT"; fi
 # Production posture (ADMIN_GUIDE "The enforcement flag"): a deploy that leaves
 # enforcement off must never be silent. The resolved value is passed through
 # as requested (1/true/yes/on/enabled all read as on, like the Lambda layer),

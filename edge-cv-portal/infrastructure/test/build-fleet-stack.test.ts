@@ -16,6 +16,10 @@
  *   dda-build tag-namespace condition keys (aws:RequestTag /
  *   aws:ResourceTag / ec2:CreateAction / iam:PassedToService /
  *   ssm:resourceTag).
+ * - The optional NAT gateway (CDK context buildFleetNatGateway) is off by
+ *   default. On, it is one NAT gateway with its Elastic IP in the second
+ *   public subnet, the first subnet's default route points at it, and
+ *   nothing else in the template changes.
  */
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -28,8 +32,9 @@ import { BuildFleetStack } from '../lib/build-fleet-stack';
 // Synthesized once: asset staging for the Lambda code/layer is expensive.
 let template: Template;
 
-beforeAll(() => {
-  const app = new cdk.App();
+/** Synthesizes the BuildFleet stack with the given CDK context. */
+function synthBuildFleet(context: Record<string, unknown> = {}): Template {
+  const app = new cdk.App({ context });
   const deps = new cdk.Stack(app, 'Deps');
   const table = (id: string) =>
     new dynamodb.Table(deps, id, {
@@ -46,7 +51,11 @@ beforeAll(() => {
     apiStageName: 'v1',
   });
 
-  template = Template.fromStack(stack);
+  return Template.fromStack(stack);
+}
+
+beforeAll(() => {
+  template = synthBuildFleet();
 }, 120_000);
 
 /** Flattens a statement's Action / Resource entries to arrays. */
@@ -401,5 +410,114 @@ describe('IAM scoping condition keys (design §10)', () => {
         );
       }
     }
+  });
+});
+
+describe('optional NAT gateway (CDK context buildFleetNatGateway, default off)', () => {
+  // Both synthesized here rather than reusing `template`, which an earlier
+  // test changes in place (it sorts an event pattern's status array), so the
+  // comparison below sees only what the flag changes.
+  let offTemplate: Template;
+  let natTemplate: Template;
+
+  beforeAll(() => {
+    offTemplate = synthBuildFleet();
+    natTemplate = synthBuildFleet({ buildFleetNatGateway: 'true' });
+  }, 240_000);
+
+  const resourcesOf = (t: Template): { [id: string]: any } => t.toJSON().Resources;
+  const outputsOf = (t: Template): { [id: string]: any } => t.toJSON().Outputs ?? {};
+
+  /** The logical ids of every resource of one type. */
+  const idsOfType = (t: Template, type: string): string[] =>
+    Object.keys(t.findResources(type)).sort();
+
+  /** The logical id of the one resource of a type. */
+  function onlyIdOfType(t: Template, type: string): string {
+    const ids = idsOfType(t, type);
+    expect(ids).toHaveLength(1);
+    return ids[0];
+  }
+
+  /** The 0.0.0.0/0 route of public subnet 1 or 2, found through its route table. */
+  function defaultRoute(t: Template, subnet: 1 | 2): [string, any] {
+    const routes = Object.entries(t.findResources('AWS::EC2::Route')).filter(
+      ([, route]: [string, any]) =>
+        route.Properties.DestinationCidrBlock === '0.0.0.0/0' &&
+        JSON.stringify(route.Properties.RouteTableId).includes(`buildpublicSubnet${subnet}`),
+    );
+    expect(routes).toHaveLength(1);
+    return routes[0];
+  }
+
+  test('off by default: no NAT gateway or Elastic IP, both default routes use the internet gateway, no output', () => {
+    expect(idsOfType(offTemplate, 'AWS::EC2::NatGateway')).toEqual([]);
+    expect(idsOfType(offTemplate, 'AWS::EC2::EIP')).toEqual([]);
+    const igw = onlyIdOfType(offTemplate, 'AWS::EC2::InternetGateway');
+    for (const subnet of [1, 2] as const) {
+      const [, route] = defaultRoute(offTemplate, subnet);
+      expect(route.Properties.GatewayId).toEqual({ Ref: igw });
+      expect(route.Properties.NatGatewayId).toBeUndefined();
+    }
+    expect(outputsOf(offTemplate).BuildNatGatewayId).toBeUndefined();
+  });
+
+  test('on: one NAT gateway with its own Elastic IP, in the second public subnet', () => {
+    const eip = onlyIdOfType(natTemplate, 'AWS::EC2::EIP');
+    const nat = onlyIdOfType(natTemplate, 'AWS::EC2::NatGateway');
+    expect(resourcesOf(natTemplate)[eip].Properties.Domain).toBe('vpc');
+    const subnet2 = idsOfType(natTemplate, 'AWS::EC2::Subnet').filter((id) =>
+      id.includes('buildpublicSubnet2'),
+    );
+    expect(subnet2).toHaveLength(1);
+    const natProperties = resourcesOf(natTemplate)[nat].Properties;
+    expect(natProperties.SubnetId).toEqual({ Ref: subnet2[0] });
+    expect(natProperties.AllocationId).toEqual({ 'Fn::GetAtt': [eip, 'AllocationId'] });
+  });
+
+  test("on: the first subnet's default route goes to the NAT gateway, the second keeps the internet gateway", () => {
+    const nat = onlyIdOfType(natTemplate, 'AWS::EC2::NatGateway');
+    const igw = onlyIdOfType(natTemplate, 'AWS::EC2::InternetGateway');
+    const [, route1] = defaultRoute(natTemplate, 1);
+    expect(route1.Properties.NatGatewayId).toEqual({ Ref: nat });
+    expect(route1.Properties.GatewayId).toBeUndefined();
+    const [, route2] = defaultRoute(natTemplate, 2);
+    expect(route2.Properties.GatewayId).toEqual({ Ref: igw });
+    expect(route2.Properties.NatGatewayId).toBeUndefined();
+  });
+
+  test('on: adds only the Elastic IP and the NAT gateway, and changes only the first default route', () => {
+    const off = resourcesOf(offTemplate);
+    const on = resourcesOf(natTemplate);
+    const added = Object.keys(on).filter((id) => !(id in off)).sort();
+    expect(added).toEqual(
+      [onlyIdOfType(natTemplate, 'AWS::EC2::EIP'), onlyIdOfType(natTemplate, 'AWS::EC2::NatGateway')].sort(),
+    );
+    expect(Object.keys(off).filter((id) => !(id in on))).toEqual([]);
+    // The same logical id, so the switch replaces that route in place.
+    const [route1] = defaultRoute(offTemplate, 1);
+    expect(defaultRoute(natTemplate, 1)[0]).toBe(route1);
+    for (const id of Object.keys(off)) {
+      if (id === route1) continue;
+      expect({ id, resource: on[id] }).toEqual({ id, resource: off[id] });
+    }
+  });
+
+  test('no inbound rule, with the gateway off or on', () => {
+    for (const t of [offTemplate, natTemplate]) {
+      expect(idsOfType(t, 'AWS::EC2::SecurityGroupIngress')).toEqual([]);
+      for (const group of Object.values(t.findResources('AWS::EC2::SecurityGroup'))) {
+        expect((group as any).Properties.SecurityGroupIngress).toBeUndefined();
+      }
+    }
+  });
+
+  test('on: the BuildNatGatewayId output names the NAT gateway and has no export', () => {
+    const output = outputsOf(natTemplate).BuildNatGatewayId;
+    expect(output.Value).toEqual({ Ref: onlyIdOfType(natTemplate, 'AWS::EC2::NatGateway') });
+    expect(output.Export).toBeUndefined();
+    expect(Object.keys(outputsOf(natTemplate)).sort()).toEqual(
+      [...Object.keys(outputsOf(offTemplate)), 'BuildNatGatewayId'].sort(),
+    );
   });
 });

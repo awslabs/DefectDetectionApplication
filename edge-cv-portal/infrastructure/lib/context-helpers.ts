@@ -89,6 +89,19 @@ export function assistantEnabled(contextValue: unknown): boolean {
   return groundedSamWorkerEnabled(contextValue);
 }
 
+/**
+ * Default-OFF resolution for the `buildFleetNatGateway` CDK context flag, the
+ * Build Fleet's optional NAT gateway (lib/build-fleet-stack.ts). On only for
+ * boolean `true` or one of '1'/'true'/'yes'/'on'/'enabled' after trimming,
+ * case-insensitively: the {@link portalRegistryEnforced} truthy set, which
+ * scripts/portal-build-fleet-nat.sh also applies to BUILD_FLEET_NAT_GATEWAY.
+ * Off for absent and every other value, because the gateway is billed by the
+ * hour whether builds run or not.
+ */
+export function buildFleetNatGatewayEnabled(contextValue: unknown): boolean {
+  return portalRegistryEnforced(contextValue) === 'true';
+}
+
 // ---------------------------------------------------------------------------
 // Synth-time enforcement acknowledgement (portal-authorization-and-iam-
 // scoping, design I7 "Design (D7-A)"). bin/app.ts refuses to synthesize when
