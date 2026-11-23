@@ -20,7 +20,12 @@ Covered:
   a repeated finalize, and a lost race.
 * The compilation bypass, and that a Conversion_Record never takes the
   imported-ONNX path.
+* RF-DETR-Seg Conversion_Records (rfdetr-seg-support task 6.4, last
+  section): the finalize and the re-package persist `packaged_output_mode`
+  (override -> record -> default), the detection record's transition is
+  unchanged; the cases above are preservation pins and are unmodified.
 # Validates: Requirements 7.9, 8.1-8.6, 9.1-9.7, 12.2
+# Validates (rfdetr-seg-support): Requirements 6.4, 6.6, 17.1
 """
 import hashlib
 import importlib.util
@@ -419,3 +424,208 @@ def test_compilation_skips_neo_for_a_conversion_record(env):
     assert response["statusCode"] == 200, body
     assert body["compilation_jobs"] == [] and "compilation is not required" in body["message"]
     assert stored(env, rec["training_id"])["compilation_skipped"] is True
+
+
+# ---------------------------------------------------------------------------
+# RF-DETR-Seg Conversion_Record (rfdetr-seg-support task 6.4; Req 6.4, 6.6)
+# ---------------------------------------------------------------------------
+# Validates (rfdetr-seg-support): Requirements 6.4, 6.6, 17.1
+#
+# The Seg artifact gate (three-output Seg_Output_Contract in
+# validate_conversion_artifact) belongs to task 7.3; here the validator is
+# stubbed with a ValidatedArtifact so what is under test is the finalize path's
+# Output_Mode resolution and the `packaged_output_mode` write — through the
+# finalize transition and the re-package update — plus the detection
+# record's unchanged transition.
+
+SEG_NAMES = ["scratch", "dent"]
+SEG_INSTANCE_DIR = "rf_detr_instance_segmentation"
+SEG_SEMANTIC_DIR = "rf_detr_semantic_segmentation"
+
+
+def seg_metadata(onnx, **overrides):
+    meta = {
+        "detection_arch": "rf_detr_seg", "model_type": "instance_segmentation",
+        "rfdetr_seg_size": "small", "resolution": 384, "num_classes": 2, "class_names": SEG_NAMES,
+        "onnx_output_shapes": [[1, 100, 4], [1, 100, 3], [1, 100, 96, 96]],
+        "onnx_output_names": ["dets", "labels", "masks"], "top_k": 100,
+        "opset": 17, "ir_version": 8, "onnx_sha256": hashlib.sha256(onnx).hexdigest(),
+        "source_sha256": "b" * 64, "exporter": "rfdetr 1.10.1",
+        "device_manifest_hints": {"layout": "rf_detr", "stage_type": SEG_INSTANCE_DIR,
+                                  "output_mode": "instance", "network_input": 384,
+                                  "preserve_aspect": False, "normalize": True,
+                                  "score_threshold": 0.5, "mask_threshold": 0.5, "top_k": 100},
+        "conversion": True,
+    }
+    meta.update(overrides)
+    return meta
+
+
+def seg_artifact():
+    onnx = onnx_bytes(outputs=(("dets", [1, 100, 4]), ("labels", [1, 100, 3]),
+                               ("masks", [1, 100, 96, 96])), size=384)
+    return onnx, tarball([regular("model.onnx", onnx),
+                          regular("training_metadata.json", json.dumps(seg_metadata(onnx)).encode())])
+
+
+def seed_seg_conversion(env, conversion_status="Finalizing", artifact_s3=None, output_mode="instance"):
+    """A Seg Conversion_Record as task 7.2 writes it (design.md "Portal
+    records": model_type instance_segmentation, detection_arch rf_detr_seg,
+    rfdetr_seg_size, mask_threshold, top_k, output_mode)."""
+    training_id = str(uuid.uuid4())
+    detection = {
+        "detection_arch": "rf_detr_seg", "network_input_width": 384, "network_input_height": 384,
+        "class_names": SEG_NAMES, "num_classes": 2, "score_threshold": 0.5, "mask_threshold": 0.5,
+        "top_k": 100, "preserve_aspect": False, "rfdetr_seg_size": "small",
+    }
+    if output_mode is not None:
+        detection["output_mode"] = output_mode
+    record = {
+        "training_id": training_id, "usecase_id": env.usecase_id, "model_name": "seg-conv",
+        "model_version": "1.0.0", "model_type": "instance_segmentation", "runtime": "onnx",
+        "source": "imported", "created_by": "ds@example.com", "created_at": 1, "updated_at": 1,
+        "status": {"Completed": "Completed", "Failed": "Failed"}.get(conversion_status, "InProgress"),
+        "progress": dc.PROGRESS_FOR_STATUS[conversion_status],
+        "detection": dc.to_dynamo(detection),
+        "metadata": {"framework": "pytorch", "model_file": "checkpoint.pth",
+                     "fine_tunable": {"arch": "rf_detr_seg"}},
+        "conversion": {"status": conversion_status, "job_name": f"seg-conv-cnv-{training_id[:8]}",
+                       "source_sha256": "b" * 64, "started_at": 1},
+    }
+    if artifact_s3:
+        record["artifact_s3"] = artifact_s3
+    env.table.put_item(Item=record)
+    return record
+
+
+@pytest.fixture
+def stub_validator(monkeypatch):
+    """validate_conversion_artifact -> the artifact's own facts (task 7.3 owns
+    the real Seg gate); records what it was asked to validate."""
+    seen = []
+
+    def fake(tar_path, record, workdir):
+        seen.append(record["training_id"])
+        with tarfile.open(tar_path, "r:gz") as tar:
+            onnx = tar.extractfile("model.onnx").read()
+            meta = json.loads(tar.extractfile("training_metadata.json").read())
+        return dc.ValidatedArtifact(
+            onnx_path=os.path.join(workdir, "model.onnx"), onnx_sha256=hashlib.sha256(onnx).hexdigest(),
+            metadata=meta, summary={"ir_version": 8, "opset": 17, "input": [1, 3, 384, 384],
+                                    "outputs": meta["onnx_output_shapes"],
+                                    "output_names": meta["onnx_output_names"], "top_k": 100})
+
+    monkeypatch.setattr(dc, "validate_conversion_artifact", fake)
+    return seen
+
+
+def test_seg_finalize_persists_packaged_output_mode_through_the_transition(env, triggers, stub_validator):
+    onnx, data = seg_artifact()
+    rec = seed_seg_conversion(env, artifact_s3=put_artifact(env, data))
+    status, body = package(env, rec["training_id"], FINALIZE)
+    assert status == 200, body
+    assert stub_validator == [rec["training_id"]]
+    assert triggers == [rec["training_id"]]
+    item = stored(env, rec["training_id"])
+    assert (item["status"], item["progress"], item["conversion"]["status"]) == ("Completed", 100, "Completed")
+    assert item["conversion"]["onnx_sha256"] == hashlib.sha256(onnx).hexdigest()
+    assert [c["target"] for c in item["packaged_components"]] == TARGETS
+    assert item["packaged_output_mode"] == "instance"
+    manifest, names = manifest_of(env, body["packaged_components"][0]["component_package_s3"])
+    assert names == ["manifest.json", f"{SEG_INSTANCE_DIR}/model.onnx"]
+    parsed = json.loads(manifest)
+    assert parsed["detection"]["output_mode"] == item["packaged_output_mode"]
+    assert parsed["model_graph"]["stages"][0]["output_shapes"] == [[1, 100, 4], [1, 100, 3], [1, 100, 96, 96]]
+    assert parsed["model_graph"]["pixel_level_classes"]["names"] == ["background"] + SEG_NAMES
+
+
+def test_seg_finalize_uses_the_records_stored_mode(env, triggers, stub_validator):
+    _onnx, data = seg_artifact()
+    rec = seed_seg_conversion(env, artifact_s3=put_artifact(env, data), output_mode="semantic")
+    status, body = package(env, rec["training_id"], FINALIZE)
+    assert status == 200, body
+    assert stored(env, rec["training_id"])["packaged_output_mode"] == "semantic"
+    manifest, names = manifest_of(env, body["packaged_components"][0]["component_package_s3"])
+    assert names == ["manifest.json", f"{SEG_SEMANTIC_DIR}/model.onnx"]
+    assert "task" not in json.loads(manifest)
+
+
+def test_seg_repackage_override_switches_the_mode_and_the_persisted_value(env, triggers, stub_validator):
+    _onnx, data = seg_artifact()
+    rec = seed_seg_conversion(env, artifact_s3=put_artifact(env, data))
+    assert package(env, rec["training_id"], FINALIZE)[0] == 200
+    status, body = package(env, rec["training_id"], {"output_mode": "semantic"}, system=False)
+    assert status == 200, body
+    item = stored(env, rec["training_id"])
+    assert item["packaged_output_mode"] == "semantic"
+    assert item["detection"]["output_mode"] == "instance"          # the record is not edited
+    manifest, names = manifest_of(env, body["packaged_components"][0]["component_package_s3"])
+    assert names == ["manifest.json", f"{SEG_SEMANTIC_DIR}/model.onnx"]
+    assert json.loads(manifest)["detection"]["output_mode"] == "semantic"
+    assert triggers == [rec["training_id"]]                           # no second publish
+    # Back to the stored mode on the next explicit re-package.
+    status, body = package(env, rec["training_id"], {}, system=False)
+    assert status == 200, body
+    assert stored(env, rec["training_id"])["packaged_output_mode"] == "instance"
+
+
+def test_seg_override_is_403_when_the_switch_is_off_and_the_record_untouched(env, triggers, stub_validator,
+                                                                               monkeypatch):
+    _onnx, data = seg_artifact()
+    rec = seed_seg_conversion(env, "Completed", artifact_s3=put_artifact(env, data))
+    monkeypatch.setenv("PORTAL_RFDETR_SEG_ENABLED", "false")
+    status, body = package(env, rec["training_id"], {"output_mode": "semantic"}, system=False)
+    assert status == 403 and body["error"] == "RF-DETR-Seg is disabled on this portal"
+    assert "packaged_output_mode" not in stored(env, rec["training_id"])
+    assert stub_validator == [] and triggers == []
+    # Without the override the stored mode packages even when OFF.
+    status, body = package(env, rec["training_id"], {}, system=False)
+    assert status == 200, body
+    assert stored(env, rec["training_id"])["packaged_output_mode"] == "instance"
+
+
+def test_seg_two_output_artifact_is_refused_with_400_and_stays_finalizing(env, triggers, stub_validator):
+    """A detection graph under a Seg record: the packager names it (Req 6.3);
+    the record is left Finalizing for a retry, nothing uploaded or published."""
+    onnx = onnx_bytes(outputs=(("dets", [1, 100, 4]), ("labels", [1, 100, 3])), size=384)
+    meta = seg_metadata(onnx, onnx_output_shapes=[[1, 100, 4], [1, 100, 3]], onnx_output_names=["dets", "labels"])
+    data = tarball([regular("model.onnx", onnx), regular("training_metadata.json", json.dumps(meta).encode())])
+    rec = seed_seg_conversion(env, artifact_s3=put_artifact(env, data))
+    before = _component_keys(env)
+    status, body = package(env, rec["training_id"], FINALIZE)
+    assert status == 400, body
+    assert "Seg record has a two-output artifact" in body["error"] and "[[1, 100, 4], [1, 100, 3]]" in body["error"]
+    item = stored(env, rec["training_id"])
+    assert item["conversion"]["status"] == "Finalizing"
+    assert "packaged_components" not in item and "packaged_output_mode" not in item
+    assert _component_keys(env) == before and triggers == []
+
+
+def test_detection_finalize_and_repackage_write_no_packaged_output_mode(env, triggers):
+    """Req 17.1: the detection Conversion_Record's finalize set_fields and its
+    re-package update are today's — no packaged_output_mode anywhere."""
+    _onnx, data = good_artifact()
+    rec = seed_conversion(env, artifact_s3=put_artifact(env, data))
+    assert package(env, rec["training_id"], FINALIZE)[0] == 200
+    item = stored(env, rec["training_id"])
+    assert "packaged_output_mode" not in item
+    assert package(env, rec["training_id"], {"targets": ["jetson-xavier-jp7"]}, system=False)[0] == 200
+    assert "packaged_output_mode" not in stored(env, rec["training_id"])
+
+
+def test_plan_finalize_transition_carries_packaged_output_mode_only_when_given():
+    """The reducer's trailing keyword (C32); test_detector_conversion_reducer.py's
+    finalize case holds unmodified."""
+    plain = dc.plan_finalize_transition(success=True, now_ms=9, packaged_components=[{"a": 1}],
+                                        onnx_sha256="ab" * 32, onnx_summary={"opset": 17})
+    assert set(plain.set_fields) == {"status", "progress", "packaged_components", "completed_at", "updated_at"}
+    seg = dc.plan_finalize_transition(success=True, now_ms=9, packaged_components=[{"a": 1}],
+                                      onnx_sha256="ab" * 32, onnx_summary={"opset": 17},
+                                      packaged_output_mode="semantic")
+    assert seg.set_fields == {**plain.set_fields, "packaged_output_mode": "semantic"}
+    assert seg.conversion_fields == plain.conversion_fields
+    kwargs = dc.transition_update_kwargs("t", seg)
+    assert "packaged_output_mode" in kwargs["ExpressionAttributeNames"].values()
+    assert "packaged_output_mode" not in dc.transition_update_kwargs("t", plain)["ExpressionAttributeNames"].values()
+    failed = dc.plan_finalize_transition(success=False, now_ms=9, failure_reason="x", packaged_output_mode="semantic")
+    assert "packaged_output_mode" not in failed.set_fields

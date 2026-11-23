@@ -719,15 +719,24 @@ def _failed(from_status: str, reason: str, now_ms: int) -> Transition:
 def plan_finalize_transition(*, success: bool, now_ms: int, failure_reason: Optional[str] = None,
                              packaged_components: Optional[List[Dict[str, Any]]] = None,
                              onnx_sha256: Optional[str] = None,
-                             onnx_summary: Optional[Dict[str, Any]] = None) -> Transition:
-    """Finalizing -> Completed / Failed, written by the packaging finalize (pure)."""
+                             onnx_summary: Optional[Dict[str, Any]] = None,
+                             packaged_output_mode: Optional[str] = None) -> Transition:
+    """Finalizing -> Completed / Failed, written by the packaging finalize (pure).
+
+    `packaged_output_mode` (Seg spec Req 6.4, C32) is the Output_Mode an
+    RF-DETR-Seg Conversion_Record was packaged in; it joins `set_fields` only
+    when given, so a detection record's transition is unchanged."""
     if not success:
         return _failed(CONVERSION_FINALIZING, failure_reason or 'Conversion output rejected', now_ms)
+    set_fields: Dict[str, Any] = {
+        'status': 'Completed', 'progress': PROGRESS_FOR_STATUS[CONVERSION_COMPLETED],
+        'packaged_components': packaged_components or [],
+        'completed_at': now_ms, 'updated_at': now_ms}
+    if packaged_output_mode is not None:
+        set_fields['packaged_output_mode'] = packaged_output_mode
     return Transition(
         from_status=CONVERSION_FINALIZING, to_status=CONVERSION_COMPLETED,
-        set_fields={'status': 'Completed', 'progress': PROGRESS_FOR_STATUS[CONVERSION_COMPLETED],
-                    'packaged_components': packaged_components or [],
-                    'completed_at': now_ms, 'updated_at': now_ms},
+        set_fields=set_fields,
         conversion_fields={'completed_at': now_ms, 'onnx_sha256': onnx_sha256,
                            'onnx_summary': onnx_summary or {}})
 
