@@ -1488,15 +1488,21 @@ export class ComputeStack extends cdk.Stack {
     // SageMaker extracts the archive flat), so the Lambda asset must carry all
     // of them. They live in datasets/ (outside backend/), so the
     // TrainingHandler asset is bundled: functions/ plus a detection_training/
-    // subdir holding exactly these seven files. The bundler runs locally
+    // subdir holding exactly these eight files. The bundler runs locally
     // (plain file copies); the Docker image is only the fallback CDK requires
     // when no local shell is available. Both paths copy this one list.
+    // build_sourcedir_tarball picks the chosen arch's entry point out of the
+    // bundle (train.py, train_rfdetr.py, or train_rfdetr_seg.py plus its
+    // train_rfdetr.py sibling for RF-DETR-Seg, rfdetr-seg-support Req 14.1),
+    // so the YOLO and RF-DETR sourcedir tarballs are unchanged by the Seg
+    // entry point joining the bundle.
     // ---------------------------------------------------------------------
     const functionsDir = path.join(__dirname, '../../backend/functions');
     const datasetsDir = path.join(__dirname, '../../../datasets');
     const detectionTrainingFiles = [
       'detection_training/train.py',
       'detection_training/train_rfdetr.py',
+      'detection_training/train_rfdetr_seg.py',
       'detection_training/_common.py',
       'detection_training/requirements.txt',
       'detection_training/requirements-rfdetr.txt',
