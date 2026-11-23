@@ -59,11 +59,23 @@ from lyra_anomalies_mask_utils import (
 
 from lyra_science_processing_utils.model_config import ModelConfig
 from lyra_science_processing_utils.model_graph_factory import ModelGraphFactory
+from lyra_science_processing_utils.model_processors.rf_detr_seg_postprocessor import paint_composite
 from lyra_science_processing_utils.utils.anomaly_result import AnomalyResult
 from lyra_science_processing_utils.utils.class_label_map import resolve_class_label
 from lyra_science_processing_utils.utils.inference_data import InferenceData
+from lyra_science_processing_utils.utils.object_detection_result import InstanceSegmentationResult
 
 log = logging.getLogger(__name__)
+
+# Byte ceiling for the serialized Detection_List (rfdetr-seg-support DD4;
+# Requirement 10.3). Every serialisation of the list (the capture-record label
+# block, the sidecar and the inference-result JSON the device API forwards)
+# carries the same payload, so the ceiling is applied once, here, before the
+# `anomalies` tensor is built: while the JSON exceeds it and some entry still
+# has a `mask_rle`, the lowest-confidence such entry loses its `mask_rle` and
+# gains `mask_truncated: true` (box and `mask_area` kept). Never a dropped box
+# or a failed capture; plain detection payloads (no `mask_rle`) never reach it.
+DETECTION_LIST_MAX_BYTES = 4 * 1024 * 1024
 
 
 class _InferenceRunner:  # pragma: no cover
@@ -315,7 +327,20 @@ class TritonPythonModel:
         the existing variable-length ``anomalies`` tensor as a serialized JSON
         list of ObjectDetectionResults; ``output`` is set to 1 when any
         detection is present and ``output_score``/``output_confidence`` carry the
-        top detection's confidence. ``mask`` is emitted empty.
+        top detection's confidence. ``mask`` is emitted empty for plain
+        detection.
+
+        Instance segmentation (rfdetr-seg-support Requirement 10.1, 10.3, 10.4)
+        rides the same contract additively: an ``InstanceSegmentationResult``
+        serializes ``class_index``, ``mask_rle`` and ``mask_area`` beside the
+        detection keys, the serialized list is bounded by
+        ``DETECTION_LIST_MAX_BYTES`` (DD4), and ``mask`` carries the
+        Composite_Mask -- painted here from the instances' binary masks with the
+        decoder's ``paint_composite`` and coloured with
+        ``convert_index_mask_to_color_mask`` as the anomaly branch does -- when
+        the manifest declares pixel-level classes. A payload without instances
+        (YOLO / RF-DETR detection, or zero surviving instances -> the sentinel
+        below) produces today's tensors byte for byte.
         """
         # Collect ObjectDetectionResults from the per-object inference data.
         detections = []
@@ -357,16 +382,55 @@ class TritonPythonModel:
             }
         ]
 
+        # DD4 byte ceiling: shed `mask_rle` from the lowest-confidence entries
+        # first until the serialized list fits; each shed entry keeps its box
+        # and `mask_area` and is marked `mask_truncated`. The marshal turns the
+        # per-entry markers into the block-level `detections_truncated`.
+        payload_json = json.dumps(payload)
+        truncated_count = 0
+        while len(payload_json) > DETECTION_LIST_MAX_BYTES:
+            with_masks = [entry for entry in payload if "mask_rle" in entry]
+            if not with_masks:
+                break
+            victim = min(with_masks, key=lambda entry: float(entry.get("confidence", 0.0)))
+            del victim["mask_rle"]
+            victim["mask_truncated"] = True
+            truncated_count += 1
+            payload_json = json.dumps(payload)
+        if truncated_count:
+            log.warning(
+                "Detection_List exceeded %d bytes; dropped mask_rle from %d of %d "
+                "instances (lowest confidence first, boxes and mask_area kept)",
+                DETECTION_LIST_MAX_BYTES,
+                truncated_count,
+                len(payload),
+            )
+
         detections_bytes = np.frombuffer(
-            bytes(json.dumps(payload), encoding="utf-8"), dtype=np.uint8
+            bytes(payload_json, encoding="utf-8"), dtype=np.uint8
         )
-        empty_mask = np.zeros(input_np.shape)
+
+        # Composite_Mask (Requirement 10.1): painted from the instances' binary
+        # masks on the source frame the graph received (the decoder produced
+        # the masks at that frame's size) when the manifest declares
+        # pixel-level classes, as the anomaly branch requires; otherwise the
+        # empty mask of plain detection. Zero instances -> all background, so
+        # the marshal's `_has_anomaly_mask` rejects it and no mask.png is
+        # written (Requirement 10.4).
+        instances = [d for d in detections if isinstance(d, InstanceSegmentationResult)]
+        if instances and self.__model_supports_anomaly_localization:
+            frame_h, frame_w = input_np.shape[0], input_np.shape[1]
+            mask_out = convert_index_mask_to_color_mask(
+                paint_composite(instances, frame_h, frame_w)
+            )
+        else:
+            mask_out = np.zeros(input_np.shape)
 
         return [
             pb_utils.Tensor("output", has_detection.astype(self.output_dtype)),
             pb_utils.Tensor("output_confidence", confidence.astype(self.confidence_dtype)),
             pb_utils.Tensor("output_score", score.astype(self.score_dtype)),
-            pb_utils.Tensor("mask", empty_mask.astype(self.mask_dtype)),
+            pb_utils.Tensor("mask", mask_out.astype(self.mask_dtype)),
             pb_utils.Tensor("anomalies", detections_bytes.astype(self.anomalies_dtype)),
         ]
 
