@@ -77,16 +77,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
         libb64-0d \\
         ca-certificates \\
     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+        software-properties-common \\
+        gnupg \\
+    && add-apt-repository -y ppa:deadsnakes/ppa \\
+    && apt-get update && apt-get install -y --no-install-recommends \\
+        python3.11 \\
+        python3.11-dev \\
+        python3.11-venv \\
+        build-essential \\
+        pkg-config \\
+        libcairo2-dev \\
+        libgirepository1.0-dev \\
+    && rm -rf /var/lib/apt/lists/*
+RUN python3.11 -m venv /opt/dda/harness-venv \\
+    && /opt/dda/harness-venv/bin/pip install --no-cache-dir "setuptools<81" wheel \\
+    && /opt/dda/harness-venv/bin/pip install --no-cache-dir pycairo==1.23.0 \\
+    && /opt/dda/harness-venv/bin/pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2
 RUN mkdir -p /aws_dda/dda_triton/triton_model_repo
 COPY test-sandbox/plugins/ /opt/dda/gst-plugins/
 ENV GST_PLUGIN_PATH=/opt/dda/gst-plugins
 COPY test-sandbox/requirements.txt /opt/harness/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /opt/harness/requirements.txt
+RUN /opt/dda/harness-venv/bin/pip install --no-cache-dir -r /opt/harness/requirements.txt
+RUN set -e; \\
+    py=/opt/dda/harness-venv/bin/python; \\
+    "$py" -c 'import sys; assert sys.version_info[:2] == (3, 11), sys.version'; \\
+    pil="$("$py" -c 'import PIL; print(PIL.__version__)')"; \\
+    grep -qix "Pillow==$pil" /opt/harness/requirements.txt \\
+        || { echo "harness Pillow $pil is not the requirements.txt pin" >&2; exit 1; }; \\
+    "$py" -c 'import sys, PIL, boto3, gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst, GLib; print("harness python", sys.version.split()[0], "Pillow", PIL.__version__, "boto3", boto3.__version__, Gst.version_string())'
 COPY backend/layers/workflow_core/python/workflow_core /opt/harness/workflow_core
 COPY test-sandbox/harness /opt/harness/harness
 ENV PYTHONPATH=/opt/harness
 WORKDIR /opt/harness
-CMD ["python3", "-m", "harness"]
+CMD ["/opt/dda/harness-venv/bin/python", "-m", "harness"]
 """
 
 

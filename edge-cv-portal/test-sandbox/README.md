@@ -7,8 +7,9 @@ infrastructure, state machine, and step Lambda live in
 
 ## What the harness does
 
-`harness/` is a small Python package (`python3 -m harness` is the
-container entrypoint) that:
+`harness/` is a small Python package (`python -m harness`, run by the
+image's Python 3.11 venv `/opt/dda/harness-venv`, is the container
+entrypoint) that:
 
 1. Downloads the Compiled Pipeline Document (`COMPILED_DOCUMENT_S3_KEY`)
    and the selected Test_Dataset (`DATASET_S3_PREFIX`) from the portal
@@ -91,7 +92,13 @@ path, no other Use_Case data (7.2).
 
 ## Image contents
 
-- Ubuntu 22.04 (x86_64) with GStreamer 1.20 + Python GI bindings
+- Ubuntu 22.04 (x86_64) with GStreamer 1.20
+- The harness's Python 3.11 (deadsnakes PPA) in its own venv
+  `/opt/dda/harness-venv`, with the GStreamer bindings (PyGObject,
+  pycairo) built for it and `requirements.txt` (boto3, Pillow) installed
+  into it. Ubuntu's `python3` (3.10) stays for the Triton python-backend
+  stub, which is built against it and runs the staged models with numpy,
+  onnxruntime, OpenCV and scikit-learn.
 - CPU Triton copied from the NVIDIA Triton server image at
   `/opt/tritonserver` (the `server-path` emltriton uses; override the
   release with `--build-arg TRITON_IMAGE=...`)
@@ -206,6 +213,8 @@ docker build --platform linux/amd64 \
 # 2. Verify the image contains the harness + runtime deps before pushing
 docker run --rm --entrypoint python3 ${ECR}/${REPO}:${TAG} \
   -c "import sklearn; print('sklearn', sklearn.__version__)"
+docker run --rm --entrypoint /opt/dda/harness-venv/bin/python ${ECR}/${REPO}:${TAG} \
+  -c "import sys, PIL; print('harness', sys.version.split()[0], 'Pillow', PIL.__version__)"
 
 # 3. Login + push
 aws ecr get-login-password --region ${AWS_REGION} \
@@ -276,7 +285,8 @@ python3 -m pytest tests -q
 
 Containerized integration tests (task 11.8) live in `tests/integration/`
 and are marked `@pytest.mark.integration`. They run the real harness
-(`python3 -m harness`) inside the container image against a moto S3
+(`python -m harness`, from the image's harness venv) inside the
+container image against a moto S3
 server: an end-to-end sample workflow compiled by `workflow_core`
 (`simulation=True`, x86_64) over a small generated Test_Dataset (12.5),
 timeout behavior with `PIPELINE_TIMEOUT_SEC=2` (12.13), and

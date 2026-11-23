@@ -191,6 +191,11 @@ def test_timeout_with_shortened_limit_fails_run_and_retains_partial_results(
 # Requirement 12.9: no Greengrass interaction in the test path (behavioral)
 # ---------------------------------------------------------------------------
 
+#: The image's harness interpreter: its Python 3.11 venv
+#: (test-sandbox/Dockerfile CMD). python3 in the image is the system 3.10
+#: the Triton stub uses, which has no harness dependencies.
+_HARNESS_PYTHON = "/opt/dda/harness-venv/bin/python"
+
 #: Wrapper entrypoint: records every boto3 service the harness creates a
 #: client for during a real run, then reports them on a marker line.
 _SERVICE_RECORDER = """\
@@ -216,7 +221,7 @@ def test_harness_run_uses_only_s3_no_greengrass(sandbox_run):
     sandbox_run.upload_dataset_jpegs(count=2)
 
     exit_code, logs = sandbox_run.run_harness(
-        command=["python3", "-c", _SERVICE_RECORDER])
+        command=[_HARNESS_PYTHON, "-c", _SERVICE_RECORDER])
     assert exit_code == 0, "harness exited {0}; logs:\n{1}".format(
         exit_code, logs)
 

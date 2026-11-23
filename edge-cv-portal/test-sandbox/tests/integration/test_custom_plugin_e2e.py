@@ -44,11 +44,16 @@ pytestmark = pytest.mark.integration
 #: the ``videoflip`` element the custom node maps to.
 _IMAGE_PLUGIN_GLOB = "/usr/lib/*/gstreamer-1.0/libgstvideofilter.so"
 
+#: The image's harness interpreter: its Python 3.11 venv
+#: (test-sandbox/Dockerfile CMD). python3 in the image is the system 3.10
+#: the Triton stub uses, which has no harness dependencies.
+_HARNESS_PYTHON = "/opt/dda/harness-venv/bin/python"
+
 #: Harness entrypoint that first removes the plugin's system copy, so
 #: the custom element resolves only through the staged artifact (12.1).
 _REMOVE_SYSTEM_COPY_AND_RUN = [
     "sh", "-c",
-    "rm -f {0} && python3 -m harness".format(_IMAGE_PLUGIN_GLOB),
+    "rm -f {0} && {1} -m harness".format(_IMAGE_PLUGIN_GLOB, _HARNESS_PYTHON),
 ]
 
 #: The limitation note the harness records on stubbed Custom_Node_Types

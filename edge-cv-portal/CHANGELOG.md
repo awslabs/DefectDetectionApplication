@@ -4,6 +4,17 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Security - Pillow 13.0.0 and Python 3.11 for the workflow test sandbox image (2026-11-23)
+
+The workflow test sandbox image (`test-sandbox/`) ran its harness on Ubuntu 22.04's Python 3.10 and pinned Pillow 12.3.0, which the open Pillow advisories affect. Pillow 13.0.0, the first release that fixes them, needs Python 3.11 or later, so the harness moves to Python 3.11.
+
+- **The harness runs Python 3.11 in its own virtual environment.** The image installs CPython 3.11 from the deadsnakes PPA, as `src/backend/Dockerfile.jp6` does on the same Ubuntu release, and its command runs the harness from `/opt/dda/harness-venv`. Ubuntu's `python3-gi` and `python3-gst-1.0` exist only for Python 3.10, so PyGObject 3.42.2 and pycairo 1.23.0, the versions LocalServer pins, are built for the environment. `requirements.txt` pins Pillow 13.0.0 and is installed into it, and a build check fails the image unless the harness runs Python 3.11 with the pinned Pillow.
+- **The Triton python-backend stub is unchanged.** Triton 24.08's stub is built against Python 3.10, so it keeps Ubuntu's `python3` with numpy, onnxruntime, OpenCV and scikit-learn. That interpreter no longer gets the harness's packages: the stub's models import neither boto3 nor Pillow, and the image carries no Pillow 12.3.0.
+- **Unchanged:** the Ubuntu 22.04 base and GStreamer 1.20, which the x86_64 plugin build image matches, and the system `python3` with its GI bindings for tools run in the image.
+- **Tests.** The slim integration image in `tests/integration/conftest.py` gets the same harness environment, and the two integration tests that start the harness themselves use its interpreter. The image is about 0.4 GB larger, for the toolchain the bindings build with.
+- **JP6 is unchanged.** Its LocalServer backend stays on Python 3.10 with Pillow 12.3.0 from `src/backend/requirements.txt`: the vLLM, torch, torchvision and triton wheels it installs from the Jetson AI Lab index exist only for Python 3.10.
+- **Rollout.** Each environment builds and pushes the image by hand (`test-sandbox/README.md`, "Build and push"); until it does, its test runs keep the image they have.
+
 ### Fixed - Synthetic data: generation passes longer than the worker's 15-minute limit (2026-11-22)
 
 A variation costs about 25 s (20 s of model time plus 3–5 s of image work: resize, restore to the source size, PNG upload), so a pass of 10 source images × 5 variations needs about 20 minutes against the generation worker's 900 s Lambda limit. Pass 2 of session 6115b94c ran 43 of its 50 tasks and hit the limit; Lambda's default asynchronous retry policy (two retries, the function had no explicit setting) re-ran the whole plan from the start twice, producing 130 failed previews for 50 tasks with the same seeds, and because the worker only reported **Awaiting review** after the last task the session stayed in **Generating** with **Regenerate** disabled.

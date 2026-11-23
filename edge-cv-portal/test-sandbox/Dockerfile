@@ -20,10 +20,15 @@ FROM ${TRITON_IMAGE} AS triton
 FROM public.ecr.aws/ubuntu/ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# GStreamer runtime + Python bindings (the harness executes the rendered
-# launch string through Gst.parse_launch, like GstPipelineManager), plus
-# the shared libraries the DDA plugin set links against (libexif/libcurl/
-# libarchive, mirroring src/backend/Dockerfile).
+# GStreamer runtime, plus the shared libraries the DDA plugin set links
+# against (libexif/libcurl/libarchive, mirroring src/backend/Dockerfile).
+# python3 is Ubuntu 22.04's 3.10, the interpreter the copied Triton
+# python-backend stub embeds (libpython3.10 below). Its GI bindings
+# (python3-gi / python3-gst-1.0) stay for tools run with the system
+# python3, such as the plugin introspection script the integration tests
+# run in this image. The harness itself runs Python 3.11 from its own venv
+# (next layers) and executes the rendered launch string through
+# Gst.parse_launch, like GstPipelineManager.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         # libpython3.10 ships libpython3.10.so.1.0, which the copied
@@ -48,6 +53,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libb64-0d \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Harness interpreter: CPython 3.11 from the deadsnakes PPA, as in
+# src/backend/Dockerfile.jp6 on the same Ubuntu release. Ubuntu 22.04
+# ships 3.10, and Pillow 13.0.0 (requirements.txt) needs 3.11 or later.
+# The harness gets its own venv, which stays off PATH, so the system
+# python3 (3.10) that the Triton stub embeds keeps its interpreter and
+# packages. Ubuntu's python3-gi / python3-gst-1.0 exist only for 3.10, so
+# pip builds the GStreamer bindings for the venv at the pycairo / PyGObject
+# versions LocalServer pins (src/backend/requirements.txt); like
+# LocalServer's own Python 3.11 images, the venv has no gst-python
+# overrides. gnupg lets add-apt-repository import the PPA key.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+        gnupg \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-dev \
+        python3.11-venv \
+        build-essential \
+        pkg-config \
+        libcairo2-dev \
+        libgirepository1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3.11 -m venv /opt/dda/harness-venv \
+    && /opt/dda/harness-venv/bin/pip install --no-cache-dir "setuptools<81" wheel \
+    && /opt/dda/harness-venv/bin/pip install --no-cache-dir pycairo==1.23.0 \
+    && /opt/dda/harness-venv/bin/pip install --no-cache-dir --no-build-isolation PyGObject==3.42.2
 
 # CPU Triton (12.5): the sandbox serves model inference for emltriton
 # exactly where LocalServer expects it.
@@ -105,6 +138,8 @@ COPY test-sandbox/dda_triton_resources/ /opt/dda/dda_triton_resources/
 # reaches PLAYING. Pinned for compatibility with numpy 1.26 / Python 3.10;
 # a calibrator pickled by a different sklearn minor may still emit a
 # version-mismatch warning but loads.
+# These are the stub's packages: the harness venv does not see them, and
+# the harness's own dependencies go into that venv (below).
 RUN python3 -m pip install --no-cache-dir \
         numpy==1.26.4 \
         onnxruntime==1.18.1 \
@@ -163,9 +198,20 @@ RUN set -e; \
         fi; \
     done
 
-# Harness dependencies.
+# Harness dependencies, installed into the harness venv (Python 3.11).
 COPY test-sandbox/requirements.txt /opt/harness/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /opt/harness/requirements.txt
+RUN /opt/dda/harness-venv/bin/pip install --no-cache-dir -r /opt/harness/requirements.txt
+
+# Verification gate: the harness interpreter is Python 3.11, carries the
+# Pillow that requirements.txt pins, and imports boto3 and the GStreamer
+# bindings. Failure is loud: a mismatch fails the image build here.
+RUN set -e; \
+    py=/opt/dda/harness-venv/bin/python; \
+    "$py" -c 'import sys; assert sys.version_info[:2] == (3, 11), sys.version'; \
+    pil="$("$py" -c 'import PIL; print(PIL.__version__)')"; \
+    grep -qix "Pillow==$pil" /opt/harness/requirements.txt \
+        || { echo "harness Pillow $pil is not the requirements.txt pin" >&2; exit 1; }; \
+    "$py" -c 'import sys, PIL, boto3, gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst, GLib; print("harness python", sys.version.split()[0], "Pillow", PIL.__version__, "boto3", boto3.__version__, Gst.version_string())'
 
 # Vendored workflow_core (shared node catalog / compiled-document
 # semantics — the same package the portal Lambdas and LocalServer use).
@@ -177,4 +223,6 @@ COPY test-sandbox/harness /opt/harness/harness
 ENV PYTHONPATH=/opt/harness
 WORKDIR /opt/harness
 
-CMD ["python3", "-m", "harness"]
+# The harness venv's interpreter (Python 3.11). python3 on PATH stays the
+# system 3.10 for the Triton stub.
+CMD ["/opt/dda/harness-venv/bin/python", "-m", "harness"]
