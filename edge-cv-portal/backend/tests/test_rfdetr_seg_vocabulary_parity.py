@@ -179,6 +179,19 @@ def test_arch_vocabulary_mirrors_agree():
     assert dt.DETECTION_ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg')
 
 
+def test_output_mode_and_detr_family_mirrors_agree():
+    # detector_conversion's stdlib-only mirrors of the Output_Mode vocabulary,
+    # the mask grid and the DETR family (task 7.2).
+    assert dc.OUTPUT_MODES == dt.OUTPUT_MODES == ('instance', 'semantic')
+    assert dc.DEFAULT_OUTPUT_MODE == dt.DEFAULT_OUTPUT_MODE == 'instance'
+    assert dc.RFDETR_SEG_MASK_DOWNSAMPLE == dt.RFDETR_SEG_MASK_DOWNSAMPLE == ts.MASK_DOWNSAMPLE == 4
+    assert dc.DETR_FAMILY_ARCHES == dt.DETR_FAMILY_ARCHES == ('rf_detr', 'rf_detr_seg')
+    for arch in cp.ARCHES:
+        assert dc.is_detr_family(arch) is dt.is_detr_family(arch)
+    assert dc.RFDETR_REJECTED_SEG_CLASSES == ('RFDETRSegPreview',)
+    assert not set(dc.RFDETR_REJECTED_SEG_CLASSES) & set(dc.RFDETR_SEG_CLASS_FOR_SIZE.values())
+
+
 def test_stage_type_constants_agree():
     assert dt.STAGE_TYPE_FOR_ARCH['rf_detr_seg'] == dt.RFDETR_SEG_INSTANCE_STAGE_TYPE == \
         'rf_detr_instance_segmentation'

@@ -24,6 +24,7 @@ from fixtures.detector_probes import (  # noqa: F401 - real probe evidence (spik
     PPE_PROBE,
     RFDETR_OWN_PROBE,
     RFDETR_PUBLISHED_PROBE,
+    RFDETR_SEG_OWN_PROBE,
     YOLO11N_SEG_PROBE,
     YOLO26N_PROBE,
     YOLOV10N_PROBE,
@@ -171,7 +172,9 @@ def test_unrecovered_classes_block_conversion():
 @pytest.mark.parametrize("model_name,word", [
     ("RFDETRXLarge", "PML-licensed"),
     ("RFDETR2XLarge", "PML-licensed"),
-    ("RFDETRSegSmall", "not an RF-DETR detection model"),
+    # RFDETRSegSmall left this list in rfdetr-seg-support task 7.2 (Req 7.2):
+    # a Seg checkpoint is accepted, see test_rfdetr_seg_checkpoint_is_accepted.
+    ("RFDETRSegPreview", "deprecated preview size"),
     ("RFDETRKeypointPreview", "not an RF-DETR detection model"),
     ("RFDETRBase", "legacy"),
 ])
@@ -181,6 +184,38 @@ def test_rfdetr_rejected_variants(model_name, word):
     out = dc.assess_checkpoint(probe)
     assert out["convertible"] is False
     assert word in out["reasons"][0] and model_name in out["reasons"][0]
+
+
+def test_rfdetr_seg_checkpoint_is_accepted_as_instance_segmentation():
+    # rfdetr-seg-support Req 7.2 (the rewritten RFDETRSegSmall rejection row):
+    # the task comes from the probe's state-dict signal, the size from
+    # model_name, the pre-fill is the size's native resolution.
+    for model_name, size, native, queries in (("RFDETRSegSmall", "small", 384, 100),
+                                              ("RFDETRSegNano", "nano", 312, 100),
+                                              ("RFDETRSegXLarge", "xlarge", 624, 300)):
+        probe = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+        probe["evidence"]["model_name"] = model_name
+        out = dc.assess_checkpoint(probe)
+        assert out["convertible"] is True, out["reasons"]
+        assert (out["arch"], out["model_type"], out["task"]) == ("rf_detr_seg", "instance_segmentation",
+                                                                 "segmentation")
+        assert out["rfdetr_seg_size"] == size and out["num_queries"] == queries
+        assert out["rfdetr_size"] is None
+        assert out["train_input_size"] == native and out["model_class"] == model_name
+        assert out["class_names"] == ["disc", "block"] and out["num_classes"] == 2
+        prefill = dc.assessment_prefill(out)
+        assert prefill["suggested_type"] == "instance_segmentation"
+        assert prefill["detection_arch"] == "rf_detr_seg"
+        assert prefill["architecture_hints"] == ["RF-DETR-Seg checkpoint"]
+        assert prefill["input_width"] == prefill["input_height"] == native
+    # 384 is detection nano AND Seg small: the task is settled before the table.
+    nameless = copy.deepcopy(RFDETR_SEG_OWN_PROBE)
+    nameless["evidence"].pop("model_name")
+    nameless["evidence"]["args_picks"] = {"resolution": 384}
+    out = dc.assess_checkpoint(nameless)
+    assert out["convertible"] is True and out["rfdetr_seg_size"] == "small"
+    detection = copy.deepcopy(RFDETR_PUBLISHED_PROBE)
+    assert dc.assess_checkpoint(detection)["rfdetr_size"] == "nano"
 
 
 def test_rfdetr_non_native_resolution_is_rejected():

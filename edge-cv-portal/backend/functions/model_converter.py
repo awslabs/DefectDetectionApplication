@@ -38,6 +38,8 @@ import hashlib
 import re
 import time
 import detector_conversion as dconv
+# The RF-DETR-Seg configuration-only off switch (rfdetr-seg-support DD7).
+from detection_training import rfdetr_seg_enabled
 from s3_cors import ensure_bucket_cors
 from botocore.config import Config
 
@@ -259,6 +261,13 @@ def inspect_checkpoint_file(local_path: str, usecase: Dict) -> Dict:
     input_width/height, architecture_hints) pre-filled from it."""
     probe = classify_checkpoint(local_path)
     unavailable = dconv.conversion_unavailable_reason(DETECTOR_EXPORT_IMAGE, _usecase_region(usecase))
+    evidence = probe.get('evidence') if isinstance(probe.get('evidence'), dict) else {}
+    if unavailable is None and evidence.get('rfdetr_task') == 'segmentation' and not rfdetr_seg_enabled():
+        # Seg_Switch OFF (rfdetr-seg-support DD7, Req 15.2): the Seg checkpoint
+        # is assessed as not convertible with this reason, so the Smart Import
+        # form keeps the PyTorch / Neo path exactly as for any non-convertible
+        # checkpoint. Detection checkpoints are unaffected.
+        unavailable = 'RF-DETR-Seg is disabled on this portal'
     assessment = dconv.assess_checkpoint(probe, conversion_available=unavailable is None,
                                          unavailable_reason=unavailable)
     info = dconv.assessment_prefill(assessment)
