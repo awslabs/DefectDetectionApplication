@@ -624,6 +624,147 @@ def build_rfdetr_ptl(path, class_names: Sequence[str] = ("blue_plate", "blue_pla
 
 
 # --------------------------------------------------------------------------- #
+# RF-DETR-Seg .pth -- the four envelopes the Seg spike recorded                #
+# (rfdetr-seg-support task 7.1; design §7 "Probe", mismatch M-2)              #
+# --------------------------------------------------------------------------- #
+
+RFDETR_SEG_ENVELOPES = ("stripped", "training", "ema", "legacy")
+
+# The 35 ``segmentation_head.*`` tensors of rfdetr 1.10.1's mask head, as the
+# spike read them off the published rf-detr-seg-nano weights (S1): ``bias``,
+# ``blocks.{0..3}.{dwconv,norm,pwconv1}.{weight,bias}``,
+# ``query_features_block.{layers.0,layers.2,norm_in}.{weight,bias}``,
+# ``query_features_proj.*``, ``spatial_features_proj.*``. No ``mask_`` prefix.
+_SEG_HEAD_BLOCK_MEMBERS = ("dwconv", "norm", "pwconv1")
+_SEG_HEAD_QUERY_MEMBERS = ("layers.0", "layers.2", "norm_in")
+
+
+def _rfdetr_seg_head(hidden_dim: int = 8) -> Dict[str, Any]:
+    head: Dict[str, Any] = {"segmentation_head.bias": Tensor((1,))}
+    for b in range(4):
+        for member in _SEG_HEAD_BLOCK_MEMBERS:
+            shape = (hidden_dim, 1, 3, 3) if member == "dwconv" else (hidden_dim, hidden_dim)
+            head[f"segmentation_head.blocks.{b}.{member}.weight"] = Tensor(
+                shape if member != "norm" else (hidden_dim,))
+            head[f"segmentation_head.blocks.{b}.{member}.bias"] = Tensor((hidden_dim,))
+    for member in _SEG_HEAD_QUERY_MEMBERS:
+        head[f"segmentation_head.query_features_block.{member}.weight"] = Tensor(
+            (hidden_dim,) if member == "norm_in" else (hidden_dim, hidden_dim))
+        head[f"segmentation_head.query_features_block.{member}.bias"] = Tensor((hidden_dim,))
+    for proj in ("query_features_proj", "spatial_features_proj"):
+        head[f"segmentation_head.{proj}.weight"] = Tensor((hidden_dim, hidden_dim))
+        head[f"segmentation_head.{proj}.bias"] = Tensor((hidden_dim,))
+    assert len(head) == 35
+    return head
+
+
+def _rfdetr_seg_state_dict(num_classes: int, hidden_dim: int = 8, group_detr: int = 13,
+                           num_queries: int = 100) -> ODict:
+    """The detection state dict plus the mask head; the DINOv2 patch embedding
+    is 12x12 (``patch_size`` 12 for every Seg size, 16 for detection)."""
+    sd = dict(_rfdetr_state_dict(num_classes, hidden_dim, group_detr, num_queries).items)
+    sd["backbone.0.encoder.embeddings.patch_embeddings.projection.weight"] = Tensor((hidden_dim, 3, 12, 12))
+    sd.update(_rfdetr_seg_head(hidden_dim))
+    return ODict(sd)
+
+
+def _rfdetr_seg_train_config(class_names: Sequence[str]) -> Dict[str, Any]:
+    """rfdetr 1.10.1 ``TrainConfig.model_dump()`` as a 1.10.1 training
+    checkpoint stores it under ``args`` (spike S1b: 94 training fields,
+    ``class_names`` among them, and NO model field -- no ``segmentation_head``,
+    ``patch_size``, ``num_windows``, ``resolution``, ``num_queries``,
+    ``encoder``, ``num_classes`` or ``dec_layers``)."""
+    return {
+        "lr": 1e-4, "lr_encoder": 1.5e-4, "batch_size": 4, "grad_accum_steps": 4,
+        "epochs": 30, "ema_decay": 0.993, "ema_tau": 100, "lr_drop": 100, "weight_decay": 1e-4,
+        "lr_vit_layer_decay": 0.8, "lr_component_decay": 0.7, "drop_path": 0.0,
+        "warmup_epochs": 0.0, "lr_scheduler": "step", "lr_min_factor": 0.0,
+        "early_stopping": True, "early_stopping_patience": 10, "early_stopping_min_delta": 0.001,
+        "dataset_dir": "/opt/ml/input/work/dataset", "dataset_file": "roboflow",
+        "output_dir": "/opt/ml/output/rfdetr", "square_resize_div_64": True,
+        "multi_scale": True, "expanded_scales": True, "do_random_resize_via_padding": False,
+        "use_ema": True, "num_workers": 2, "seed": 42, "run_test": True, "tensorboard": False,
+        "wandb": False, "project": None, "run": None, "checkpoint_interval": 10,
+        "class_names": list(class_names), "mask_loss_coef": 5.0, "dice_loss_coef": 5.0,
+    }
+
+
+def _rfdetr_seg_model_config(num_classes: int, hidden_dim: int, group_detr: int,
+                             num_queries: int, resolution: int) -> Dict[str, Any]:
+    """The ``model_config`` dict only the EMA file carries (spike S1b): the
+    rfdetr ``RFDETRSeg*Config`` fields, model picks included."""
+    return {
+        "encoder": "dinov2_windowed_small", "out_feature_indexes": [3, 6, 9, 12],
+        "dec_layers": 2, "two_stage": True, "projector_scale": ["P3"], "hidden_dim": hidden_dim,
+        "patch_size": 12, "num_windows": 2, "sa_nheads": 8, "ca_nheads": 16, "dec_n_points": 2,
+        "bbox_reparam": True, "lite_refpoint_refine": True, "layer_norm": True, "amp": True,
+        "num_classes": num_classes, "pretrain_weights": "rf-detr-seg-nano.pt", "device": "cuda",
+        "resolution": resolution, "group_detr": group_detr, "gradient_checkpointing": False,
+        "positional_encoding_size": 26, "num_queries": num_queries, "num_select": num_queries,
+        "mask_downsample_ratio": 4, "model_name": "RFDETRSegNano", "license": "apache-2.0",
+    }
+
+
+def rfdetr_seg_checkpoint(path, envelope: str = "stripped",
+                          class_names: Sequence[str] = ("disc", "block"),
+                          num_classes: Optional[int] = None, hidden_dim: int = 8,
+                          group_detr: int = 13, num_queries: int = 100,
+                          resolution: int = 312, model_name: str = "RFDETRSegNano") -> bytes:
+    """An RF-DETR-Seg checkpoint in one of the four envelopes the spike saw:
+
+    * ``stripped`` -- the published ``rf-detr-seg-*.pt`` weights: ``{"model"}``
+      only, no ``args`` / ``model_name`` / ``rfdetr_version``, zip root
+      ``checkpoint_best_regular_stripped``, 91-slot COCO head
+      (``num_classes`` defaults to 90, ``class_names`` are not stored);
+    * ``training`` -- a DDA-trained ``checkpoint_best_total.pth`` (PTL
+      payload): ``args`` = the TrainConfig dump with ``class_names`` and no
+      model fields, ``model_name``, ``rfdetr_version = '1.10.1'``,
+      ``state_dict`` with the ``model.`` prefix beside ``model``;
+    * ``ema`` -- ``checkpoint_best_ema.pth``: the same plus ``model_config``
+      (the only place the model picks live) and ``epoch``;
+    * ``legacy`` -- rfdetr's ``export_for_roboflow`` shape ``{"model", "args"}``
+      with ``args.segmentation_head = True`` and ``args.patch_size = 12``.
+    """
+    if envelope not in RFDETR_SEG_ENVELOPES:
+        raise ValueError(f"envelope must be one of {RFDETR_SEG_ENVELOPES}; got {envelope!r}")
+    if envelope == "stripped":
+        nc = 90 if num_classes is None else num_classes
+        top = {"model": _rfdetr_seg_state_dict(nc, hidden_dim, group_detr, num_queries)}
+        return write_bytes(path, _torch_zip_bytes("checkpoint_best_regular_stripped", top))
+    nc = len(class_names) if num_classes is None else num_classes
+    model = _rfdetr_seg_state_dict(nc, hidden_dim, group_detr, num_queries)
+    if envelope == "legacy":
+        args = {
+            "encoder": "dinov2_windowed_small", "resolution": resolution, "num_queries": num_queries,
+            "group_detr": group_detr, "dec_layers": 2, "hidden_dim": hidden_dim, "patch_size": 12,
+            "num_windows": 2, "segmentation_head": True, "num_classes": nc, "device": "cuda",
+            "amp": True, "layer_norm": True, "two_stage": True, "bbox_reparam": True,
+        }
+        return write_bytes(path, _torch_zip_bytes("rf-detr-seg-roboflow", {"model": model, "args": args}))
+    top = {
+        "args": _rfdetr_seg_train_config(class_names),
+        "callbacks": {"BestModelCallback": {"best_map": 0.61, "best_epoch": 7},
+                      "EMACallback": {"decay": 0.993, "updates": 96}},
+        "global_step": 96,
+        "loops": {"fit_loop": {"state_dict": {}, "epoch_loop.state_dict": {"_batches_that_stepped": 96},
+                               "epoch_progress": {"total": {"ready": 8, "completed": 7}}}},
+        "lr_schedulers": [{"base_lrs": [1e-4], "last_epoch": 96, "_step_count": 97}],
+        "model": model,
+        "model_name": model_name,
+        "optimizer_states": [{"state": {}, "param_groups": [{"lr": 1e-4, "params": [0, 1, 2]}]}],
+        "pytorch-lightning_version": "2.6.6",
+        "rfdetr_version": "1.10.1",
+        "state_dict": ODict({f"model.{k}": v for k, v in model.items.items()}),
+    }
+    if envelope == "training":
+        top["best_total_source"] = "ema"
+        return write_bytes(path, _torch_zip_bytes("tmpq7s3k9d2", top))
+    top["epoch"] = 7
+    top["model_config"] = _rfdetr_seg_model_config(nc, hidden_dim, group_detr, num_queries, resolution)
+    return write_bytes(path, _torch_zip_bytes("tmpq7s3k9d2", top))
+
+
+# --------------------------------------------------------------------------- #
 # Negatives: TorchScript, state_dict, legacy tar                              #
 # --------------------------------------------------------------------------- #
 

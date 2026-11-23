@@ -22,6 +22,7 @@ import importlib.util
 import os
 import sys
 
+import checkpoint_probe as cp
 import detection_training as dt
 import detector_conversion as dc
 
@@ -168,6 +169,14 @@ def test_model_type_vocabulary_agrees():
     assert set(dc.MODEL_TYPE_FOR_ARCH) == set(dt.DETECTION_ARCHES)
     assert dc.MODEL_TYPE_FOR_ARCH == {'yolo': 'object_detection', 'rf_detr': 'object_detection',
                                       'rf_detr_seg': 'instance_segmentation'}
+
+
+def test_arch_vocabulary_mirrors_agree():
+    # checkpoint_probe.ARCHES (task 7.1, C22): the probe's vocabulary, with its
+    # trailing None for kinds that carry no arch, names exactly the detection archs.
+    assert cp.ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg', None)
+    assert set(cp.ARCHES) - {None} == set(dt.DETECTION_ARCHES)
+    assert dt.DETECTION_ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg')
 
 
 def test_stage_type_constants_agree():
