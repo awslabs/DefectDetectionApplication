@@ -557,7 +557,10 @@ CATALOG: Tuple[ToolSpec, ...] = (
         param_map={'limit': 'maxResults', 'offset': 'startingPoint'},
         result_shape='collection', collection_key='images',
         limit_max=2, limit_default=2,
-        drop_fields=('images[].image', 'images[].inferenceResult.mask_image')),
+        # The live inferenceResult.detections is the map form; `{}` fans over
+        # its values so instance masks never reach the caller (Req 13.3).
+        drop_fields=('images[].image', 'images[].inferenceResult.mask_image',
+                     'images[].inferenceResult.detections{}.mask_rle')),
     ToolSpec(
         name='edge_workflow_capture_task_get', title='Get a workflow capture task',
         description="Returns the state of a workflow's background capture task.",
@@ -623,7 +626,8 @@ CATALOG: Tuple[ToolSpec, ...] = (
                    'capture_prefix': 'capturePrefix',
                    'return_partial_results_early': 'returnPartialResultsEarly'},
         body_constants={'returnImageString': False},
-        drop_fields=('inferenceResult.mask_image',),
+        drop_fields=('inferenceResult.mask_image',
+                     'inferenceResult.detections{}.mask_rle'),
         classification=MUTATING, phase=3, idempotent=False,
         status_tool='edge_results_list'),
     ToolSpec(
@@ -758,7 +762,10 @@ CATALOG: Tuple[ToolSpec, ...] = (
                     'get_workflow_execution_metadata'),
     _execution_read('/overlay', 'edge_execution_overlay_get', 'Get an execution overlay',
                     'Returns the overlay mask of an execution as an image.',
-                    'get_workflow_execution_overlay', image_field='maskImage'),
+                    'get_workflow_execution_overlay', image_field='maskImage',
+                    # The /overlay body also lists the run's instances (boxes
+                    # and mask_area stay; the masks are the image).
+                    drop_fields=('instances[].mask_rle',)),
     ToolSpec(
         name='edge_execution_output_image_get', title='Get an execution output image',
         description='Returns the output image of a workflow execution.',
@@ -842,7 +849,9 @@ CATALOG: Tuple[ToolSpec, ...] = (
                    'human_review_required': 'humanReviewRequired',
                    'capture_type': 'captureType'},
         result_shape='collection', collection_key='results', limit_max=100,
-        drop_fields=('results[].maskImage',)),
+        # Stored rows hold the Detection_List in list form (DD13); boxes and
+        # mask_area are returned, the instance masks are dropped (Req 13.3).
+        drop_fields=('results[].maskImage', 'results[].detections[].mask_rle')),
     ToolSpec(
         name='edge_result_get', title='Get an inference result',
         description='Returns one inference result; its mask, if any, as an image.',
@@ -852,7 +861,11 @@ CATALOG: Tuple[ToolSpec, ...] = (
         handler_module='endpoints.inference_result',
         handler_function='get_inference_result', method='GET',
         resource='/workflows/{workflow_id}/results/{capture_id}',
-        image_field='maskImage'),
+        image_field='maskImage',
+        # The Composite_Mask reaches the caller as the extracted image; the
+        # per-instance masks are dropped so a row with many 1080p masks fits
+        # MAX_RESULT_BYTES (Req 13.3; design §10 Edge MCP, C9).
+        drop_fields=('detections[].mask_rle',)),
     ToolSpec(
         name='edge_results_update', title='Update inference results',
         description='Sets review flags, classifications and notes on inference results.',
