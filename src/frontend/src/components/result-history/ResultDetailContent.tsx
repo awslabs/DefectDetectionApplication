@@ -32,12 +32,9 @@ import { outputFileNameStyle } from "components/live-result/styles";
 import { HistoryResultPageType, InferenceResultHistory } from "./types";
 import {
   convertTimestampToLocalTime,
-  formatPercent,
   getFeedbackRequiredValue,
 } from "components/live-result/helpers";
 import AnomalyLabels from "components/live-result/AnomalyLabels";
-import { normalizeDetectionEntries } from "components/deployed-workflow/instanceDetections";
-import type { InstanceDetectionEntry } from "components/deployed-workflow/instanceDetections";
 import CopyButton from "components/common/CopyButton";
 import { useCallback } from "react";
 import { isInferenceResultPage } from "./utils";
@@ -46,19 +43,6 @@ interface ResultDetailContentProps {
   inferenceResult: InferenceResultHistory;
   workflow: Workflow;
   historyResultPageType: HistoryResultPageType;
-}
-
-/** Label of the stored Detection_List section of a detection result. */
-export const OBJECTS_DETECTED_LABEL = "Objects detected";
-
-/** One stored entry as `label — confidence[, mask area px]`. */
-export function formatDetectionEntry(entry: InstanceDetectionEntry): string {
-  const label = entry.class_label || entry.class_index || "object";
-  const area =
-    typeof entry.mask_area === "number" && Number.isFinite(entry.mask_area)
-      ? `, ${Math.round(entry.mask_area)} px`
-      : "";
-  return `${label} — ${formatPercent(entry.confidence)}${area}`;
 }
 
 export default function ResultDetailContent({
@@ -71,7 +55,6 @@ export default function ResultDetailContent({
     humanReviewRequired,
     humanClassification,
     inputImageFilePath,
-    detections,
   },
   workflow,
   historyResultPageType,
@@ -81,11 +64,6 @@ export default function ResultDetailContent({
       classification === PredictionType.Normal ? "success" : "error"
     , []);
   const labelInfoList = Object.values(anomalyLabels ?? []);
-  // The stored Detection_List (list form, rfdetr-seg-support Requirement
-  // 10.5b / 10.6): listed for a detection result; an instance entry adds its
-  // mask area. A classification or anomaly row carries none.
-  const detectionList =
-    prediction === PredictionType.Detection ? normalizeDetectionEntries(detections ?? null) : [];
   const isInferenceResultPageType = isInferenceResultPage(historyResultPageType);
   const outputFilePath = isInferenceResultPageType ? outputImageFilePath : inputImageFilePath;
 
@@ -110,15 +88,6 @@ export default function ResultDetailContent({
                   </ValueWithLabel>
                 )
             }
-            {detectionList.length > 0 && (
-              <ValueWithLabel label={OBJECTS_DETECTED_LABEL}>
-                {detectionList.map((entry, index) => (
-                  <div key={`${entry.class_label ?? entry.class_index ?? "object"}-${index}`}>
-                    {formatDetectionEntry(entry)}
-                  </div>
-                ))}
-              </ValueWithLabel>
-            )}
             <ValueWithLabel label="Anomaly labels">
               {labelInfoList?.length > 0
                 ? labelInfoList.map((label: AnomalyLabel) => {
