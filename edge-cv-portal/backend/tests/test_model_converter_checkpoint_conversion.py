@@ -486,6 +486,50 @@ def test_the_rfdetr_path_uses_native_resolution(h):
     assert records(h)[0]["detection"]["top_k"] == 300
 
 
+def test_a_seg_checkpoint_keeps_its_sidecar_descriptor_as_rf_detr_seg(h):
+    """rfdetr-seg-support task 7.5 (Req 7.7): the sidecar and its descriptor
+    are written exactly as for a detection checkpoint, with `arch` from the
+    probe (rf_detr_seg), and build_conversion_record copies the descriptor
+    straight onto metadata.fine_tunable (no validation step). convert_model's
+    MODEL_TYPES gate admits instance_segmentation in task 8.1, so this drives
+    convert_checkpoint -- the function convert_model dispatches a .pth asked
+    for as ONNX to -- directly, after the gates the caller owns."""
+    key = "model-uploads/0001/checkpoint_best_total.pth"
+    src = put_source(h, lambda p: fx.rfdetr_seg_checkpoint(p, envelope="training"), key)
+    body = convert_body(h, key, model_name="Disc Seg", model_type="instance_segmentation",
+                        image_width=312, image_height=312)
+    user = {"user_id": USER["sub"], "email": USER["email"], "username": USER["cognito:username"]}
+    resp = mc.convert_checkpoint(body, user, h.usecase, {"is_default_credentials": True}, h.recording,
+                                 h.bucket, key, body["model_s3_uri"])
+    status, result = resp["statusCode"], json.loads(resp["body"])
+    assert status == 200, result
+
+    sidecars = [k for k in keys(h, "converted-models/") if SIDECAR_RE.match(k)]
+    assert len(sidecars) == 1 and keys(h, "converted-models/") == sidecars
+    name, _hex8, ext = SIDECAR_RE.match(sidecars[0]).groups()
+    assert (name, ext) == ("disc_seg", "pth")
+    assert h.s3.get_object(Bucket=h.bucket, Key=sidecars[0])["Body"].read() == src
+    descriptor = {"arch": "rf_detr_seg", "kind": "rfdetr_checkpoint",
+                  "checkpoint_s3": f"s3://{h.bucket}/{sidecars[0]}",
+                  "class_names": ["disc", "block"], "num_classes": 2}
+    assert result["fine_tunable"] == descriptor
+
+    rec = records(h)[0]
+    assert dc.is_detector_conversion_record(rec)
+    assert rec["metadata"]["fine_tunable"] == descriptor
+    assert rec["model_type"] == rec["metadata"]["model_type"] == "instance_segmentation"
+    assert rec["detection"]["detection_arch"] == "rf_detr_seg"
+    assert rec["detection"]["rfdetr_seg_size"] == "nano" and rec["detection"]["top_k"] == 100
+    job = h.sagemaker.created[0]
+    env = job["Environment"]
+    assert (env["DETECTION_ARCH"], env["TASK"], env["MASK_THRESHOLD"], env["RFDETR_SIZE"]) == (
+        "rf_detr_seg", "segmentation", "0.5", "nano")
+    assert env["NETWORK_INPUT"] == "312" and env["EXPECTED_SHA256"] == hashlib.sha256(src).hexdigest()
+    assert job["InputDataConfig"][0]["DataSource"]["S3DataSource"]["S3Uri"] == \
+        f"s3://{h.bucket}/{sidecars[0].rsplit('/', 1)[0]}/"
+    assert h.audits[-1]["details"]["detection_arch"] == "rf_detr_seg"
+
+
 def test_new_code_never_deserializes_a_checkpoint():
     """No import of, or reference to, a deserializing library in the new
     code paths (Requirement 2.2; repo_audit scans the file as a whole)."""

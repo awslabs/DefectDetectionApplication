@@ -25,6 +25,7 @@ from fixtures.detector_probes import (
     PPE_SHA256,
     RFDETR_OWN_PROBE,
     RFDETR_PUBLISHED_PROBE,
+    RFDETR_SEG_OWN_PROBE,
     YOLO11N_SEG_PROBE,
 )
 
@@ -38,6 +39,7 @@ PREFIX = "s3://uc-bucket/converted-models/ppe_detection-1a2b3c4d/"
 PPE = dc.assess_checkpoint(PPE_PROBE)
 RF_OWN = dc.assess_checkpoint(RFDETR_OWN_PROBE)
 RF_PUBLISHED = dc.assess_checkpoint(RFDETR_PUBLISHED_PROBE)
+RF_SEG_OWN = dc.assess_checkpoint(RFDETR_SEG_OWN_PROBE)  # rfdetr-seg-support: Seg-Nano, 312, Q 100
 
 
 def _load_export_module():
@@ -331,6 +333,31 @@ def test_rfdetr_record_carries_size_resolution_and_top_k():
     assert det["score_threshold"] == Decimal("0.5")
     assert rec["metadata"]["framework_version"] == "rfdetr"
     assert rec["metadata"]["fine_tunable"] is None
+
+
+SEG_FINE_TUNABLE = {
+    "arch": "rf_detr_seg", "kind": "rfdetr_checkpoint",
+    "checkpoint_s3": "s3://uc-bucket/converted-models/disc_seg-1a2b3c4d/checkpoint.pth",
+    "class_names": ["disc", "block"], "num_classes": 2,
+}
+
+
+def test_seg_record_writes_the_sidecar_descriptor_exactly_as_for_detection():
+    # rfdetr-seg-support task 7.5 (Req 7.7): metadata.fine_tunable is the
+    # descriptor verbatim -- the same key scheme as a detection record, no
+    # validation step -- with `arch` the probe's rf_detr_seg.
+    rec = _record(RF_SEG_OWN, fine_tunable=SEG_FINE_TUNABLE)
+    assert rec["metadata"]["fine_tunable"] == SEG_FINE_TUNABLE
+    assert rec["metadata"]["fine_tunable"]["arch"] == rec["detection"]["detection_arch"] == "rf_detr_seg"
+    assert rec["model_type"] == rec["metadata"]["model_type"] == "instance_segmentation"
+    assert rec["metadata"]["checkpoint_kind"] == "rfdetr_checkpoint"
+    det = rec["detection"]
+    assert det["rfdetr_seg_size"] == "nano" and det["resolution"] == 312 and det["top_k"] == 100
+    assert det["mask_threshold"] == Decimal("0.5") and det["output_mode"] == "instance"
+    assert det["preserve_aspect"] is False and det["score_threshold"] == Decimal("0.5")
+    assert "iou_threshold" not in det and "rfdetr_size" not in det and "imgsz" not in det
+    assert dc.is_detector_conversion_record(rec)
+    assert detection_training.is_trained_detection_record(rec) is False
 
 
 def test_record_is_dynamodb_ready():
