@@ -42,7 +42,10 @@ import detector_conversion as dconv
 # for an RF-DETR-Seg ONNX import, the shared device-manifest builder packaging
 # uses for a portal-trained Seg model (DD6, Req 6.2): one builder, one manifest.
 from detection_training import (
+    DEFAULT_OUTPUT_MODE,
     MODEL_TYPE_INSTANCE_SEGMENTATION,
+    OUTPUT_MODE_SEMANTIC,
+    OUTPUT_MODES,
     RFDETR_SEG_MASK_DOWNSAMPLE,
     RFDETR_SEG_QUERIES_FOR_SIZE,
     RFDETR_SEG_SIZES,
@@ -169,6 +172,17 @@ MODEL_TYPES = {
 # COMMON_DIMENSIONS.instance_segmentation (Req 8.1, 15.2).
 SEG_COMMON_DIMENSIONS = sorted(set(RFDETR_SEG_SIZES.values()))
 SEG_DISABLED_REASON = 'RF-DETR-Seg is disabled on this portal'
+# The legacy Smart Import pair for a three-output graph (Req 8.5): accepted as
+# a deprecated alias of instance_segmentation with the semantic Output_Mode.
+SEG_ALIAS_DEPRECATION = ('model_type=segmentation+detection_arch=rf_detr is an alias of '
+                         'instance_segmentation; send instance_segmentation with output_mode')
+
+
+def _is_class_name_list(class_names: Any, num_classes: int) -> bool:
+    """Exactly `num_classes` non-empty strings (the Seg import's class_names
+    rule, Req 8.2 -- the mirror of validate_conversion_request's)."""
+    return (isinstance(class_names, list) and len(class_names) == num_classes
+            and all(isinstance(n, str) and n.strip() for n in class_names))
 
 
 def supported_model_types() -> Dict:
@@ -1290,14 +1304,27 @@ def convert_model(event: Dict, context: Any) -> Dict:
         "usecase_id": "string",
         "model_s3_uri": "s3://bucket/path/model.pt",  // Raw .pt file
         "model_name": "string",
-        "model_type": "classification" | "object_detection" | "segmentation" | "anomaly_detection",
+        "model_type": "classification" | "object_detection" | "segmentation" | "anomaly_detection"
+                      | "instance_segmentation",  // RF-DETR-Seg ONNX (rfdetr-seg-support Req 8)
         "image_width": 224,
         "image_height": 224,
         "num_classes": 10,  // optional
-        "class_names": ["class1", "class2"],  // optional
+        "class_names": ["class1", "class2"],  // optional; required for instance_segmentation
         "preserve_aspect": true,  // optional, detection: letterbox instead of squash
+        "output_mode": "instance" | "semantic",  // optional, instance_segmentation only
+        "mask_threshold": 0.5,  // optional, instance_segmentation only
         "auto_import": true  // optional, auto-import after conversion
     }
+
+    RF-DETR-Seg (model_type instance_segmentation, ONNX source): the graph is
+    inspected after download and must match the Seg_Output_Contract; class
+    names are required (len == num_classes); score_threshold defaults to 0.5;
+    iou_threshold is refused; the manifest is built per output_mode through the
+    shared builder; the response carries output_mode and the auto-import body
+    the record's detection block. The legacy alias model_type 'segmentation' +
+    detection_arch 'rf_detr' (ONNX) is rewritten to instance_segmentation /
+    rf_detr_seg / semantic and answered with a `deprecation` note (Req 8.5).
+    Every other model type is byte-identical to before (Req 8.8).
     """
     try:
         # Extract user info
@@ -1338,6 +1365,41 @@ def convert_model(event: Dict, context: Any) -> Dict:
             return create_response(400, {
                 'error': f"Invalid model_type. Must be one of: {', '.join(MODEL_TYPES.keys())}"
             })
+
+        # RF-DETR-Seg request gates (rfdetr-seg-support Req 8.2, 8.3, 8.5,
+        # 15.2; design s8 Convert), in this order: the legacy alias
+        # 'segmentation' + 'rf_detr' + ONNX is rewritten to the new
+        # identifiers with the semantic Output_Mode (the package those callers
+        # got before) and a deprecation note; then the Seg_Switch; then the
+        # fields RF-DETR-Seg refuses or implies. Nothing here runs for any
+        # other model type, whose path stays byte-identical (Req 8.8).
+        deprecation = None
+        output_mode = None
+        if model_type == 'segmentation' and detection_arch == 'rf_detr' and export_format == 'onnx':
+            model_type = MODEL_TYPE_INSTANCE_SEGMENTATION
+            detection_arch = 'rf_detr_seg'
+            output_mode = OUTPUT_MODE_SEMANTIC
+            deprecation = SEG_ALIAS_DEPRECATION
+        is_seg = model_type == MODEL_TYPE_INSTANCE_SEGMENTATION
+        if is_seg and not rfdetr_seg_enabled():
+            return create_response(403, {'error': SEG_DISABLED_REASON})
+        if is_seg and body.get('iou_threshold') is not None:
+            # One rule for the DETR family (Req 7.3 / 8.3): set-based decoding,
+            # no NMS -- refused, never ignored. The RF-DETR detection import
+            # keeps ignoring the field exactly as today.
+            return create_response(400, {'error': "'iou_threshold' does not apply to RF-DETR-Seg"})
+        if is_seg and body.get('detection_arch') in (None, ''):
+            # The Seg tile sends no arch; the 'yolo' default above is for the
+            # other types only (vocabulary gate, C27).
+            detection_arch = 'rf_detr_seg'
+        if is_seg and detection_arch != 'rf_detr_seg':
+            return create_response(400, {
+                'error': f"model_type instance_segmentation requires detection_arch rf_detr_seg; "
+                         f"got {body.get('detection_arch')!r}"})
+        if detection_arch == 'rf_detr_seg' and not is_seg:
+            return create_response(400, {
+                'error': f"detection_arch rf_detr_seg requires model_type instance_segmentation; "
+                         f"got {model_type!r}"})
         
         # Validate dimensions
         if image_width <= 0 or image_height <= 0:
@@ -1388,13 +1450,47 @@ def convert_model(event: Dict, context: Any) -> Dict:
             return convert_checkpoint(body, user, usecase, credentials, s3_client,
                                       source_bucket, source_key, model_s3_uri)
 
+        # RF-DETR-Seg ONNX fields (Req 8.2, 8.3), parsed after the .pth
+        # dispatch above (validate_conversion_request owns that path's
+        # vocabulary): the Output_Mode (the alias already fixed 'semantic'),
+        # the mask threshold and the Seg score default of 0.5 -- the generic
+        # 0.25 above stays for every other type -- and the record's fixed
+        # square-resize geometry. mask_threshold / num_queries / output_names
+        # stay None for every other model type (generate_dda_package ignores
+        # them there).
+        is_onnx = export_format == 'onnx'
+        seg_onnx = is_seg and is_onnx
+        mask_threshold = None
+        num_queries = None
+        output_names = None
+        if seg_onnx:
+            if output_mode is None:
+                output_mode = str(body.get('output_mode') or DEFAULT_OUTPUT_MODE).strip().lower()
+                if output_mode not in OUTPUT_MODES:
+                    return create_response(400, {
+                        'error': f"Invalid output_mode '{body.get('output_mode')}': "
+                                 f"expected one of {', '.join(OUTPUT_MODES)}"})
+            raw_mask = body.get('mask_threshold')
+            mask_threshold = dconv.DEFAULT_MASK_THRESHOLD if raw_mask is None else float(raw_mask)
+            if not 0.0 < mask_threshold < 1.0:
+                return create_response(400, {'error': "'mask_threshold' must be strictly between 0 and 1"})
+            if body.get('score_threshold') is None:
+                score_threshold = dconv.DEFAULT_SCORE_THRESHOLD['rf_detr_seg']
+            if not 0.0 < score_threshold < 1.0:
+                return create_response(400, {'error': "'score_threshold' must be strictly between 0 and 1"})
+            if body.get('preserve_aspect') is not None and bool(body.get('preserve_aspect')):
+                # The record and manifest carry preserve_aspect: false (square
+                # resize + ImageNet normalisation, as every RF-DETR export).
+                return create_response(400, {
+                    'error': "'preserve_aspect' must be false for RF-DETR-Seg (square resize, as trained)"})
+            preserve_aspect = False
+
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_convert_")
         
         try:
             # Download the model file. Use an extension matching the source so
             # ONNX packages carry model.onnx and the torch inspector is skipped.
-            is_onnx = export_format == 'onnx'
             local_name = 'model.onnx' if is_onnx else 'model.pt'
             local_model = os.path.join(temp_dir, local_name)
             logger.info(f"Downloading model from {model_s3_uri}")
@@ -1406,9 +1502,44 @@ def convert_model(event: Dict, context: Any) -> Dict:
             hex8 = uuid.uuid4().hex[:8]
 
             # Inspect the model (PyTorch only; ONNX is opaque to the torch
-            # inspector and doesn't need it).
+            # inspector and doesn't need it -- except the two segmentation
+            # types, whose graph decides the path, DD15).
             fine_tunable = None
-            if is_onnx:
+            if is_onnx and (is_seg or model_type == 'segmentation'):
+                model_info = inspect_onnx_model(local_model)
+                graph_is_seg = model_info.get('suggested_type') == MODEL_TYPE_INSTANCE_SEGMENTATION
+                if is_seg and not graph_is_seg:
+                    return create_response(400, {
+                        'error': f"instance_segmentation needs an RF-DETR-Seg graph {SEG_CONTRACT_TEXT}; "
+                                 f"got output shapes {model_info.get('output_shapes')}"})
+                if graph_is_seg and not is_seg:
+                    # A generic 'segmentation' request over a Seg graph would
+                    # produce the semantic package that cannot decode on the
+                    # device (Req 8.5): refused, not silently packaged.
+                    return create_response(400, {
+                        'error': 'this is an RF-DETR-Seg graph; import it as model_type '
+                                 'instance_segmentation'})
+                if is_seg:
+                    # num_classes defaults to the graph's S - 1 (the user may
+                    # override to S for a foreign graph without a background
+                    # slot); class_names are required with exactly that many
+                    # entries -- no class_{i} placeholders (Req 8.2). Written
+                    # as compound conditions: tests/mcp/_handler_ast.py reads
+                    # a bare `if not class_names: return 400` as a required
+                    # body key, which the detection callers cannot satisfy.
+                    if num_classes is None:
+                        num_classes = model_info['num_classes']
+                    num_classes = int(num_classes)
+                    if is_seg and not class_names:
+                        return create_response(400, {
+                            'error': f'class_names must list {num_classes} names'})
+                    if not _is_class_name_list(class_names, num_classes):
+                        return create_response(400, {
+                            'error': f'class_names must list {num_classes} names; got {class_names!r}'})
+                    class_names = [str(n).strip() for n in class_names]
+                    num_queries = model_info['num_queries']
+                    output_names = model_info['output_names']
+            elif is_onnx:
                 model_info = {'type': 'onnx', 'architecture_hints': ['ONNX model']}
             else:
                 # Requirement 7: a .pt/.pth Smart Import is packaged verbatim
@@ -1455,6 +1586,12 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 iou_threshold=iou_threshold,
                 detection_arch=detection_arch,
                 preserve_aspect=preserve_aspect,
+                # RF-DETR-Seg ONNX only (None otherwise): the manifest comes
+                # from the shared builder per Output_Mode (DD6, task 6.3).
+                output_mode=output_mode,
+                mask_threshold=mask_threshold,
+                num_queries=num_queries,
+                output_names=output_names,
             )
             
             # Upload converted package to S3
@@ -1491,6 +1628,36 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 'fine_tunable': fine_tunable,
                 'message': 'Model converted successfully'
             }
+            import_body = {
+                'usecase_id': usecase_id,
+                'model_name': model_name,
+                'model_version': '1.0.0',
+                'model_s3_uri': output_s3_uri,
+                'description': f'Auto-converted from {model_s3_uri}',
+                'fine_tunable': fine_tunable,
+            }
+            if seg_onnx:
+                # RF-DETR-Seg only (Req 8.3, 8.5; C33): the response names the
+                # Output_Mode (and the alias its deprecation), and the import
+                # body carries the record's model_type and detection block so
+                # Model Detail and the Base model control read the import like
+                # a Seg training. Every other payload is byte-identical.
+                result['output_mode'] = output_mode
+                if deprecation:
+                    result['deprecation'] = deprecation
+                import_body['model_type'] = model_type
+                import_body['detection'] = {
+                    'detection_arch': detection_arch,
+                    'num_classes': num_classes,
+                    'class_names': class_names,
+                    'score_threshold': score_threshold,
+                    'mask_threshold': mask_threshold,
+                    'top_k': num_queries,
+                    'network_input_width': image_width,
+                    'network_input_height': image_height,
+                    'preserve_aspect': False,
+                    'output_mode': output_mode,
+                }
             
             # Auto-import if requested
             if auto_import:
@@ -1502,14 +1669,7 @@ def convert_model(event: Dict, context: Any) -> Dict:
                     import_event = {
                         'httpMethod': 'POST',
                         'path': '/api/v1/models/import',
-                        'body': json.dumps({
-                            'usecase_id': usecase_id,
-                            'model_name': model_name,
-                            'model_version': '1.0.0',
-                            'model_s3_uri': output_s3_uri,
-                            'description': f'Auto-converted from {model_s3_uri}',
-                            'fine_tunable': fine_tunable,
-                        }),
+                        'body': json.dumps(import_body),
                         'requestContext': {
                             'authorizer': {
                                 'claims': {
