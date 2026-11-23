@@ -305,7 +305,15 @@ class TestRunOverlay:
         )
         response = client.get("/workflows/executions/exec-1/overlay")
         assert response.status_code == 200
-        assert response.json() == {"maskImage": None, "maskBackground": None}
+        # rfdetr-seg-support Req 10.5c (DD14): the body carries the instance
+        # list and its truncation marker beside the mask, both null for a run
+        # without a detections block.
+        assert response.json() == {
+            "maskImage": None,
+            "maskBackground": None,
+            "instances": None,
+            "detectionsTruncated": None,
+        }
 
     def test_mask_from_jsonl_with_background(
         self, client, session_factory, tmp_path

@@ -47,6 +47,7 @@ permutes entries but never re-labels one (design Property 2).
 import base64
 import json
 import logging
+import math
 import os
 import random
 import uuid
@@ -260,7 +261,10 @@ def build_detection_list(
     1.2, 1.3, 1.4).
 
     Each entry becomes ``{id, label, confidence, x_min, y_min, x_max,
-    y_max}`` with float coordinates in source-frame pixels. Detection_IDs
+    y_max}`` with float coordinates in source-frame pixels -- plus
+    ``mask_area`` when the raw instance-segmentation entry carries a finite
+    number (rfdetr-seg-support Requirement 10.5d; never ``mask_rle``, so run
+    metadata and telemetry stay small). Detection_IDs
     (``uuid4().hex[:8]``, re-drawn on intra-run collision) are assigned in
     raw order *before* sorting, so an ID never derives from list position
     (Requirement 1.3). The list is then ordered by ``sort_order`` on
@@ -344,7 +348,14 @@ _SORT_KEYS = {
 
 def _normalize_entry(raw_entry: Any) -> Optional[dict]:
     """One raw marshal entry as a Detection_List record (sans ``id``), or
-    ``None`` when the entry cannot be normalized."""
+    ``None`` when the entry cannot be normalized.
+
+    ``mask_area`` (an instance-segmentation entry's foreground pixel count)
+    is copied only when the raw entry carries a finite number -- an entry
+    without it yields exactly the six keys below, so plain detection run
+    metadata is unchanged. ``mask_rle`` is never copied (Requirement
+    10.5d of rfdetr-seg-support): the masks reach the run preview through
+    ``run_artifacts.read_mask_overlay``, not through run metadata."""
     if not isinstance(raw_entry, dict):
         return None
     box = raw_entry.get("bounding_box")
@@ -357,7 +368,7 @@ def _normalize_entry(raw_entry: Any) -> Optional[dict]:
         or not _is_number(confidence)
     ):
         return None
-    return {
+    entry = {
         "label": str(label) if label is not None else "",
         "confidence": float(confidence),
         "x_min": float(box[0]),
@@ -365,6 +376,10 @@ def _normalize_entry(raw_entry: Any) -> Optional[dict]:
         "x_max": float(box[2]),
         "y_max": float(box[3]),
     }
+    mask_area = raw_entry.get("mask_area")
+    if _is_number(mask_area) and math.isfinite(mask_area):
+        entry["mask_area"] = mask_area
+    return entry
 
 
 def _is_number(value: Any) -> bool:
