@@ -80,6 +80,10 @@ portal_harness_setup() {
   # None by default), so the real helper is part of every fake tree.
   mkdir -p "$PORTAL_TREE/scripts"
   cp "$PORTAL_REAL_DIR/scripts/portal-permissions-boundary.sh" "$PORTAL_TREE/scripts/"
+  # deploy-infrastructure.sh and deploy_portal_fixes.sh also source the Build
+  # Fleet NAT gateway helper; the stub aws answers its Build Fleet lookup with
+  # no output (no BuildNatGatewayId output), so it resolves 'false'.
+  cp "$PORTAL_REAL_DIR/scripts/portal-build-fleet-nat.sh" "$PORTAL_TREE/scripts/"
 
   # The scripts run a plain (AdministratorAccess) cdk bootstrap only on an
   # explicit opt-in. These suites exercise that bootstrap path, so opt in.
@@ -284,7 +288,7 @@ portal_scrub_aws_env() {
         AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN \
         AWS_REGION AWS_DEFAULT_REGION \
         CDK_DEFAULT_REGION CDK_DEFAULT_ACCOUNT TRUSTED_USECASE_ACCOUNT_IDS \
-        PORTAL_TRUSTED_ACCOUNTS_COMPARED PORTAL_REGISTRY_ENFORCED DATA_BUCKET_ALLOWLIST \
+        PORTAL_TRUSTED_ACCOUNTS_COMPARED PORTAL_REGISTRY_ENFORCED BUILD_FLEET_NAT_GATEWAY DATA_BUCKET_ALLOWLIST \
         cloudFrontDomain CDK_STACKS PORTAL_DEPLOY_TOPOLOGY PORTAL_DEPLOY_NON_INTERACTIVE \
         PORTAL_DEPLOY_SSO PORTAL_ACCOUNT_ID EXTERNAL_ID DATA_BUCKET_NAMES \
         SSO_METADATA_URL SSO_PROVIDER_NAME COGNITO_DOMAIN_PREFIX \

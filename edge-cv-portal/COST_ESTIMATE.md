@@ -27,8 +27,11 @@ The DDA Portal uses a multi-account architecture:
 | **ACM** | SSL certificates | 1 certificate | $0 (free) |
 | **Portal assistant** | Bedrock (Claude Opus 5.5 list prices, global inference profile) | 10 assistant turns/day: ≈ 20k input tokens per model call, 1-3 calls per turn, prompt caching on | ~$35 |
 | **Portal assistant** | Lambda, DynamoDB, API Gateway, KMS | 10 turns/day: two Lambdas, one table, one Regional API, one key | ~$2 |
+| **VPC** | Build Fleet NAT gateway (optional, off by default) | 730 h with its Elastic IP; $0.045/GB processed; $0.01/GB each way between AZs | ~$36.50 + data |
 
 **Portal Account Subtotal: ~$148/month (without the assistant); ~$185/month with 10 assistant turns a day**
+
+Neither subtotal includes the optional Build Fleet NAT gateway. Turned on, it adds about $36.50 a month plus data ([Build Fleet NAT gateway](ADMIN_GUIDE.md#build-fleet-nat-gateway)).
 
 The assistant's Bedrock cost scales with use: a one-call guidance turn is about $0.09 ($0.04 with a warm prompt cache), a turn with three model calls and tool look-ups about $0.14; 100 turns a day are about $350/month. A regional inference profile (for example `us.`) is billed 10% above the global one. The per-user daily token quota (1.5M tokens by default, cache reads weighted at one tenth as Bedrock bills them) caps one user at about $6/day. Turn the assistant off in Settings → Assistant to stop the Bedrock cost; the fixed part is the KMS key ($1/month) and the retained table.
 
