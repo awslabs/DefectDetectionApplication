@@ -905,12 +905,16 @@ def build_onnx(path, names: Optional[Dict[int, str]] = None,
                outputs: Optional[Sequence[Tuple[str, Sequence[Any]]]] = None,
                producer: str = "pytorch", producer_version: str = "2.4.1",
                ir_version: int = 8, opset: int = 17,
-               extra_metadata: Optional[Dict[str, str]] = None) -> bytes:
+               extra_metadata: Optional[Dict[str, str]] = None,
+               input_shape: Sequence[Any] = (1, 3, 640, 640)) -> bytes:
     """A ``ModelProto`` with header, one node, one initializer (raw bytes the
     probe must seek over), an input, the given outputs and, when ``names`` is
     given, ultralytics-style ``metadata_props`` (``names`` as ``str(dict)``,
     plus ``stride`` / ``task`` which mark the export as YOLO). Without
-    ``names`` the default outputs are the RF-DETR two-tensor export (R7b)."""
+    ``names`` the default outputs are the RF-DETR two-tensor export (R7b).
+    ``input_shape`` (default the 640 square of every existing case) lets the
+    RF-DETR-Seg cases declare a native Seg resolution; a str entry is a
+    symbolic dim, as in ``outputs``."""
     if outputs is None:
         if names is not None:
             outputs = [("output0", [1, 4 + len(names), 8400])]
@@ -922,7 +926,7 @@ def build_onnx(path, names: Optional[Dict[int, str]] = None,
             + _pb_str(8, "w0")
             + _pb_ld(9, bytes(range(256)) * 2))                        # raw_data (opaque blob)
     graph = (_pb_ld(1, node) + _pb_str(2, "main_graph") + _pb_ld(5, init)
-             + _pb_ld(11, _value_info("images", [1, 3, 640, 640])))
+             + _pb_ld(11, _value_info("images", list(input_shape))))
     for oname, oshape in outputs:
         graph += _pb_ld(12, _value_info(oname, oshape))
     model = (_pb_vi(1, ir_version) + _pb_str(2, producer) + _pb_str(3, producer_version)
