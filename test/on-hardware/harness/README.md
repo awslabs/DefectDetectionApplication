@@ -73,7 +73,7 @@ devices:
     credentials: env:DDA_HARNESS_TOKEN    # omit when local auth is disabled
     expected:
       vision_models:
-        - model-rf-detr-seg-nano-jetson-xavier-jp6
+        - model-rf-detr-seg-nano-semantic-jetson-xavier-jp6
         - model-yolo-test-jetson-xavier-jp6
       vllm_models:
         - opt125m-smoke
@@ -324,7 +324,7 @@ of `test/on-hardware/jp6_vllm_validation.md` — targets a 64 GB AGX Orin
 - **Profile**: `arm64_jp6`, capabilities `[vllm, onnx_models, workflows]`
   (no `dlr_models` on JP6 — TRT10 devices skip DLR assertions with a recorded
   reason instead of failing).
-- **Expected vision models**: `model-rf-detr-seg-nano-jetson-xavier-jp6`,
+- **Expected vision models**: `model-rf-detr-seg-nano-semantic-jetson-xavier-jp6`,
   `model-yolo-test-jetson-xavier-jp6`.
 - **Expected vLLM models**: `opt125m-smoke` (the `facebook/opt-125m`
   Smoke_Model registered at `gpu_memory_utilization=0.3`, which deliberately

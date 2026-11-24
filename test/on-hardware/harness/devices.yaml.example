@@ -43,7 +43,7 @@ devices:
     credentials: env:DDA_HARNESS_TOKEN    # omit when local auth is disabled
     expected:
       vision_models:
-        - model-rf-detr-seg-nano-jetson-xavier-jp6
+        - model-rf-detr-seg-nano-semantic-jetson-xavier-jp6
         - model-yolo-test-jetson-xavier-jp6
       vllm_models:
         - opt125m-smoke
