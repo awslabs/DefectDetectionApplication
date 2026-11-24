@@ -250,10 +250,17 @@ describe('Seg_Switch environment (Requirement 15.1)', () => {
 // The Seg feature floor literal (Requirement 14.8 (a), (e); design DD8)
 // ---------------------------------------------------------------------------
 describe('RF-DETR-Seg feature floor (Requirement 14.8)', () => {
-  // Pre-enablement: empty, fail-closed. Spec group 20 fills the six entries
-  // in one change (the backend coverage test then requires every arch
-  // outside its unverified set); this expectation moves with it.
-  const DEPLOYED_FLOOR: Record<string, string> = {};
+  // Filled by spec group 20 (task 20.1) with the first Seg-capable LocalServer
+  // build of each architecture; arm64_cpu has no Portal build target and is
+  // listed as unverified in the backend coverage test, which requires every
+  // other packager arch here. This expectation moves with the literal.
+  const DEPLOYED_FLOOR: Record<string, string> = {
+    arm64_jp5: '1.0.62',
+    arm64_jp6: '1.0.84',
+    arm64_jp7: '1.0.59',
+    x86_64: '1.0.56',
+    x86_64_nvidia: '1.0.56',
+  };
 
   test.each(FLOOR_HANDLERS)('%s reads the Seg feature floor literal', (handler) => {
     const fn = lambdaWithHandler(onByDefault.computeTemplate, handler);

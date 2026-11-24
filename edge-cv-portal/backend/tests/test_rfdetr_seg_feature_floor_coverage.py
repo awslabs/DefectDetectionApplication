@@ -74,9 +74,15 @@ FEATURE_FLOOR_ENV = 'WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS'
 #: RFDETR_SEG_UNSUPPORTED_ARCH, and the feature is not declared shipped for
 #: it). Every other architecture in ARCH_TO_LOCAL_SERVER_COMPONENT must have
 #: a floor once the literal carries any entry. Remove an entry here in the
-#: same change that adds its floor to compute-stack.ts. Empty pre-enablement:
-#: spec group 20 fills the literal and records the unverified set together.
-UNVERIFIED_RFDETR_SEG_ARCHES = {}
+#: same change that adds its floor to compute-stack.ts. Spec group 20 filled
+#: the literal and recorded this set together (task 20.1).
+UNVERIFIED_RFDETR_SEG_ARCHES = {
+    "arm64_cpu": (
+        "spec task 18.6 fallback (Requirement 14.8 d iii): the generic arm64 "
+        "CPU LocalServer has no Portal build target and no Build Fleet job has "
+        "ever built it, so no Seg-capable build of it exists; the stream "
+        "feature floor left arm64_cpu out for the same reason"),
+}
 
 #: Semantic version shape every floor value must carry (plain N.N.N).
 _SEMVER = re.compile(r"\d+\.\d+\.\d+")
