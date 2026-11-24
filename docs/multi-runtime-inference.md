@@ -242,7 +242,12 @@ sample before implementing.
     `72;87`; JP6 → ORT v1.17.1, arch `87`. This is needed because NVIDIA's
     prebuilt Jetson GPU wheels target each JetPack's *native* python (3.8 on
     r35, 3.10 on r36), not the 3.9 the container uses, and PyPI's
-    onnxruntime-gpu is x86_64-only.
+    onnxruntime-gpu is x86_64-only. The version, the release commit the source
+    build checks out and the sha256 of the resulting wheel live in
+    `edge_ml1_p_camera_management/onnxruntime-wheels.manifest`; a wheel staged
+    from the component bucket by build-custom.sh is installed instead of
+    compiling when its digest matches (README "ONNX Runtime wheels for the
+    Jetson images").
   - **CPU images (x86_64, generic arm64 CPU): CPU only.** They install the
     onnxruntime CPU wheel. (JetPack 4, previously CPU-only here, is no longer
     supported.)

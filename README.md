@@ -647,6 +647,15 @@ To move a device to the new version, revise its deployment and click **Update to
 - Dedicated JP7 builds need an **ARM64** server launched with **Ubuntu 24.04**. The portal rejects a JP7 request for a server on another Ubuntu release.
 - No prebuilt GPU ONNX Runtime or vLLM wheels exist for Jetson Thor, so the JP7 image compiles both from source (vLLM `v0.11.2`). If JP7 builds fail on the runtime limit, a PortalAdmin can raise **Max runtime (hours)** or add a JP7 entry under **Runtime budgets (per target and mode)** in **Settings** → **Build Infrastructure**, then submit the build again.
 
+#### 4.6 ONNX Runtime wheels for the Jetson images
+
+The JP5, JP6 and JP7 images carry a GPU `onnxruntime` built from source (a 1-2 hour compile) by `src/backend/edge_ml1_p_camera_management/install_onnxruntime_gpu.sh`. The file `onnxruntime-wheels.manifest` beside that script records, per JetPack line, the ONNX Runtime version, the upstream release commit the source build checks out, and the sha256 of the wheel that build produces. A build uses it in two ways:
+
+- **Staged wheel.** When the portal account's component bucket (`dda-component-<region>-<account>`) holds the listed wheel under `onnxruntime-wheels/<file>`, `build-custom.sh` downloads it next to the script (reading as the bucket owner), checks its sha256 against the manifest, and the image build installs it instead of compiling. A digest that differs stops the build; a missing object only means the build compiles from source.
+- **Source build.** With no staged wheel, the script clones the ONNX Runtime repository (`ORT_SOURCE_REPO_URL`, a complete mirror by default) and checks out the manifest's release commit by id, so the checkout does not depend on which tags the mirror carries. The build stops unless the checked-out tree's `VERSION_NUMBER` equals the manifest's version.
+
+To stage a wheel, take it from a published image of that JetPack line (`install_onnxruntime_gpu.sh` keeps a copy of every wheel it installs under `/opt/onnxruntime-wheels/` in the image), check that its sha256 equals the manifest row, and upload it with `aws s3api put-object --expected-bucket-owner <account>` to `onnxruntime-wheels/<file>` in the component bucket of every account that builds. A new ONNX Runtime version needs a new manifest row: the version, the wheel name a source build of it produces, that wheel's sha256, and the 40-character release commit. The commit recorded for each wheel is the one the wheel's own build info reports (`python3 -c 'import onnxruntime as o; print(o.get_build_info())'`); compare it against the upstream release tag when you update a row. `ORT_STAGED_WHEEL=0` skips the staging step for one build.
+
 ### Step 5: Set Up Accounts
 
 #### 5.1 UseCase Account (Required)

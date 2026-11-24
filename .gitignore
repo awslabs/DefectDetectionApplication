@@ -8,6 +8,8 @@ build-logs/
 src/backend/edgemlsdk/
 src/edgemlsdk/extracted-debs/
 src/edgemlsdk/cached-debs/
+# GPU onnxruntime wheel staged by build-custom.sh for the Jetson image builds
+src/backend/edge_ml1_p_camera_management/onnxruntime-wheels/
 
 # OS files
 .DS_Store
