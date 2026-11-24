@@ -238,15 +238,33 @@ class TestInstallScript:
         # the staged path verifies BEFORE installing and ends the script
         tail = text[staged_install:fetch]
         assert "exit 0" in tail
-        # no apt-get, build-dependency pip install or source fetch runs before
-        # the staged decision: the staged path needs no network beyond the
-        # wheel install itself (comments and the shared install helper's own
-        # `pip install` of the wheel excluded)
+        # nothing is fetched before the staged decision
         head_lines = [ln for ln in text[:staged].splitlines() if not ln.lstrip().startswith("#")]
-        assert not any("apt-get" in ln for ln in head_lines), [ln for ln in head_lines if "apt-get" in ln]
         assert not any("ort_fetch_pinned_source" in ln for ln in head_lines)
-        assert [ln for ln in head_lines if "pip install" in ln] == [
-            '    ${PYBIN} -m pip install --no-cache-dir "${whl}"']
+        assert not any("git clone" in ln for ln in head_lines)
+
+    def test_both_paths_install_the_same_build_dependencies(self):
+        """The image's tool set must not depend on which path ran: the staged
+        path installs the build dependencies (git, build-essential, cmake, wget,
+        the libpython dev headers, the pinned cmake wheel) exactly as the source
+        build does — later Dockerfile layers (the JP7 vLLM source build) rely on
+        them."""
+        text = _read(INSTALL)
+        fn = text.index("install_build_dependencies() {")
+        body = text[fn:text.index("\n}\n", fn)]
+        for pkg in ("git", "build-essential", "cmake", "wget", "ca-certificates", 'libpython${PY_MM}-dev', '"cmake>=3.26,<4"'):
+            assert pkg in body, pkg
+        staged_block = text[text.index('if [ -n "${STAGED_WHL}" ]; then'):text.index("# ── 2. Source build")]
+        assert staged_block.index("install_build_dependencies") < staged_block.index('install_wheel_and_verify "${STAGED_WHL}"')
+        source_block = text[text.index("# ── 2. Source build"):]
+        assert source_block.index("install_build_dependencies") < source_block.index("ort_fetch_pinned_source onnxruntime")
+        # apt-get runs only inside the shared helper and the JP5 host-compiler step
+        apt_lines = [ln.strip() for ln in text.splitlines() if "apt-get install" in ln and not ln.lstrip().startswith("#")]
+        assert apt_lines == [
+            "apt-get install -y --no-install-recommends \\",
+            'apt-get install -y --no-install-recommends "libpython${PY_MM}-dev" || \\',
+            "apt-get install -y --no-install-recommends gcc-10 g++-10 || {",
+        ], apt_lines
 
     def test_source_fallback_is_the_pinned_commit_not_a_tag(self):
         text = _read(INSTALL)

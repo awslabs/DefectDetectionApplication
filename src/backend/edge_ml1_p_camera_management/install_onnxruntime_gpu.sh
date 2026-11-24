@@ -157,6 +157,36 @@ print("GPU execution providers present.")
 PYEOF
 }
 
+# install_build_dependencies: the apt and pip tooling this step has always
+# left in the image. Both paths run it, so an image built from a staged wheel
+# carries the same tools as one built from source: later Dockerfile layers
+# depend on them (the JP7 vLLM source build needs git), and the device image's
+# package set does not change with the path taken here.
+install_build_dependencies() {
+    # Derive the dev-headers package from the actual container interpreter
+    # (e.g. python3.11 -> libpython3.11-dev) rather than hardcoding a version. The
+    # Dockerfile already installs python${PYTHON_VERSION}-dev; this is a safety net.
+    PY_MM=$(${PYBIN} -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "")
+    echo "Installing build dependencies (python ${PY_MM})..."
+    apt-get update -y
+    apt-get install -y --no-install-recommends \
+        git build-essential cmake wget ca-certificates || {
+        echo "Failed to install build dependencies" >&2
+        exit 1
+    }
+    if [ -n "${PY_MM}" ]; then
+        apt-get install -y --no-install-recommends "libpython${PY_MM}-dev" || \
+            echo "WARNING: libpython${PY_MM}-dev not available via apt; relying on Dockerfile-provided dev headers"
+    fi
+    # onnxruntime's build driver needs CMake, but NOT CMake 4.x: ORT 1.16/1.17
+    # vendor third-party projects (e.g. google_nsync) that declare
+    # cmake_minimum_required < 3.5, and CMake 4 removed that compatibility, failing
+    # configure with "Compatibility with CMake < 3.5 has been removed". Pin to the
+    # 3.x line. (We also pass -DCMAKE_POLICY_VERSION_MINIMUM=3.5 below as a belt-
+    # and-suspenders for any sub-project that still trips the deprecation.)
+    ${PYBIN} -m pip install --no-cache-dir "cmake>=3.26,<4" packaging wheel
+}
+
 # ── 1. Staged wheel (preferred over the source build) ──────────────────────
 # build-custom.sh stages the manifest's wheel for this JetPack line in
 # ${SCRIPT_DIR}/onnxruntime-wheels/ when the account's component bucket holds
@@ -177,6 +207,7 @@ if [ -n "${STAGED_WHL}" ]; then
     echo "   sha256            : verified against onnxruntime-wheels.manifest"
     echo "   python            : $(${PYBIN} --version 2>&1)"
     echo "=========================================================="
+    install_build_dependencies
     install_wheel_and_verify "${STAGED_WHL}"
     echo "onnxruntime-gpu installation completed successfully (staged wheel)"
     exit 0
@@ -216,22 +247,8 @@ if ! ls /usr/include/aarch64-linux-gnu/NvInfer.h >/dev/null 2>&1 \
     exit 1
 fi
 
-# ── Build dependencies ─────────────────────────────────────────────────────
-# Derive the dev-headers package from the actual container interpreter
-# (e.g. python3.11 -> libpython3.11-dev) rather than hardcoding a version. The
-# Dockerfile already installs python${PYTHON_VERSION}-dev; this is a safety net.
-PY_MM=$(${PYBIN} -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "")
-echo "Installing build dependencies (python ${PY_MM})..."
-apt-get update -y
-apt-get install -y --no-install-recommends \
-    git build-essential cmake wget ca-certificates || {
-    echo "Failed to install build dependencies" >&2
-    exit 1
-}
-if [ -n "${PY_MM}" ]; then
-    apt-get install -y --no-install-recommends "libpython${PY_MM}-dev" || \
-        echo "WARNING: libpython${PY_MM}-dev not available via apt; relying on Dockerfile-provided dev headers"
-fi
+# ── Build dependencies (the same set the staged path installs) ─────────────
+install_build_dependencies
 
 # ── CUDA host-compiler selection ───────────────────────────────────────────
 # CUDA 11.4's nvcc (JetPack 5) does NOT support GCC 11 as the host compiler:
@@ -251,14 +268,6 @@ if [ "${JETPACK_MAJOR}" = "5" ]; then
     }
     CUDA_HOST_COMPILER_DEFINE="CMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-10"
 fi
-
-# onnxruntime's build driver needs CMake, but NOT CMake 4.x: ORT 1.16/1.17
-# vendor third-party projects (e.g. google_nsync) that declare
-# cmake_minimum_required < 3.5, and CMake 4 removed that compatibility, failing
-# configure with "Compatibility with CMake < 3.5 has been removed". Pin to the
-# 3.x line. (We also pass -DCMAKE_POLICY_VERSION_MINIMUM=3.5 below as a belt-
-# and-suspenders for any sub-project that still trips the deprecation.)
-${PYBIN} -m pip install --no-cache-dir "cmake>=3.26,<4" packaging wheel
 
 WORK_DIR="${WORK_DIR:-/tmp/ort-build}"
 rm -rf "${WORK_DIR}"
