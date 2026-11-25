@@ -24,15 +24,20 @@ Handler contract (design: Grounded_SAM_Worker event/response):
                            "box": {"left", "top", "width", "height"}}],
               "image_width": W, "image_height": H}
 
-Pipeline: all prompts are joined into one Grounding DINO caption
-('small surface dent. scratch.') and the model runs once per image;
-each detection query is attributed back to exactly one prompt via the
-caption's phrase token spans (pure logic in ``gsam_utils``), thresholded
-(Box_Threshold / Text_Threshold), converted to clamped pixel boxes,
-deduplicated per label, and capped. For Segmentation each retained box
-prompts the SAM ONNX decoder (canonical two-point encoding, labels 2/3)
-and the thresholded mask is RLE-encoded at source resolution in the
-portal's canonical form (``mask_utils.runs_to_rle``).
+Pipeline: the image is preprocessed once and Grounding DINO runs once
+per prompt, each pass on a one-phrase caption ('small surface dent.').
+The passes are separate because the baked export unrolled its
+per-phrase text attention mask for a one-phrase caption: in a joined
+caption ('small surface dent. scratch.') every phrase after the first
+is never encoded as a phrase and cannot reach the Box_Threshold. Each
+pass's detection queries are scored on its caption's phrase token span
+(pure logic in ``gsam_utils``), thresholded (Box_Threshold /
+Text_Threshold), credited to that pass's prompt and converted to
+clamped pixel boxes; the candidates of all passes are deduplicated per
+label and capped. For Segmentation the image is embedded once, each
+retained box prompts the SAM ONNX decoder (canonical two-point encoding,
+labels 2/3) and the thresholded mask is RLE-encoded at source resolution
+in the portal's canonical form (``mask_utils.runs_to_rle``).
 
 Model loading: files are baked into the image at build time and
 resolved under ``GROUNDED_SAM_MODEL_PATH`` (globs
@@ -64,7 +69,7 @@ from gsam_utils import (
     DEFAULT_MAX_DETECTIONS,
     DEFAULT_TEXT_THRESHOLD,
     attribute_detection,
-    build_caption,
+    build_phrase_captions,
     cxcywh_to_pixel_box,
     normalize_prompts,
     phrase_token_spans,
@@ -383,7 +388,7 @@ def _sam_preprocess(image_rgb, encoder_size: int, expects_hwc: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# Grounding DINO detection (one forward per image)
+# Grounding DINO detection (one forward per label prompt)
 # ---------------------------------------------------------------------------
 
 def _marker_token_ids(tokenizer) -> Tuple[Set[int], Set[int]]:
@@ -461,64 +466,87 @@ def _run_grounding_dino(pixel_values, input_ids, attention_mask, token_type_ids)
     return logits, pred_boxes
 
 
-def _detect(image_rgb, caption: str, phrases: List[str],
-            max_detections: int) -> List[Dict]:
+def _detect(image_rgb, captions: List[str], max_detections: int) -> List[Dict]:
     """
-    Run the detection pipeline once: tokenize the caption, locate the
-    phrase token spans, run Grounding DINO, attribute every query to its
-    best phrase, threshold, convert to clamped pixel boxes, and select
-    (per-label NMS + cap).
+    Run the detection pipeline with one Grounding DINO forward per
+    caption, then select (per-label NMS + cap) over all passes.
+
+    `captions` holds one single-phrase caption per Prompt_Map entry
+    (``gsam_utils.build_phrase_captions``). The passes are separate
+    because the baked onnx-community export unrolled its per-phrase text
+    attention mask and position-id loop for a one-phrase caption: in a
+    joined caption every phrase after the first is read token by token
+    and never reaches the Box_Threshold. The image is preprocessed once
+    and every pass reuses it.
+
+    Each pass runs Grounding DINO on its caption, thresholds every query
+    on the caption's phrase token span, converts it to a clamped pixel
+    box and credits it to the pass's prompt.
 
     Returns [{'label_index', 'score', 'box'}] in descending score order;
-    `label_index` indexes the phrase (= Prompt_Map entry) list.
+    `label_index` indexes the caption (= Prompt_Map entry) list.
     """
     import numpy as np
 
     height, width = image_rgb.shape[:2]
     tokenizer = _get_tokenizer()
-    input_ids, attention_mask, token_type_ids = _encode_caption(tokenizer, caption)
     separator_ids, special_ids = _marker_token_ids(tokenizer)
-    spans = phrase_token_spans(input_ids[0].tolist(), separator_ids, special_ids)
-    if len(spans) != len(phrases):
-        # One span per phrase is what makes attribution well-defined
+    passes = []
+    for caption in captions:
+        input_ids, attention_mask, token_type_ids = _encode_caption(tokenizer, caption)
+        spans = phrase_token_spans(input_ids[0].tolist(), separator_ids, special_ids)
+        passes.append((input_ids, attention_mask, token_type_ids, spans))
+    span_count = sum(len(spans) for _, _, _, spans in passes)
+    if span_count != len(captions):
+        # One span per prompt is what makes attribution well-defined
         # (req 3.3); a prompt with inner sentence punctuation (e.g. an
         # embedded '.') breaks the alignment, so fail the invocation
-        # descriptively instead of mislabeling detections.
+        # descriptively, before any pass, instead of mislabeling
+        # detections. The tokenizer splits on punctuation before
+        # WordPiece, so the total equals the span count of the joined
+        # caption: the same prompts fail, with the same message.
         raise ValueError(
-            f'caption token spans ({len(spans)}) do not align with the '
-            f'{len(phrases)} prompts; a prompt likely contains inner '
+            f'caption token spans ({span_count}) do not align with the '
+            f'{len(captions)} prompts; a prompt likely contains inner '
             'sentence punctuation'
         )
 
     pixel_values = _dino_preprocess(image_rgb)
-    logits, pred_boxes = _run_grounding_dino(
-        pixel_values, input_ids, attention_mask, token_type_ids)
-
-    with np.errstate(over='ignore'):  # exp overflow saturates to score 0.0
-        scores = 1.0 / (1.0 + np.exp(-np.asarray(logits, dtype=np.float32)[0]))
-    boxes = np.asarray(pred_boxes, dtype=np.float32)[0]
 
     # Vectorized pre-filter: a query's span max is bounded by its row max,
     # so rows whose overall max misses both thresholds cannot survive
     # attribute_detection — skip the pure-python span walk for the vast
     # majority of the model's queries.
     floor = min(BOX_THRESHOLD, TEXT_THRESHOLD)
-    plausible = np.flatnonzero(scores.max(axis=1) >= floor)
 
     candidates: List[Dict] = []
-    for query_index in plausible:
-        attributed = attribute_detection(
-            scores[query_index].tolist(), spans, BOX_THRESHOLD, TEXT_THRESHOLD)
-        if attributed is None:
-            continue
-        label_index, score = attributed
-        box = cxcywh_to_pixel_box(boxes[query_index].tolist(), width, height)
-        if box is None:
-            continue
-        candidates.append({'label_index': label_index, 'score': score, 'box': box})
+    for label_index, (input_ids, attention_mask, token_type_ids,
+                      spans) in enumerate(passes):
+        logits, pred_boxes = _run_grounding_dino(
+            pixel_values, input_ids, attention_mask, token_type_ids)
 
-    logger.info('Grounding DINO: %d/%d plausible queries -> %d candidates',
-                len(plausible), scores.shape[0], len(candidates))
+        with np.errstate(over='ignore'):  # exp overflow saturates to score 0.0
+            scores = 1.0 / (1.0 + np.exp(-np.asarray(logits, dtype=np.float32)[0]))
+        boxes = np.asarray(pred_boxes, dtype=np.float32)[0]
+        plausible = np.flatnonzero(scores.max(axis=1) >= floor)
+
+        pass_candidates = 0
+        for query_index in plausible:
+            attributed = attribute_detection(
+                scores[query_index].tolist(), spans, BOX_THRESHOLD, TEXT_THRESHOLD)
+            if attributed is None:
+                continue
+            # Credit the pass's prompt, not the span index within it
+            _, score = attributed
+            box = cxcywh_to_pixel_box(boxes[query_index].tolist(), width, height)
+            if box is None:
+                continue
+            candidates.append({'label_index': label_index, 'score': score, 'box': box})
+            pass_candidates += 1
+
+        logger.info('Grounding DINO pass %d/%d: %d/%d plausible queries -> %d candidates',
+                    label_index + 1, len(passes), len(plausible), scores.shape[0],
+                    pass_candidates)
     return select_detections(candidates, max_detections=max_detections,
                              iou_threshold=NMS_IOU_THRESHOLD)
 
@@ -729,7 +757,7 @@ def lambda_handler(event: Dict, context=None) -> Dict:
 
     source = _resolve_image_source(event)
     prompts = normalize_prompts(event.get('prompts'))
-    caption, phrases = build_caption([entry['prompt'] for entry in prompts])
+    captions = build_phrase_captions([entry['prompt'] for entry in prompts])
     modality = event.get('modality')
     if modality not in SUPPORTED_MODALITIES:
         raise ValueError(
@@ -750,7 +778,7 @@ def lambda_handler(event: Dict, context=None) -> Dict:
     logger.info('Grounded-SAM inference: image=%dx%d prompts=%d modality=%s',
                 width, height, len(prompts), modality)
 
-    detections = _detect(image_rgb, caption, phrases, max_detections)
+    detections = _detect(image_rgb, captions, max_detections)
 
     if modality == MODALITY_OBJECT_DETECTION:
         regions = [

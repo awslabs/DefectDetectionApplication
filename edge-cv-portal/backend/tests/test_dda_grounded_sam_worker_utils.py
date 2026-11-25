@@ -588,6 +588,51 @@ class TestBuildCaptionExamples:
         assert len(phrases) == 2
 
 
+class TestPropertyPhraseCaptions:
+    @settings(max_examples=100, deadline=None)
+    @given(case=_caption_span_cases())
+    def test_one_single_phrase_caption_per_prompt(self, case):
+        """
+        Each prompt gets its own caption: the single-prompt caption,
+        which is also that prompt's phrase of the joined caption plus its
+        dot, and which tokenizes to exactly one phrase span. One prompt
+        gives exactly the joined caption.
+        """
+        phrases_in, runs, _pad_count, _scores, _box, _text = case
+
+        captions = gsam_utils.build_phrase_captions(phrases_in)
+
+        joined, phrases = gsam_utils.build_caption(phrases_in)
+        assert len(captions) == len(phrases_in)
+        for index, text in enumerate(phrases_in):
+            assert captions[index] == gsam_utils.build_caption([text])[0]
+            assert captions[index] == phrases[index] + '.'
+        # Synthetic tokenization of one caption: [CLS] run . [SEP]
+        for run in runs:
+            token_ids = [_CLS_ID] + run + [_DOT_ID, _SEP_ID]
+            spans = gsam_utils.phrase_token_spans(
+                token_ids, {_DOT_ID}, {_CLS_ID, _SEP_ID, _PAD_ID})
+            assert spans == [(1, 1 + len(run))]
+        if len(phrases_in) == 1:
+            assert captions == [joined]
+
+
+class TestBuildPhraseCaptionsExamples:
+    def test_one_caption_per_prompt_in_order(self):
+        assert gsam_utils.build_phrase_captions(
+            ['rounded nose piece', 'square tab piece', 'half disc']) == [
+            'rounded nose piece.', 'square tab piece.', 'half disc.']
+
+    def test_normalizes_like_build_caption(self):
+        assert gsam_utils.build_phrase_captions(
+            ['  Small   Surface DENT..']) == ['small surface dent.']
+
+    def test_rejects_what_build_caption_rejects(self):
+        for bad in ([], 'dent', None, ['dent', 42], ['...']):
+            with pytest.raises(ValueError):
+                gsam_utils.build_phrase_captions(bad)
+
+
 class TestNormalizePromptsExamples:
     def test_blank_or_absent_prompt_falls_back_to_label(self):
         assert gsam_utils.normalize_prompts([{'label': 'Dent', 'prompt': '  '}]) == [

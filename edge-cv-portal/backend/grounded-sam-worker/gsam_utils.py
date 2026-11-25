@@ -9,11 +9,12 @@ per-label greedy NMS — is unit-testable without onnxruntime / numpy /
 Pillow / tokenizers installed (the sibling sam-worker's ``mask_utils``
 precedent).
 
-Pipeline context: the worker submits all of a job's prompts to Grounding
-DINO as one caption ('small surface dent. scratch. discoloration.') and
-runs the model once per image. Each detection query is attributed back to
-exactly one prompt by mapping its per-token confidences onto the caption's
-phrase token spans; retained detections are converted from the model's
+Pipeline context: the worker runs Grounding DINO once per prompt, each
+pass on a one-phrase caption ('small surface dent.'), because the baked
+export encodes only a caption's first phrase as a phrase (see
+``build_phrase_captions``). Each detection query of a pass is scored on
+its caption's phrase token span and credited to that pass's prompt;
+retained detections of all passes are converted from the model's
 normalized (cx, cy, w, h) boxes to pixel boxes clamped to the source
 image, deduplicated per label, and capped. RLE encoding lives in
 ``mask_utils`` (a verbatim copy of the sam-worker module).
@@ -139,6 +140,35 @@ def build_caption(prompt_texts: object) -> Tuple[str, List[str]]:
 
     caption = '. '.join(phrases) + '.'
     return caption, phrases
+
+
+def build_phrase_captions(prompt_texts: object) -> List[str]:
+    """
+    Build one single-phrase Grounding DINO caption per prompt.
+
+    Caption *i* is prompt *i*'s normalized phrase followed by a dot,
+    which equals ``build_caption([text])[0]``. For one prompt the result
+    is ``[build_caption(prompt_texts)[0]]``, the caption the worker has
+    always sent for a single-label job.
+
+    The worker runs one Grounding DINO pass per caption because the
+    baked onnx-community export unrolled its per-phrase text attention
+    mask and position-id loop for a one-phrase caption when it was
+    traced. In a joined caption ('p1. p2.') every phrase after the first
+    is therefore never encoded as a phrase: its tokens are read one by
+    one and do not reach the Box_Threshold.
+
+    Args:
+        prompt_texts: Sequence of prompt strings, one per label
+
+    Returns:
+        The one-phrase captions, in input order.
+
+    Raises:
+        ValueError: In the same cases as ``build_caption``.
+    """
+    _, phrases = build_caption(prompt_texts)
+    return [phrase + '.' for phrase in phrases]
 
 
 def phrase_token_spans(token_ids: Sequence[int],
