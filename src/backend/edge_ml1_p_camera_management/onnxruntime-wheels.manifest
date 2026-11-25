@@ -1,0 +1,26 @@
+# onnxruntime-gpu for the Jetson LocalServer images (JP5 / JP6 / JP7): the one
+# place that names, per JetPack line, the ORT release the image carries, the
+# exact upstream release commit its source build checks out, and the sha256 of
+# the wheel that build produced.
+#
+# install_onnxruntime_gpu.sh reads this file in two places:
+#   1. A wheel listed here that is staged beside the script in
+#      onnxruntime-wheels/ (a gitignored directory build-custom.sh fills from the
+#      account's component bucket, key onnxruntime-wheels/<file>) is installed
+#      instead of compiling; it is used only when its sha256 equals the value
+#      here, and both scripts stop on a mismatch (nothing unlisted is installed).
+#   2. With no staged wheel the source build clones the onnxruntime repository
+#      and checks out the release commit recorded here (a commit id, not a tag,
+#      so the checkout does not depend on which tags a mirror carries) and stops
+#      unless the tree's VERSION_NUMBER equals the version recorded here.
+#
+# Every wheel listed here was produced by install_onnxruntime_gpu.sh from the
+# upstream release of its JetPack line and shipped in a published LocalServer
+# image; the commit id is the one the wheel's own build info reports
+# (onnxruntime.get_build_info(), git-commit-id). To add or replace an entry, see
+# README.md "ONNX Runtime wheels for the Jetson images".
+#
+# Columns: <jetpack major> <ort version> <wheel file name> <sha256 of the wheel> <upstream release commit>
+5 1.16.3 onnxruntime_gpu-1.16.3-cp311-cp311-linux_aarch64.whl 6c3379b996331ca5ca69327cbd18f3f44b8b4cb1ced2336453af4c4a48b7645a 2ac381c55397dffff327cc6efecf6f95a70f90a1
+6 1.20.1 onnxruntime_gpu-1.20.1-cp311-cp311-linux_aarch64.whl ac31478fc3f579a56bf4cad337a4f2744e68fc452fbc46924e32db9eb7be3ee2 5c1b7ccbff7e5141c1da7a9d963d660e5741c319
+7 1.23.2 onnxruntime_gpu-1.23.2-cp311-cp311-linux_aarch64.whl 1ecffb982c7e41c80c746d8e7e3cebee13e83fe94f8b5fc8054976a26e85804a a83fc4d58cb48eb68890dd689f94f28288cf2278

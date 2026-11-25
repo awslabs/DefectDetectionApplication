@@ -80,21 +80,35 @@ const MAX_DDA_JOB_NAME_LENGTH = 63;
  * ObjectDetection only; Bedrock vision models answer classification and
  * detection prompts — Classification and ObjectDetection only;
  * prompt-guided LLM models return coordinate guidance convertible to any
- * modality (llm-auto-labeling Requirement 1.3).
+ * modality (llm-auto-labeling Requirement 1.3). The mask-producing families
+ * (SAM, Grounded-SAM, prompt-guided LLM) also pre-label InstanceSegmentation
+ * — each returned region becomes one instance — while Bedrock, which
+ * returns boxes only, does not (rfdetr-seg-support Requirement 2.4). This is
+ * the frontend mirror of the backend's AUTO_LABEL_MODEL_MODALITIES.
  */
-export const SAM_MODALITIES = ['Segmentation', 'ObjectDetection'];
+export const SAM_MODALITIES = [
+  'Segmentation',
+  'ObjectDetection',
+  'InstanceSegmentation',
+];
 export const BEDROCK_MODALITIES = ['Classification', 'ObjectDetection'];
 export const LLM_MODALITIES = [
   'Classification',
   'Segmentation',
   'ObjectDetection',
+  'InstanceSegmentation',
 ];
 /**
  * Grounded-SAM produces classified geometry (text-prompted boxes, and
- * masks for segmentation) — Segmentation and ObjectDetection only, never
- * Classification (grounded-sam-autolabel Requirements 1.1, 1.2, 1.3).
+ * masks for segmentation) — the geometry modalities only, never
+ * Classification (grounded-sam-autolabel Requirements 1.1, 1.2, 1.3;
+ * rfdetr-seg-support Requirement 2.4 adds InstanceSegmentation).
  */
-export const GROUNDED_SAM_MODALITIES = ['Segmentation', 'ObjectDetection'];
+export const GROUNDED_SAM_MODALITIES = [
+  'Segmentation',
+  'ObjectDetection',
+  'InstanceSegmentation',
+];
 
 /**
  * Prompt_Override length limit for the Grounded-SAM family, judged on the
@@ -203,7 +217,19 @@ const ALL_TASK_TYPE_OPTIONS: SelectProps.Option[] = [
   { label: 'Image Classification', value: 'Classification' },
   { label: 'Semantic Segmentation', value: 'Segmentation' },
   { label: 'Object Detection', value: 'ObjectDetection' },
+  { label: 'Instance Segmentation', value: 'InstanceSegmentation' },
 ];
+
+/**
+ * The InstanceSegmentation task-type option — DDA labeling only, because
+ * SageMaker Ground Truth has no built-in instance-segmentation algorithm
+ * (rfdetr-seg-support Requirement 2.6).
+ */
+const INSTANCE_SEGMENTATION_TASK_TYPE_OPTION: SelectProps.Option = {
+  label: 'Instance Segmentation',
+  value: 'InstanceSegmentation',
+  description: 'Instance labeling is available in DDA labeling only',
+};
 
 const fileUploadI18nStrings = {
   uploadButtonText: (multiple: boolean) =>
@@ -510,10 +536,15 @@ export default function CreateLabelingJob() {
   }, [labelingBackend]);
 
   // Ground Truth supports only Classification/Segmentation; clear an
-  // ObjectDetection selection when switching back (Requirement 1.2 — the
-  // GroundTruth path submits exactly as before).
+  // ObjectDetection or InstanceSegmentation selection when switching back
+  // (Requirement 1.2 — the GroundTruth path submits exactly as before;
+  // rfdetr-seg-support Requirement 2.6).
   useEffect(() => {
-    if (labelingBackend === 'GroundTruth' && taskType?.value === 'ObjectDetection') {
+    if (
+      labelingBackend === 'GroundTruth' &&
+      (taskType?.value === 'ObjectDetection' ||
+        taskType?.value === 'InstanceSegmentation')
+    ) {
       setTaskType(null);
     }
   }, [labelingBackend, taskType]);
@@ -668,12 +699,19 @@ export default function CreateLabelingJob() {
     return match ? match[1] : '';
   }, [datasetS3Uri]);
 
-  const taskTypeOptions = [
+  const taskTypeOptions: SelectProps.Option[] = [
     { label: 'Image Classification', value: 'Classification' },
     { label: 'Semantic Segmentation', value: 'Segmentation' },
-    // Object detection is a DDA-only modality; the Ground Truth path is
-    // unchanged (Requirement 1.2).
-    ...(isDda ? [{ label: 'Object Detection', value: 'ObjectDetection' }] : []),
+    // Object detection and instance segmentation are DDA-only modalities;
+    // the Ground Truth path is unchanged (Requirement 1.2; rfdetr-seg-support
+    // Requirement 2.6 — the wizard states that instance labeling is
+    // available in DDA labeling only).
+    ...(isDda
+      ? [
+          { label: 'Object Detection', value: 'ObjectDetection' },
+          INSTANCE_SEGMENTATION_TASK_TYPE_OPTION,
+        ]
+      : []),
   ];
 
   const workforceOptions = [

@@ -40,15 +40,21 @@ from shared_utils import (
 # (vllm-model-name-mismatch Requirement 2.2).
 from model_naming import safe_model_name
 
-# Portal-trained Object Detection (YOLO / RF-DETR): record predicate + the
-# device manifest builder shared with training.py (portal-detection-training,
-# rfdetr-training-and-transfer-learning).
+# Portal-trained Object Detection (YOLO / RF-DETR) and RF-DETR-Seg: record
+# predicates + the device manifest builder shared with training.py
+# (portal-detection-training, rfdetr-training-and-transfer-learning,
+# rfdetr-seg-support).
 from detection_training import (
+    DEFAULT_OUTPUT_MODE,
+    MODEL_TYPE_INSTANCE_SEGMENTATION,
+    OUTPUT_MODES,
     RFDETR_TOP_K,
-    STAGE_TYPE_FOR_ARCH,
     build_detection_device_manifest,
+    is_detr_family,
     is_trained_detection_record,
     normalize_detection_arch,
+    rfdetr_seg_enabled,
+    stage_type_for,
 )
 
 # Imported-detector conversions (detector-checkpoint-import): the record
@@ -358,11 +364,96 @@ def _is_3d_int_shape(shape) -> bool:
         and all(isinstance(d, int) for d in shape)
 
 
+def _is_int_shape(shape, rank: int) -> bool:
+    """_is_3d_int_shape for any rank: a trainer-recorded shape of exactly
+    `rank` int dims (the Seg artifact's rank-4 mask tensor; Seg spec C29)."""
+    return isinstance(shape, list) and len(shape) == rank \
+        and all(isinstance(d, int) for d in shape)
+
+
+class DetectionPackagingError(ValueError):
+    """A record / artifact disagreement the packager can name (an RF-DETR-Seg
+    record whose onnx_output_shapes are not the three-output Seg contract).
+    The callers answer it with HTTP 400 and leave the record untouched; every
+    other failure stays the generic 500 (Seg spec Req 6.3)."""
+
+
+def is_rfdetr_seg_record(training_job: Dict) -> bool:
+    """True for an RF-DETR-Seg record of any source — trained, Conversion_Record
+    or imported ONNX (Seg spec Req 1.1: `model_type = 'instance_segmentation'`
+    with `detection.detection_arch = 'rf_detr_seg'`; either suffices here so a
+    record missing one of the two is still handled as Seg, never as YOLO)."""
+    if not isinstance(training_job, dict):
+        return False
+    det = training_job.get('detection') or {}
+    return (training_job.get('model_type') == MODEL_TYPE_INSTANCE_SEGMENTATION
+            or (isinstance(det, dict) and det.get('detection_arch') == 'rf_detr_seg'))
+
+
+def effective_output_mode(det: Optional[Dict], hints: Optional[Dict] = None,
+                          override: Optional[str] = None) -> str:
+    """The Output_Mode an RF-DETR-Seg package is built in (pure; Seg spec §6,
+    C32): the Package body's `output_mode` override, else the record's
+    `detection.output_mode`, else the artifact's
+    `device_manifest_hints.output_mode`, else DEFAULT_OUTPUT_MODE. The callers
+    resolve it ONCE, pass it down to package_trained_detection_component and
+    persist the same value as `packaged_output_mode`, so the manifest's
+    `detection.output_mode` and the record cannot disagree."""
+    mode = (override
+            or (det or {}).get('output_mode')
+            or (hints or {}).get('output_mode')
+            or DEFAULT_OUTPUT_MODE)
+    return str(mode).strip().lower()
+
+
+def _seg_output_shapes(real_shapes, output_names) -> Tuple[List[int], List[int], List[int]]:
+    """(boxes, logits, masks) of an RF-DETR-Seg artifact's `onnx_output_shapes`,
+    identified BY SHAPE, never by position (Seg spec 6.2, C29 / C33): boxes is
+    the rank-3 entry ending in 4, logits the other rank-3 entry
+    ([1, Q, num_classes + 1]), masks the rank-4 entry. When both rank-3 entries
+    end in 4 (three classes: C + 1 == 4) they are settled by the aligned
+    `onnx_output_names` (`dets` / `labels`, written in graph order by the
+    trainer and the conversion job) and, without names, taken in list order —
+    the two shapes are equal, so the result is the same either way and a
+    three-class record is never refused. Anything else — a two-entry list, a
+    wrong-rank entry, a non-int dim, no list at all — raises
+    DetectionPackagingError quoting the shapes (Req 6.3: never a silent skip).
+    """
+    if isinstance(real_shapes, list) and len(real_shapes) == 2:
+        raise DetectionPackagingError(
+            f"Seg record has a two-output artifact: {real_shapes}")
+    if not isinstance(real_shapes, list) or len(real_shapes) != 3:
+        raise DetectionPackagingError(
+            f"Seg record needs three onnx_output_shapes [1, Q, 4] + [1, Q, C+1] + [1, Q, H, W]; "
+            f"got {real_shapes}")
+    rank3 = [i for i, s in enumerate(real_shapes) if _is_int_shape(s, 3)]
+    rank4 = [i for i, s in enumerate(real_shapes) if _is_int_shape(s, 4)]
+    if len(rank3) != 2 or len(rank4) != 1:
+        raise DetectionPackagingError(
+            f"Seg record's onnx_output_shapes are not two rank-3 and one rank-4 int shapes: "
+            f"{real_shapes}")
+    masks = list(real_shapes[rank4[0]])
+    a, b = rank3
+    if real_shapes[a][2] == 4 and real_shapes[b][2] == 4:
+        # Three classes: both rank-3 tensors are [1, Q, 4]. Names decide
+        # (`dets` is the box tensor); nameless, keep the list order.
+        names = output_names if isinstance(output_names, list) and len(output_names) == 3 else None
+        if names is not None and str(names[b]) == 'dets' and str(names[a]) != 'dets':
+            a, b = b, a
+    elif real_shapes[b][2] == 4:
+        a, b = b, a
+    elif real_shapes[a][2] != 4:
+        raise DetectionPackagingError(
+            f"Seg record's onnx_output_shapes have no [1, Q, 4] boxes entry: {real_shapes}")
+    return list(real_shapes[a]), list(real_shapes[b]), masks
+
+
 def package_trained_detection_component(trained_model_s3: str, training_job: Dict,
-                                        s3_client, usecase: Dict) -> str:
+                                        s3_client, usecase: Dict,
+                                        output_mode: Optional[str] = None) -> str:
     """Build the Greengrass model-component ZIP for a portal-trained Object
-    Detection (YOLO or RF-DETR) job — no Neo, one architecture-agnostic
-    artifact.
+    Detection (YOLO or RF-DETR) or RF-DETR-Seg job — no Neo, one
+    architecture-agnostic artifact.
 
     The training job (datasets/detection_training/train.py or
     train_rfdetr.py) writes a FLAT artifact: model.onnx + the fine-tunable
@@ -380,9 +471,21 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
 
     `detection_arch` comes from the record, falling back to
     training_metadata.json, then 'yolo' (legacy records predate the field).
-    training_metadata.json's `imgsz` (YOLO) / `resolution` (RF-DETR) is the
-    size the ONNX graph was actually exported at, so it wins over the record
-    when both exist (portal-detection-training Req 5.5).
+    training_metadata.json's `imgsz` (YOLO) / `resolution` (RF-DETR family) is
+    the size the ONNX graph was actually exported at, so it wins over the
+    record when both exist (portal-detection-training Req 5.5).
+
+    RF-DETR-Seg (`detection_arch == 'rf_detr_seg'`; Seg spec §6, Req 6.3): the
+    DETR-family branch additionally carries `mask_threshold`, the graph's
+    `output_names` and the Output_Mode into the manifest, replaces the nominal
+    output shape with the real THREE shapes (boxes / logits / masks, identified
+    by shape — `_seg_output_shapes`; anything else is a DetectionPackagingError
+    the callers answer with 400) and nests model.onnx under
+    `stage_type_for('rf_detr_seg', output_mode)`. `output_mode`, the one
+    trailing keyword, is what the callers resolved once through
+    effective_output_mode (and persist as `packaged_output_mode`); only an
+    absent one falls back to record -> device_manifest_hints -> default here.
+    For yolo / rf_detr the keyword is never passed and nothing changes.
     """
     temp_dir = None
     try:
@@ -435,15 +538,19 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
         # Arch: record -> training_metadata.json -> 'yolo' (legacy records).
         detection_arch = normalize_detection_arch(
             det.get('detection_arch') or meta.get('detection_arch') or 'yolo')
-        is_rf_detr = detection_arch == 'rf_detr'
+        # The DETR family (rf_detr, rf_detr_seg) shares every branch below;
+        # `is_seg` adds the Seg-only keys inside it.
+        is_detr = is_detr_family(detection_arch)
+        is_seg = detection_arch == 'rf_detr_seg'
 
         record_input = _decimal_plain(det.get('network_input_width'), None)
-        # train_rfdetr.py records the export size as `resolution`; train.py as
-        # `imgsz`. Either wins over the record (it is what the graph was
-        # exported at); fall back to the other key for robustness.
-        artifact_input = meta.get('resolution') if is_rf_detr else meta.get('imgsz')
+        # train_rfdetr.py / train_rfdetr_seg.py record the export size as
+        # `resolution`; train.py as `imgsz`. Either wins over the record (it is
+        # what the graph was exported at); fall back to the other key for
+        # robustness.
+        artifact_input = meta.get('resolution') if is_detr else meta.get('imgsz')
         if artifact_input is None:
-            artifact_input = meta.get('imgsz') if is_rf_detr else meta.get('resolution')
+            artifact_input = meta.get('imgsz') if is_detr else meta.get('resolution')
         if artifact_input is not None and record_input is not None \
                 and int(artifact_input) != int(record_input):
             logger.warning(
@@ -457,14 +564,31 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
         score_threshold = float(_decimal_plain(
             det.get('score_threshold'), hints.get('score_threshold', 0.25)))
         # preserve_aspect: record -> hints -> arch default (YOLO letterboxes,
-        # RF-DETR square-resizes — see build_detection_device_manifest).
-        preserve_aspect = det.get('preserve_aspect', hints.get('preserve_aspect', not is_rf_detr))
+        # the DETR family square-resizes — see build_detection_device_manifest).
+        preserve_aspect = det.get('preserve_aspect', hints.get('preserve_aspect', not is_detr))
 
-        if is_rf_detr:
+        if is_detr:
             # NMS-free decoding: `top_k` query slots, no iou_threshold. The
             # trainer's recorded Q is the graph's real query count and wins.
             top_k = int(_decimal_plain(
                 meta.get('top_k', det.get('top_k')), hints.get('top_k', RFDETR_TOP_K)))
+            seg_kwargs: Dict[str, Any] = {}
+            if is_seg:
+                # Seg-only manifest inputs (Req 6.3): the Output_Mode the
+                # caller resolved (or, on a direct call, record -> hints ->
+                # default), the mask binarisation threshold and the graph's
+                # output order. Resolved ONLY for Seg so an rf_detr record
+                # never sees an output_mode (C32).
+                if output_mode is None:
+                    output_mode = effective_output_mode(det, hints)
+                mask_threshold = float(_decimal_plain(
+                    det.get('mask_threshold'), hints.get('mask_threshold', 0.5)))
+                output_names = meta.get('onnx_output_names') or det.get('output_names')
+                seg_kwargs = {
+                    'output_mode': output_mode,
+                    'mask_threshold': mask_threshold,
+                    'output_names': [str(n) for n in output_names] if output_names else None,
+                }
             manifest = build_detection_device_manifest(
                 image_width=network_input,
                 image_height=network_input,
@@ -474,6 +598,7 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
                 preserve_aspect=bool(preserve_aspect),
                 detection_arch=detection_arch,
                 top_k=top_k,
+                **seg_kwargs,
             )
         else:
             iou_threshold = float(_decimal_plain(
@@ -498,8 +623,19 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
         #    schema carries ONE `output_shape`, so it gets the logits tensor
         #    [1, Q, C] (encodes both Q and C) and both tensors are kept under
         #    `output_shapes` for anyone inspecting the package.
+        #  - rf_detr_seg: `onnx_output_shapes` [[1, Q, 4], [1, Q, C+1],
+        #    [1, Q, H, W]] — REQUIRED (Req 6.3): `output_shape` gets the logits
+        #    tensor, `output_shapes` all three as [boxes, logits, masks]; a
+        #    two-output artifact (a detection graph mislabelled as Seg), a
+        #    wrong-rank or non-int entry or a missing list is refused, never
+        #    skipped silently.
         stage0 = manifest['model_graph']['stages'][0]
-        if is_rf_detr:
+        if is_seg:
+            boxes_shape, logits_shape, masks_shape = _seg_output_shapes(
+                meta.get('onnx_output_shapes'), meta.get('onnx_output_names'))
+            stage0['output_shape'] = logits_shape
+            stage0['output_shapes'] = [boxes_shape, logits_shape, masks_shape]
+        elif is_detr:
             real_shapes = meta.get('onnx_output_shapes')
             if isinstance(real_shapes, list) and len(real_shapes) == 2 \
                     and all(_is_3d_int_shape(s) for s in real_shapes):
@@ -514,7 +650,11 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
                 stage0['output_shape'] = real_shape
 
         payload_dir = os.path.join(temp_dir, 'payload')
-        stage_dir = os.path.join(payload_dir, STAGE_TYPE_FOR_ARCH[detection_arch])
+        # The stage dir is the stage type: for Seg the Output_Mode selects it
+        # (rf_detr_instance_segmentation / rf_detr_semantic_segmentation); for
+        # yolo / rf_detr stage_type_for ignores output_mode and returns
+        # STAGE_TYPE_FOR_ARCH[arch] exactly as before.
+        stage_dir = os.path.join(payload_dir, stage_type_for(detection_arch, output_mode))
         os.makedirs(stage_dir, exist_ok=True)
         with open(os.path.join(payload_dir, 'manifest.json'), 'w') as f:
             json.dump(manifest, f, indent=2)
@@ -992,7 +1132,8 @@ def _fail_conversion(table, training_id: str, training_job: Dict, user_id: str,
 
 
 def package_detector_conversion(training_id: str, training_job: Dict, body: Dict, user_id: str,
-                                requested_targets: Optional[List[str]]) -> Dict:
+                                requested_targets: Optional[List[str]],
+                                output_mode: Optional[str] = None) -> Dict:
     """Package a Conversion_Record (detector-checkpoint-import Requirements
     7.9, 8 and 9).
 
@@ -1003,6 +1144,10 @@ def package_detector_conversion(training_id: str, training_job: Dict, body: Dict
     package_trained_detection_component, unchanged -> a conditional
     Finalizing -> Completed with the validated ONNX facts. Component creation
     follows the finalize that won, or an auto-triggered re-package.
+
+    `output_mode` is the Package body's validated Output_Mode override for an
+    RF-DETR-Seg Conversion_Record (Seg spec Req 6.4, 6.6); None for every
+    other record and for the finalize invoke.
     """
     usecase_id = training_job['usecase_id']
     conv_status = dconv.conversion_status(training_job)
@@ -1071,10 +1216,23 @@ def package_detector_conversion(training_id: str, training_job: Dict, body: Dict
     # Req 9.2: exactly the trained-detection packager. Its extractall is safe
     # on this tarball: it has just been proven to hold exactly two regular
     # files (design section 7).
+    # RF-DETR-Seg Conversion_Records (Seg spec Req 6.6) take the same packager;
+    # their Output_Mode is resolved once here (override -> record -> default)
+    # and persisted as `packaged_output_mode` below. A detection record passes
+    # no keyword and writes no such attribute (C32).
     targets = requested_targets or list(DETECTOR_CONVERSION_TARGETS)
+    is_seg = is_rfdetr_seg_record(training_job)
+    seg_mode = effective_output_mode(training_job.get('detection'), override=output_mode) \
+        if is_seg else None
     try:
         component_s3_uri = package_trained_detection_component(
-            artifact_s3, training_job, s3_usecase, usecase)
+            artifact_s3, training_job, s3_usecase, usecase,
+            **({'output_mode': seg_mode} if is_seg else {}))
+    except DetectionPackagingError as e:
+        # The record disagrees with its artifact (a Seg record without the
+        # three-output shapes): named, not retried blindly; record untouched.
+        logger.error(f"Conversion component packaging refused: {str(e)}")
+        return create_response(400, {'error': str(e)})
     except Exception as e:
         # The record stays Finalizing / Completed: the Package action retries.
         logger.error(f"Conversion component packaging failed: {str(e)}")
@@ -1088,7 +1246,8 @@ def package_detector_conversion(training_id: str, training_job: Dict, body: Dict
     if finalizing:
         won = dconv.apply_conversion_transition(table, training_id, dconv.plan_finalize_transition(
             success=True, now_ms=now_ms, packaged_components=packaged_components,
-            onnx_sha256=validated.onnx_sha256, onnx_summary=validated.summary))
+            onnx_sha256=validated.onnx_sha256, onnx_summary=validated.summary,
+            packaged_output_mode=seg_mode))
         if not won:
             # Another finalize completed (or failed) the record first; its
             # component is the published one.
@@ -1097,16 +1256,22 @@ def package_detector_conversion(training_id: str, training_job: Dict, body: Dict
                 'error': 'The conversion was finalized by another request',
                 'training_id': training_id})
     else:
+        update_expression = 'SET packaged_components = :components, updated_at = :updated'
+        update_values: Dict[str, Any] = {':components': packaged_components, ':updated': now_ms}
+        if is_seg:
+            update_expression += ', packaged_output_mode = :mode'
+            update_values[':mode'] = seg_mode
         table.update_item(
             Key={'training_id': training_id},
-            UpdateExpression='SET packaged_components = :components, updated_at = :updated',
-            ExpressionAttributeValues={':components': packaged_components, ':updated': now_ms},
+            UpdateExpression=update_expression,
+            ExpressionAttributeValues=update_values,
         )
     log_audit_event(
         user_id=user_id, action='package_components', resource_type='training_job',
         resource_id=training_id, result='success',
         details={'targets': targets, 'packaged_count': len(targets), 'runtime': 'onnx',
-                 'model_type': 'object_detection', 'conversion': True,
+                 'model_type': training_job.get('model_type') or 'object_detection',
+                 'conversion': True,
                  'onnx_sha256': validated.onnx_sha256,
                  'source_sha256': (training_job.get('conversion') or {}).get('source_sha256')},
     )
@@ -1129,7 +1294,8 @@ def package_components(event: Dict, context: Any) -> Dict:
     
     Request body:
     {
-        "targets": ["jetson-xavier-jp5", "x86_64-cpu"]  // Optional, defaults to all compiled targets
+        "targets": ["jetson-xavier-jp5", "x86_64-cpu"],  // Optional, defaults to all compiled targets
+        "output_mode": "instance" | "semantic"           // Optional, RF-DETR-Seg records only (Seg spec Req 6.4)
     }
     """
     try:
@@ -1158,6 +1324,27 @@ def package_components(event: Dict, context: Any) -> Dict:
         # conversion finalize)
         if not internal and not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
+
+        # ── RF-DETR-Seg Output_Mode override (Seg spec Req 6.4, 15.2) ──────
+        # Parsed for Seg records only, before the routing blocks. A present
+        # value is validated (400), then gated by the Seg_Switch (403 when
+        # OFF); an absent one packages the record's stored mode even when OFF
+        # (only the override is the Seg-specific action). Any other record
+        # kind refuses the field (400) rather than ignoring it silently; the
+        # imported-ONNX Seg record's refusal lives in its own branch below.
+        output_mode_override = None
+        if body.get('output_mode') is not None:
+            if not is_rfdetr_seg_record(training_job):
+                return create_response(400, {
+                    'error': 'output_mode applies to instance_segmentation records only'})
+            candidate = str(body['output_mode']).strip().lower()
+            if candidate not in OUTPUT_MODES:
+                return create_response(400, {
+                    'error': f"Invalid output_mode '{body['output_mode']}': expected one of "
+                             f"{', '.join(OUTPUT_MODES)}"})
+            if not rfdetr_seg_enabled():
+                return create_response(403, {'error': 'RF-DETR-Seg is disabled on this portal'})
+            output_mode_override = candidate
 
         # ── vLLM bypass ────────────────────────────────────────────────────
         # vLLM_Model_Records need no Neo compilation and no trained-model
@@ -1243,7 +1430,7 @@ def package_components(event: Dict, context: Any) -> Dict:
         # Conversion_Record never matches (Req 9.1).
         if dconv.is_detector_conversion_record(training_job):
             return package_detector_conversion(training_id, training_job, body, user_id,
-                                               requested_targets)
+                                               requested_targets, output_mode=output_mode_override)
 
         # ── Trained detection (ONNX) bypass ────────────────────────────────
         # Portal-trained Object Detection jobs already exported model.onnx in
@@ -1269,9 +1456,20 @@ def package_components(event: Dict, context: Any) -> Dict:
                 'jetson-xavier-jp5', 'jetson-xavier-jp6', 'jetson-xavier-jp7',
                 'x86_64-cpu']
             logger.info(f"Trained detection: packaging one ONNX artifact for targets {detection_targets}")
+            # RF-DETR-Seg (Seg spec Req 6.4): the Output_Mode is resolved ONCE
+            # (override -> record -> default), passed down and persisted as
+            # `packaged_output_mode`. YOLO / RF-DETR records pass no keyword
+            # and write no such attribute (C32).
+            is_seg = is_rfdetr_seg_record(training_job)
+            seg_mode = effective_output_mode(training_job.get('detection'),
+                                             override=output_mode_override) if is_seg else None
             try:
                 component_s3_uri = package_trained_detection_component(
-                    trained_model_s3, training_job, s3_usecase, usecase)
+                    trained_model_s3, training_job, s3_usecase, usecase,
+                    **({'output_mode': seg_mode} if is_seg else {}))
+            except DetectionPackagingError as e:
+                logger.error(f"Trained detection component packaging refused: {str(e)}")
+                return create_response(400, {'error': str(e)})
             except Exception as e:
                 logger.error(f"Trained detection component packaging failed: {str(e)}")
                 return create_response(500, {
@@ -1283,16 +1481,22 @@ def package_components(event: Dict, context: Any) -> Dict:
             ]
             table = dynamodb.Table(TRAINING_JOBS_TABLE)
             timestamp = int(datetime.utcnow().timestamp() * 1000)
+            update_expression = 'SET packaged_components = :components, updated_at = :updated'
+            update_values: Dict[str, Any] = {':components': packaged_components, ':updated': timestamp}
+            if is_seg:
+                update_expression += ', packaged_output_mode = :mode'
+                update_values[':mode'] = seg_mode
             table.update_item(
                 Key={'training_id': training_id},
-                UpdateExpression='SET packaged_components = :components, updated_at = :updated',
-                ExpressionAttributeValues={':components': packaged_components, ':updated': timestamp},
+                UpdateExpression=update_expression,
+                ExpressionAttributeValues=update_values,
             )
             log_audit_event(
                 user_id=user_id, action='package_components', resource_type='training_job',
                 resource_id=training_id, result='success',
                 details={'targets': detection_targets, 'packaged_count': len(detection_targets),
-                         'runtime': 'onnx', 'model_type': 'object_detection'},
+                         'runtime': 'onnx',
+                         'model_type': training_job.get('model_type') or 'object_detection'},
             )
             auto_triggered = body.get('auto_triggered', False)
             if auto_triggered:
@@ -1311,6 +1515,14 @@ def package_components(event: Dict, context: Any) -> Dict:
         # per requested target (the recipe differs only by LocalServer
         # dependency / platform at publish time).
         if is_onnx_import(training_job):
+            if output_mode_override is not None:
+                # An imported ONNX Seg record's manifest was fixed at import:
+                # this branch re-zips the import-time package and rebuilds no
+                # manifest, so the mode cannot change here (Seg spec Req 8.6,
+                # C34). An absent output_mode packages as today, below.
+                return create_response(400, {
+                    'error': 'output_mode cannot be changed for an imported ONNX model: its '
+                             'manifest was fixed at import; re-import with the other output_mode'})
             trained_model_s3 = training_job.get('artifact_s3')
             if not trained_model_s3:
                 return create_response(400, {'error': 'Training job has no model artifact'})

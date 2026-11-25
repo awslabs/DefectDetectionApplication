@@ -10,15 +10,18 @@
  *
  * *For any* modality, any Pre_Label payload (absent, empty, or populated),
  * and any scripted user-edit sequence (drawn boxes via pointer events, box
- * class edits, brush and eraser strokes, classification changes):
+ * class edits, brush and eraser strokes, classification changes, and — for
+ * the InstanceSegmentation modality of rfdetr-seg-support — drawn polygon
+ * instances and instance class edits):
  *
  * - the Clear_Prelabels_Control is offered exactly when the Pre_Label is
  *   non-empty (Req 9.1);
  * - activating it removes exactly the Prelabel_Origin state — prelabel
  *   boxes including re-classed ones (Req 9.2), still-intact prelabel
- *   pixels plus the remaining classless proposals (Req 9.3), and the
- *   untouched prelabel classification (Req 9.4) — while every user-created
- *   edit survives;
+ *   pixels plus the remaining classless proposals (Req 9.3), the
+ *   untouched prelabel classification (Req 9.4), and prelabel instances
+ *   including re-classed ones (rfdetr-seg-support design section 2) —
+ *   while every user-created edit survives;
  * - the Restore_Control then reinstates the exact pre-clear state,
  *   `restore(clear(s)) = s`, and re-offers the clear control (Req 9.5);
  * - the whole session issues zero API mutations (Req 9.6).
@@ -55,6 +58,7 @@ import AnnotationCanvas, {
 import type {
   DdaAnnotation,
   DdaBoundingBox,
+  DdaInstance,
   DdaMaskRegion,
 } from '../../services/api';
 
@@ -112,8 +116,16 @@ beforeEach(() => {
           }),
           putImageData: () => undefined,
           strokeRect: () => undefined,
+          fillRect: () => undefined,
           fillText: () => undefined,
           setLineDash: () => undefined,
+          // The InstanceSegmentation polygon renderer draws paths.
+          beginPath: () => undefined,
+          moveTo: () => undefined,
+          lineTo: () => undefined,
+          closePath: () => undefined,
+          fill: () => undefined,
+          stroke: () => undefined,
         } as unknown as CanvasRenderingContext2D)
       : null) as unknown as HTMLCanvasElement['getContext'];
 });
@@ -277,12 +289,86 @@ const segmentationRunArb: fc.Arbitrary<SegmentationRun> = fc.record({
   ),
 });
 
-type RunSpec = ClassificationRun | ObjectDetectionRun | SegmentationRun;
+/** Pre_Label instance spec: one rectangle rasterized into a valid RLE;
+ *  classIdx -1 makes it an unclassified sam proposal (null class). */
+interface InstanceSpec {
+  classIdx: number;
+  rect: { xf: number; yf: number; wf: number; hf: number };
+}
+
+/** One user-drawn rectangular polygon (four clicks + a closing click). */
+interface InstanceDrawSpec {
+  xf: number;
+  yf: number;
+  wf: number;
+  hf: number;
+  toolbarClassIdx: number | null;
+}
+
+/** One instance class edit through the instance row's Select (any
+ *  instance, including Prelabel_Origin ones — the re-classed-still-cleared
+ *  case of rfdetr-seg-support design section 2). */
+interface InstanceClassEditSpec {
+  targetf: number;
+  classIdx: number;
+}
+
+interface InstanceSegmentationRun {
+  modality: 'InstanceSegmentation';
+  width: number;
+  height: number;
+  presence: Presence;
+  prelabelInstances: InstanceSpec[];
+  draws: InstanceDrawSpec[];
+  classEdits: InstanceClassEditSpec[];
+}
+
+const instanceSegmentationRunArb: fc.Arbitrary<InstanceSegmentationRun> =
+  fc.record({
+    modality: fc.constant('InstanceSegmentation' as const),
+    width: sizeArb,
+    height: sizeArb,
+    presence: presenceArb,
+    prelabelInstances: fc.array(
+      fc.record({
+        classIdx: fc.integer({ min: -1, max: LABEL_SET.length - 1 }),
+        rect: fc.record({ xf: fracArb, yf: fracArb, wf: fracArb, hf: fracArb }),
+      }),
+      { minLength: 1, maxLength: 3 }
+    ),
+    draws: fc.array(
+      fc.record({
+        xf: fracArb,
+        yf: fracArb,
+        wf: fracArb,
+        hf: fracArb,
+        toolbarClassIdx: fc.option(
+          fc.integer({ min: 0, max: LABEL_SET.length - 1 }),
+          { nil: null }
+        ),
+      }),
+      { maxLength: 2 }
+    ),
+    classEdits: fc.array(
+      fc.record({
+        targetf: fracArb,
+        classIdx: fc.integer({ min: 0, max: LABEL_SET.length - 1 }),
+      }),
+      { maxLength: 2 }
+    ),
+  });
+
+type RunSpec =
+  | ClassificationRun
+  | ObjectDetectionRun
+  | SegmentationRun
+  | InstanceSegmentationRun;
 
 const runArb: fc.Arbitrary<RunSpec> = fc.oneof(
   classificationRunArb,
   objectDetectionRunArb,
-  segmentationRunArb
+  segmentationRunArb,
+  instanceSegmentationRunArb
 );
 
 /* ------------------------------------------------------------------ */
@@ -354,8 +440,35 @@ function buildPrelabelRegions(
   }));
 }
 
+/** Valid canonical RLE instances, one rectangle each (Req 2.4 shape). */
+function buildPrelabelInstances(
+  specs: InstanceSpec[],
+  width: number,
+  height: number
+): DdaInstance[] {
+  return specs.map((spec) => ({
+    class: spec.classIdx >= 0 ? LABEL_SET[spec.classIdx] : null,
+    rle: encodeRleColumnMajor(
+      rasterizeRegion({ classIdx: spec.classIdx, rects: [spec.rect] }, width, height),
+      width,
+      height,
+      1
+    ).join(' '),
+  }));
+}
+
 function buildPrelabel(run: RunSpec): DdaAnnotation | undefined {
   if (run.presence === 'absent') return undefined;
+  if (run.modality === 'InstanceSegmentation') {
+    return {
+      modality: run.modality,
+      image_size: { width: run.width, height: run.height },
+      instances:
+        run.presence === 'empty'
+          ? []
+          : buildPrelabelInstances(run.prelabelInstances, run.width, run.height),
+    };
+  }
   if (run.modality === 'Classification') {
     return run.presence === 'empty'
       ? { modality: run.modality }
@@ -508,6 +621,32 @@ function drawBox(
   fireEvent.pointerUp(canvas, { pointerId: 1, clientX: x2, clientY: y2 });
 }
 
+/**
+ * Draw one rectangular polygon instance: four corner clicks at least 3px
+ * apart (so no click lands within a vertex's hit radius or on the ring's
+ * first vertex prematurely) and a closing click on the first vertex.
+ */
+function drawInstance(
+  canvas: HTMLElement,
+  spec: InstanceDrawSpec,
+  width: number,
+  height: number
+) {
+  const x1 = Math.min(width - 4, Math.floor(spec.xf * (width - 3)));
+  const y1 = Math.min(height - 4, Math.floor(spec.yf * (height - 3)));
+  const x2 = Math.min(width, x1 + 3 + Math.floor(spec.wf * (width - x1 - 3)));
+  const y2 = Math.min(height, y1 + 3 + Math.floor(spec.hf * (height - y1 - 3)));
+  const click = (x: number, y: number) => {
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: x, clientY: y });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: x, clientY: y });
+  };
+  click(x1, y1);
+  click(x2, y1);
+  click(x2, y2);
+  click(x1, y2);
+  click(x1, y1); // close on the first vertex
+}
+
 /** Apply the run's scripted user edits. */
 function applyEdits(container: HTMLElement, run: RunSpec) {
   if (run.modality === 'Classification') {
@@ -515,6 +654,26 @@ function applyEdits(container: HTMLElement, run: RunSpec) {
     return;
   }
   const canvas = fixOverlayRect(container, run.width, run.height);
+  if (run.modality === 'InstanceSegmentation') {
+    for (const draw of run.draws) {
+      if (draw.toolbarClassIdx !== null) {
+        // Toolbar "Instance class" select (index 0) uses stringified indices.
+        pickSelectValue(container, 0, String(draw.toolbarClassIdx));
+      }
+      drawInstance(canvas, draw, run.width, run.height);
+    }
+    for (const edit of run.classEdits) {
+      // Instance-row selects follow the toolbar select in DOM order.
+      const instanceCount = annotationSelects(container).length - 1;
+      if (instanceCount <= 0) continue;
+      const target = Math.min(
+        instanceCount - 1,
+        Math.floor(edit.targetf * instanceCount)
+      );
+      pickSelectValue(container, 1 + target, LABEL_SET[edit.classIdx]);
+    }
+    return;
+  }
   if (run.modality === 'ObjectDetection') {
     for (const draw of run.draws) {
       if (draw.toolbarClassIdx !== null) {
@@ -576,6 +735,12 @@ describe('Feature: labeling-job-cleanup-work-stealing-and-podium, Property 10: C
         const expectedOffered = run.presence === 'populated';
         const labelSet =
           run.modality === 'Classification' ? CLASSIFICATION_LABELS : LABEL_SET;
+        // Segmentation / InstanceSegmentation validate() counts the
+        // classless proposals / instances and must be unchanged by a
+        // clear-restore round trip.
+        const countsProposals =
+          run.modality === 'Segmentation' ||
+          run.modality === 'InstanceSegmentation';
 
         const onSubmit = vi.fn();
         const onImageUrlRefresh = vi.fn(async () => ({
@@ -619,9 +784,11 @@ describe('Feature: labeling-job-cleanup-work-stealing-and-podium, Property 10: C
 
         // The pre-clear state s, observed through the imperative handle.
         const before = ref.current!.getAnnotation();
-        // Segmentation validate() lists exactly the classless proposals.
-        const proposalsBefore =
-          run.modality === 'Segmentation' ? ref.current!.validate().length : 0;
+        // Segmentation validate() lists exactly the classless proposals;
+        // InstanceSegmentation validate() the classless instances.
+        const proposalsBefore = countsProposals
+          ? ref.current!.validate().length
+          : 0;
 
         fireEvent.click(within(container).getByTestId('clear-prelabels'));
 
@@ -648,6 +815,21 @@ describe('Feature: labeling-job-cleanup-work-stealing-and-podium, Property 10: C
           expect(afterClear.boxes).toEqual(
             (before.boxes ?? []).slice(prelabelBoxCount)
           );
+        } else if (run.modality === 'InstanceSegmentation') {
+          // rfdetr-seg-support design section 2 — exactly the
+          // Prelabel_Origin instances are removed (the first N of the
+          // state array, even when re-classed); every user-drawn polygon
+          // survives in order, with its RLE and box unchanged.
+          const prelabelInstanceCount = prelabel!.instances!.length;
+          expect(afterClear.instances).toEqual(
+            (before.instances ?? []).slice(prelabelInstanceCount)
+          );
+          // Pre-label instances carry their RLE verbatim until cleared.
+          expect(
+            (before.instances ?? [])
+              .slice(0, prelabelInstanceCount)
+              .map((instance) => instance.rle)
+          ).toEqual(prelabel!.instances!.map((instance) => instance.rle));
         } else {
           // Req 9.3 — each pixel still holding the class the Pre_Label
           // initialized it to is cleared; pixels the labeler painted or
@@ -690,7 +872,7 @@ describe('Feature: labeling-job-cleanup-work-stealing-and-podium, Property 10: C
         ).not.toBeNull();
         const afterRestore = ref.current!.getAnnotation();
         expect(afterRestore).toEqual(before);
-        if (run.modality === 'Segmentation') {
+        if (countsProposals) {
           expect(ref.current!.validate().length).toBe(proposalsBefore);
         }
 

@@ -43,6 +43,14 @@ export interface AppConfig {
    * repository's docs/user-guide path, then branding.documentationUrl.
    */
   assistantGuideBaseUrl?: string;
+  /**
+   * Mirror of the Portal handlers' PORTAL_RFDETR_SEG_ENABLED (the
+   * `enableRfDetrSeg` CDK context value, default on; rfdetr-seg-support
+   * DD7). Absent means ON — only an explicit `false` hides the RF-DETR-Seg
+   * pickers and tiles. The server stays authoritative: a wrong value here
+   * only changes what is offered, never what the API accepts.
+   */
+  rfDetrSegEnabled?: boolean;
 }
 
 // Default configuration for development
@@ -78,6 +86,16 @@ export const loadConfig = async (): Promise<AppConfig> => {
 export const getConfig = (): AppConfig => config;
 /** True only when the deployed config says registry enforcement is on. */
 export const isRegistryEnforced = (): boolean => config.registryEnforced === true;
+
+/**
+ * The RF-DETR-Seg switch as the frontend reads it (rfdetr-seg-support DD7,
+ * Req 15.1): on unless the config carries an explicit `rfDetrSegEnabled:
+ * false` — absent / missing config = ON, the same default the backend
+ * applies to a missing PORTAL_RFDETR_SEG_ENABLED.
+ */
+export const isRfDetrSegEnabled = (
+  appConfig: Pick<AppConfig, 'rfDetrSegEnabled'> | null | undefined
+): boolean => appConfig?.rfDetrSegEnabled !== false;
 
 /**
  * Build metadata baked in at build time (see vite.config.ts `define`).

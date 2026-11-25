@@ -921,6 +921,21 @@ export interface DdaMaskRegion {
 }
 
 /**
+ * One object instance of an InstanceSegmentation annotation
+ * (rfdetr-seg-support Requirement 2.2): its mask as the canonical RLE
+ * string at source resolution and the tight box derived from it. The box
+ * is advisory on submissions — the server recomputes it from the RLE.
+ */
+export interface DdaInstance {
+  /** Label_Set class; null for an unclassified sam proposal. */
+  class: string | null;
+  /** Canonical_RLE of the instance mask (space-separated counts). */
+  rle: string;
+  /** Tight bounding box derived from `rle`, in image pixels. */
+  box?: { left: number; top: number; width: number; height: number };
+}
+
+/**
  * Modality-tagged annotation payload used for both Pre_Labels returned by
  * the labeler APIs and submissions sent to `POST /labeler/tasks/{id}/submit`
  * (dda-data-labeling Requirements 7.3–7.5, 7.7, 8.3).
@@ -928,8 +943,9 @@ export interface DdaMaskRegion {
 export interface DdaAnnotation {
   /**
    * The job's labeling modality ('Classification' | 'Segmentation' |
-   * 'ObjectDetection'). Required on submissions: the server rejects any
-   * annotation whose modality does not match the job's task type.
+   * 'ObjectDetection' | 'InstanceSegmentation'). Required on submissions:
+   * the server rejects any annotation whose modality does not match the
+   * job's task type.
    */
   modality?: string;
   /** Binary_Classification selection: 'normal' | 'anomaly'. */
@@ -939,8 +955,14 @@ export interface DdaAnnotation {
   /** Semantic_Segmentation regions (RLE-encoded, label-indexed). */
   regions?: DdaMaskRegion[];
   /**
-   * Image bounds for ObjectDetection submissions; the server validates
-   * every box against these dimensions.
+   * Instance_Segmentation instances, one RLE mask per object
+   * (rfdetr-seg-support Requirement 2.2).
+   */
+  instances?: DdaInstance[];
+  /**
+   * Image bounds for ObjectDetection and InstanceSegmentation
+   * submissions; the server validates every box / RLE against these
+   * dimensions.
    */
   image_size?: { width: number; height: number };
   /** Image pixel dimensions the regions/boxes are expressed against. */
@@ -1105,7 +1127,11 @@ export interface StartPreviewRunRequest {
    * has no detection-prompt input (grounded-sam-prompt-tuning-preview).
    */
   detection_prompt?: string;
-  task_type: 'Classification' | 'Segmentation' | 'ObjectDetection';
+  task_type:
+    | 'Classification'
+    | 'Segmentation'
+    | 'ObjectDetection'
+    | 'InstanceSegmentation';
   label_set: string[];
   /** 1..5 entries, each a bare object key or an `s3://` URI. */
   sample_images: string[];
@@ -1284,11 +1310,25 @@ export type WorkflowGenerationJobStatus =
 // rfdetr-training-and-transfer-learning). The backend's shapes live in
 // detection_training.py / training.py; these mirror them field-for-field.
 
-/** Detector family: single-tensor + NMS (yolo) or two-tensor top-k (rf_detr). */
-export type DetectionArch = 'yolo' | 'rf_detr';
+/**
+ * Detector family: single-tensor + NMS (yolo), two-tensor top-k (rf_detr),
+ * or three-tensor top-k with instance masks (rf_detr_seg; rfdetr-seg-support
+ * Req 1.5, 12.1).
+ */
+export type DetectionArch = 'yolo' | 'rf_detr' | 'rf_detr_seg';
 
 /** RF-DETR Apache-2.0 checkpoints (xlarge/2xlarge are PML-licensed, excluded). */
 export type RfDetrSize = 'nano' | 'small' | 'medium' | 'large';
+
+/** RF-DETR-Seg checkpoints: all six sizes (rfdetr-seg-support D4; backend RFDETR_SEG_SIZES). */
+export type RfDetrSegSize = 'nano' | 'small' | 'medium' | 'large' | 'xlarge' | '2xlarge';
+
+/**
+ * How a Seg model's masks are packaged for the device (rfdetr-seg-support
+ * D1): per-object instance masks or one semantic overlay. Backend
+ * OUTPUT_MODES; the default is 'instance'.
+ */
+export type OutputMode = 'instance' | 'semantic';
 
 /** Where a detection run's starting weights come from (Req 6). */
 export type BaseModelKind = 'published' | 'training_job' | 'imported';
@@ -1336,7 +1376,24 @@ export interface RfDetrHyperparameters {
   score_threshold: number;
 }
 
-export type DetectionHyperparameters = YoloHyperparameters | RfDetrHyperparameters;
+/**
+ * RF-DETR-Seg `hyperparameters` (train_rfdetr_seg.py; backend
+ * RFDETR_SEG_DEFAULTS) — the RF-DETR shape with the Seg size table and the
+ * mask binarisation threshold; no imgsz, no IoU (rfdetr-seg-support Req 1.1).
+ */
+export interface RfDetrSegHyperparameters {
+  rfdetr_seg_size: RfDetrSegSize;
+  resolution: number;
+  epochs: number;
+  batch: number;
+  grad_accum: number;
+  lr: number;
+  patience: number;
+  score_threshold: number;
+  mask_threshold: number;
+}
+
+export type DetectionHyperparameters = YoloHyperparameters | RfDetrHyperparameters | RfDetrSegHyperparameters;
 
 /**
  * `metadata.fine_tunable` on an imported record (Req 7); null when the import
@@ -1383,6 +1440,10 @@ export interface DetectionRecordFields {
   grad_accum?: number;
   lr?: number;
   top_k?: number;
+  // RF-DETR-Seg (rfdetr-seg-support Req 5.5 / 7.3 / 8.3)
+  rfdetr_seg_size?: RfDetrSegSize;
+  mask_threshold?: number;
+  output_mode?: OutputMode;
 }
 
 /**
@@ -1409,6 +1470,12 @@ export interface CheckpointAssessment {
   framework_version: string | null;
   /** RF-DETR only: the inferred size, when the probe could tell. */
   rfdetr_size?: RfDetrSize | null;
+  /** 'object_detection' for yolo / rf_detr, 'instance_segmentation' for rf_detr_seg (rfdetr-seg-support Req 7.2). */
+  model_type?: string | null;
+  /** RF-DETR-Seg only: the inferred Seg size, when the probe could tell. */
+  rfdetr_seg_size?: RfDetrSegSize | null;
+  /** RF-DETR-Seg only: the size's query count (the device's top_k). */
+  num_queries?: number | null;
   convertible: boolean;
   /** Every failed condition, in user-facing words (Requirement 2.4). */
   reasons: string[];
@@ -1523,6 +1590,8 @@ export interface TrainingJobRecord {
   metadata?: { fine_tunable?: FineTunableCheckpoint | null; [key: string]: unknown };
   /** Present only on a Conversion_Record (detector-checkpoint-import). */
   conversion?: ConversionDetails;
+  /** RF-DETR-Seg: the Output_Mode the last packaging built (rfdetr-seg-support Req 6.4). */
+  packaged_output_mode?: OutputMode;
   created_at: number;
   [key: string]: unknown;
 }
@@ -2110,11 +2179,17 @@ class ApiService {
   // Mirrors getImagePreview: presigned-URL pattern against the inference-results
   // bucket, returning parsed capture metadata (detection typing + Detections_Block)
   // and presigned URLs for the source / overlay / mask artifacts.
+  // Two request shapes on the one route (rfdetr-seg-support Requirement 11.1):
+  // the page (no `key`) is always the light form; `key` (a capture's
+  // `jsonl_key` under the same prefix) selects the per-capture detail, whose
+  // entries carry `mask_rle` when `include_masks` is set. Same envelope.
   async getCaptures(params: {
     usecase_id: string;
     prefix: string;
     device_id?: string;
     limit?: number;
+    key?: string;
+    include_masks?: boolean;
   }): Promise<{
     captures: Capture[];
     bucket: string;
@@ -2127,6 +2202,8 @@ class ApiService {
       prefix: params.prefix,
       ...(params.device_id && { device_id: params.device_id }),
       ...(params.limit && { limit: params.limit.toString() }),
+      ...(params.key && { key: params.key }),
+      ...(params.include_masks && { include_masks: '1' }),
     });
     return this.request(`/captures?${queryParams}`);
   }
@@ -3409,6 +3486,8 @@ class ApiService {
     base_model?: BaseModelRef;
     /** Optional override of the manifest's class-map order (base-model prefill). */
     class_names?: string[];
+    /** instance_segmentation only (rfdetr-seg-support Req 5.5): how the masks are packaged; default 'instance'. */
+    output_mode?: OutputMode;
   }): Promise<{ training_job_id: string; message: string }> {
     return this.request<{ training_job_id: string; message: string }>('/training', {
       method: 'POST',
@@ -3508,7 +3587,15 @@ class ApiService {
     trainingId: string,
     targets?: string[],
     autoTriggered?: boolean,
-    options?: { signal?: AbortSignal }
+    options?: {
+      signal?: AbortSignal;
+      /**
+       * RF-DETR-Seg only (rfdetr-seg-support Req 6.4): re-package with this
+       * Output_Mode instead of the record's. Sent as `output_mode` only when
+       * given, so every other caller's body is unchanged.
+       */
+      outputMode?: OutputMode;
+    }
   ): Promise<{
     training_id: string;
     packaged_components: Array<{
@@ -3520,10 +3607,15 @@ class ApiService {
     message: string;
     component_creation_triggered?: boolean;
   }> {
+    // auto_triggered chains packaging -> greengrass publish (component creation).
+    const body: { targets?: string[]; auto_triggered?: boolean; output_mode?: OutputMode } = {
+      targets,
+      auto_triggered: autoTriggered,
+    };
+    if (options?.outputMode !== undefined) body.output_mode = options.outputMode;
     return this.request(`/training/${trainingId}/package`, {
       method: 'POST',
-      // auto_triggered chains packaging -> greengrass publish (component creation).
-      body: JSON.stringify({ targets, auto_triggered: autoTriggered }),
+      body: JSON.stringify(body),
       // Client-side abort/timeout support only; the request body is unchanged.
       signal: options?.signal,
     });
@@ -4557,11 +4649,16 @@ class ApiService {
     iou_threshold?: number;
     // Object-detection decoder family: 'yolo' (single tensor + NMS) or
     // 'rf_detr' (DETR-family, two tensors, NMS-free top-k). Only used when
-    // model_type === 'object_detection'.
+    // model_type === 'object_detection'; a checkpoint conversion with
+    // model_type === 'instance_segmentation' sends 'rf_detr_seg'.
     detection_arch?: string;
     // Detection resize geometry: letterbox (true) vs squash (false). Must match
     // how the model was trained — a mismatch silently degrades detections.
     preserve_aspect?: boolean;
+    // instance_segmentation only (rfdetr-seg-support Req 7.3 / 8.4): the mask
+    // binarisation threshold and how the masks are packaged.
+    mask_threshold?: number;
+    output_mode?: OutputMode;
   }): Promise<ModelConvertResponse> {
     // A detector checkpoint with export_format 'onnx' starts a conversion and
     // answers with the record id and `conversion`; everything else answers

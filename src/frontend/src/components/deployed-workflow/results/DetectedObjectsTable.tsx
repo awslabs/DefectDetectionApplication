@@ -33,6 +33,14 @@ export const NO_OBJECTS_MESSAGE = "No objects were detected in this run.";
 /** The badge on a detection an object association found in violation. */
 export const VIOLATION_BADGE = "Violation";
 
+/** Header of the instance-mask pixel-count column (Requirement 10.6). */
+export const MASK_AREA_HEADER = "Mask area (px)";
+
+/** A mask area as an integer pixel count, or `-` for a row without one. */
+export function formatMaskArea(maskArea?: number): string {
+  return maskArea === undefined ? "-" : String(Math.round(maskArea));
+}
+
 /** One table row: a detection plus its 0-based Detection_List position. */
 interface DetectionRow extends RunDetection {
   index: number;
@@ -92,6 +100,20 @@ export default function DetectedObjectsTable({
         },
       ]
     : [];
+  // The instance mask's pixel count (rfdetr-seg-support Requirement 10.6):
+  // a column only when some row carries `maskArea`, so a detection run's
+  // table is today's.
+  const hasMaskArea = detections.some((detection) => detection.maskArea !== undefined);
+  const maskAreaColumn: TableProps.ColumnDefinition<DetectionRow>[] = hasMaskArea
+    ? [
+        {
+          id: "maskArea",
+          header: MASK_AREA_HEADER,
+          cell: (row: DetectionRow): React.ReactNode => formatMaskArea(row.maskArea),
+          sortingField: "maskArea",
+        },
+      ]
+    : [];
 
   return (
     <Table
@@ -135,6 +157,7 @@ export default function DetectedObjectsTable({
           header: "Bounding box (px)",
           cell: (row: DetectionRow): React.ReactNode => formatBox(row.box),
         },
+        ...maskAreaColumn,
         ...violationColumn,
       ]}
       empty={

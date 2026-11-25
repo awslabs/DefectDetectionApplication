@@ -50,6 +50,34 @@ LOG = logging.getLogger(__name__)
 DEFAULT_SCORE_THRESHOLD = 0.5
 DEFAULT_TOP_K = 300
 DEFAULT_NETWORK_INPUT = 560  # RF-DETR default square input (nano/small/medium)
+# rfdetr's ONNX output names (graph order: dets, labels[, masks]); the manifest's
+# detection.output_names records them so two [Q, 4] tensors can be told apart.
+ONNX_BOXES_NAME = "dets"
+ONNX_LOGITS_NAME = "labels"
+
+
+def split_same_shape_pair(arrs: List[np.ndarray], positions: List[int], output_names) -> Tuple[np.ndarray, np.ndarray, bool]:
+    """Tell boxes from logits when both rank-2 tensors are ``[Q, 4]`` -- a
+    three-class model, whose ``num_classes + 1`` logit slots equal the box
+    width (rfdetr-seg-support DD18, Req 9.2). ``arrs`` are the rank-2 tensors
+    in the runner's order, ``positions`` their indices in the runner's output
+    list (``OnnxRunner`` returns ``session.run(None, ...)`` in graph order) and
+    ``output_names`` the manifest's graph-order names. Returns ``(boxes, logits,
+    by_name)``: the ``dets`` / ``labels`` positions decide when the names
+    settle it (``by_name`` True), else the list order is taken as ``[boxes,
+    logits]`` (``by_name`` False -- the caller warns once)."""
+    four = [(pos, a) for pos, a in zip(positions, arrs) if a.shape[1] == 4]
+    by_pos = dict(four)
+    names = [str(n) for n in output_names] if output_names else []
+    box_pos = names.index(ONNX_BOXES_NAME) if ONNX_BOXES_NAME in names else -1
+    logit_pos = names.index(ONNX_LOGITS_NAME) if ONNX_LOGITS_NAME in names else -1
+    if box_pos in by_pos and logit_pos in by_pos:
+        return by_pos[box_pos], by_pos[logit_pos], True
+    if box_pos in by_pos:
+        return by_pos[box_pos], next(a for pos, a in four if pos != box_pos), True
+    if logit_pos in by_pos:
+        return next(a for pos, a in four if pos != logit_pos), by_pos[logit_pos], True
+    return four[0][1], four[1][1], False
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -88,6 +116,10 @@ class RfDetrDetectionPostProcessor(InferencePostProcessor):
         self.top_k = int(detection.get("top_k", DEFAULT_TOP_K))
         self.class_names = detection.get("class_names") or None
         self.num_classes = detection.get("num_classes")
+        # Graph-order output names from the manifest (DD18): they settle boxes
+        # vs logits when both are [Q, 4] (a three-class model).
+        self.output_names = detection.get("output_names") or None
+        self._warned_order = False
         # RF-DETR/Deformable-DETR use sigmoid scoring. Classic DETR uses softmax
         # with a trailing no-object class — enable via use_softmax.
         self.use_softmax = bool(detection.get("use_softmax", False))
@@ -162,22 +194,35 @@ class RfDetrDetectionPostProcessor(InferencePostProcessor):
         """
         if not isinstance(model_output, (list, tuple)) or len(model_output) < 2:
             return None, None
-        arrs = []
-        for o in model_output:
+        arrs, positions = [], []
+        for pos, o in enumerate(model_output):
             a = np.asarray(o)
             if a.ndim == 3 and a.shape[0] == 1:
                 a = a[0]
             if a.ndim == 2:
                 arrs.append(a)
+                positions.append(pos)
         if len(arrs) < 2:
             return None, None
 
         boxes = logits = None
-        for a in arrs:
-            if a.shape[1] == 4 and boxes is None:
-                boxes = a
-            else:
-                logits = a
+        if sum(1 for a in arrs if a.shape[1] == 4) >= 2:
+            # Three classes (num_classes + 1 == 4): both tensors are [Q, 4], so
+            # the manifest's graph-order output_names decide; without them the
+            # runner's order is taken as [boxes, logits] with one warning (DD18).
+            boxes, logits, by_name = split_same_shape_pair(arrs, positions, self.output_names)
+            if not by_name and not self._warned_order:
+                LOG.warning(
+                    "RF-DETR outputs hold two [Q, 4] tensors (a three-class model) and the manifest has no "
+                    "detection.output_names naming dets/labels; taking the runner's order as [boxes, logits]"
+                )
+                self._warned_order = True
+        else:
+            for a in arrs:
+                if a.shape[1] == 4 and boxes is None:
+                    boxes = a
+                else:
+                    logits = a
         # Disambiguate the pathological case where num_classes == 4 using the
         # configured num_classes if available.
         if (boxes is None or logits is None) and self.num_classes:

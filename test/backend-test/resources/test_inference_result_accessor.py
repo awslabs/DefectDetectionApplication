@@ -280,7 +280,8 @@ class TestInferenceResultAccessor(LocalServerBaseTestCase):
             "confidence": 0.8370160460472107,
             "inferenceCreationTime": 123456,
             "humanClassification": None,
-            "textNote": None
+            "textNote": None,
+            "detections": None
         })
 
     def test_list_input_images_path_for_retrain_prediction_filter(self):
@@ -296,7 +297,8 @@ class TestInferenceResultAccessor(LocalServerBaseTestCase):
             "confidence": 0.8370160460472107,
             "inferenceCreationTime": 12345,
             "humanClassification": "Anomaly",
-            "textNote": "this_text_note_is_exactly_50_chars_which_is_maxlen"
+            "textNote": "this_text_note_is_exactly_50_chars_which_is_maxlen",
+            "detections": None
         })
 
         query_data1 = {
@@ -311,7 +313,8 @@ class TestInferenceResultAccessor(LocalServerBaseTestCase):
             "confidence": 0.8370160460472107,
             "inferenceCreationTime": 12345,
             "humanClassification": None,
-            "textNote": None
+            "textNote": None,
+            "detections": None
         })
 
     def test_input_images_path_from_capture_id_list_happy_path(self):
@@ -323,20 +326,75 @@ class TestInferenceResultAccessor(LocalServerBaseTestCase):
             "confidence": self.test_inference_res_data0["confidence"],
             "inferenceCreationTime": self.test_inference_res_data0["inferenceCreationTime"],
             "humanClassification": None,
-            "textNote": None
+            "textNote": None,
+            "detections": None
         }, {
             "inputImageFilePath": self.test_inference_res_data1["inputImageFilePath"],
             "prediction": self.test_inference_res_data1["prediction"],
             "confidence": self.test_inference_res_data1["confidence"],
             "inferenceCreationTime": self.test_inference_res_data1["inferenceCreationTime"],
             "humanClassification": self.test_inference_res_data1["humanClassification"],
-            "textNote": self.test_inference_res_data1["textNote"]
+            "textNote": self.test_inference_res_data1["textNote"],
+            "detections": None
         }])
 
     def test_input_images_path_from_capture_id_list_non_exist(self):
         query_data = ["non-exist-id"]
         result_data = self.accessor.list_inference_result_data_from_capture_id_list(self.session, query_data)
         self.assertEqual(result_data, [])
+
+    # rfdetr-seg-support Requirement 11.4 / 17.3: the two export projections
+    # carry the stored Detection_List (list form) as the seventh key, so the
+    # instance-manifest writer has geometry to write; a row stored without one
+    # reports None (the four exact dicts above).
+    INSTANCE_DETECTIONS = [{
+        "class_index": "0",
+        "class_label": "scratch",
+        "bounding_box": [3, 2, 8, 5],
+        "confidence": 0.9,
+        "mask_rle": "27 4 8 4 8 4 8 4 125",
+        "mask_area": 16,
+    }]
+
+    def _store_instance_row(self, capture_id, input_image_file_path):
+        row = {
+            "captureId": capture_id,
+            "captureType": "Inference",
+            "workflowId": "fake-wf-id",
+            "inferenceCreationTime": 123457,
+            "prediction": "Detection",
+            "confidence": 0.9,
+            "anomalyScore": 0.9,
+            "anomalyThreshod": 1.0,
+            "inputImageFilePath": input_image_file_path,
+            "outputImageFilePath": "path",
+            "modelId": "model-seg",
+            "modelName": "fake-seg-model",
+            "flagForReview": False,
+            "downloaded": False,
+            "detections": copy.deepcopy(self.INSTANCE_DETECTIONS),
+        }
+        return self.accessor.store_inference_result(self.session, row)
+
+    def test_input_images_path_from_capture_id_list_carries_stored_detections(self):
+        p_key = self._store_instance_row("seg-capture-1", "seg-1.jpg")
+        result_data = self.accessor.list_inference_result_data_from_capture_id_list(self.session, [p_key])
+        self.assertEqual(len(result_data), 1)
+        self.assertEqual(result_data[0]["inputImageFilePath"], "seg-1.jpg")
+        self.assertEqual(result_data[0]["detections"], self.INSTANCE_DETECTIONS)
+        self.assertEqual(result_data[0]["detections"][0]["mask_rle"], self.INSTANCE_DETECTIONS[0]["mask_rle"])
+
+    def test_list_input_images_path_for_retrain_carries_stored_detections(self):
+        self._store_instance_row("seg-capture-2", "seg-2.jpg")
+        query_data = {
+            "inputImageLimit": 10
+        }
+        result_data = self.accessor.list_inference_result_data_for_retraining(self.session, "fake-wf-id", query_data)
+        by_path = {row["inputImageFilePath"]: row for row in result_data}
+        self.assertEqual(set(by_path), {"hi.jpg", "foo/bar.jpg", "seg-2.jpg"})
+        self.assertEqual(by_path["seg-2.jpg"]["detections"], self.INSTANCE_DETECTIONS)
+        self.assertIsNone(by_path["hi.jpg"]["detections"])
+        self.assertIsNone(by_path["foo/bar.jpg"]["detections"])
 
     def test_get_inference_result_summary(self):
         result_data = self.accessor.get_inference_result_summary(self.session, "fake-wf-id", 0)

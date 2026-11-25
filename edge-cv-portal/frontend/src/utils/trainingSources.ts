@@ -9,7 +9,9 @@
  * `model_type`, so the extra source values are informational to the API.
  */
 import type { SelectProps } from '@cloudscape-design/components';
-import { isDetectionModelType, OBJECT_DETECTION_MODEL_TYPE } from './manifestFormat';
+import type { AppConfig } from '../config';
+import { isRfDetrSegEnabled } from '../config';
+import { INSTANCE_SEGMENTATION_MODEL_TYPE, isDetectionModelType, OBJECT_DETECTION_MODEL_TYPE } from './manifestFormat';
 
 export const MODEL_SOURCE_MARKETPLACE = 'marketplace';
 export const MODEL_SOURCE_YOLO = 'yolo';
@@ -17,9 +19,11 @@ export const MODEL_SOURCE_RF_DETR = 'rf_detr';
 
 /**
  * Detector family a detection source trains (`detection.detection_arch` on
- * the record; selects the device stage type and preprocessing).
+ * the record; selects the device stage type and preprocessing). The RF-DETR
+ * source trains two: `rf_detr` for object_detection and `rf_detr_seg` for
+ * instance_segmentation (rfdetr-seg-support Req 12.1).
  */
-export type DetectionArch = 'yolo' | 'rf_detr';
+export type DetectionArch = 'yolo' | 'rf_detr' | 'rf_detr_seg';
 
 // There is deliberately no "Imported Model (BYOM)" source (Req 6.7): starting
 // from an imported checkpoint is expressed by the Base model control under
@@ -79,6 +83,14 @@ export const YOLO_MODEL_TYPE_OPTIONS: SelectProps.Option[] = [
   },
 ];
 
+/** The RF-DETR source's second model type (rfdetr-seg-support Req 12.2, O13 a). */
+export const RF_DETR_SEG_MODEL_TYPE_OPTION: SelectProps.Option = {
+  label: 'Instance Segmentation (masks + boxes)',
+  value: INSTANCE_SEGMENTATION_MODEL_TYPE,
+  description: 'Localizes each object with a box, a class and a per-object mask (RF-DETR-Seg). Trains on a square resize with ImageNet normalisation and is served the same way on device (no NMS).',
+  tags: ['ONNX'],
+};
+
 export const RF_DETR_MODEL_TYPE_OPTIONS: SelectProps.Option[] = [
   {
     label: 'Object Detection (bounding boxes)',
@@ -86,20 +98,39 @@ export const RF_DETR_MODEL_TYPE_OPTIONS: SelectProps.Option[] = [
     description: 'Localizes each object with a box and class. Trains on a square resize with ImageNet normalisation and is served the same way on device (no NMS).',
     tags: ['ONNX'],
   },
+  RF_DETR_SEG_MODEL_TYPE_OPTION,
 ];
 
-// One entry per model_type VALUE (YOLO and RF-DETR share `object_detection`);
-// used to look a cloned job's model_type back up.
+// One entry per model_type VALUE (YOLO and RF-DETR share `object_detection`;
+// `instance_segmentation` is RF-DETR's alone); used to look a cloned job's
+// model_type back up.
 export const ALL_MODEL_TYPE_OPTIONS: SelectProps.Option[] = [
   ...LFV_MODEL_TYPE_OPTIONS,
   ...YOLO_MODEL_TYPE_OPTIONS,
+  RF_DETR_SEG_MODEL_TYPE_OPTION,
 ];
 
-/** Model types a given model source can train. */
+/** Model types a given model source can train (the constants, by identity). */
 export function modelTypeOptionsForSource(source: unknown): SelectProps.Option[] {
   if (source === MODEL_SOURCE_YOLO) return YOLO_MODEL_TYPE_OPTIONS;
   if (source === MODEL_SOURCE_RF_DETR) return RF_DETR_MODEL_TYPE_OPTIONS;
   return LFV_MODEL_TYPE_OPTIONS;
+}
+
+/**
+ * The model types the page offers for a source: `modelTypeOptionsForSource`
+ * minus the Instance Segmentation entry while the RF-DETR-Seg switch is off
+ * (rfdetr-seg-support Req 15.2; `config.json` `rfDetrSegEnabled: false`).
+ * The server stays authoritative — this only hides the picker entry.
+ */
+export function visibleModelTypeOptionsForSource(
+  source: unknown,
+  config: Pick<AppConfig, 'rfDetrSegEnabled'> | null | undefined
+): SelectProps.Option[] {
+  const options = modelTypeOptionsForSource(source);
+  const hasSegEntry = options.some(o => o.value === INSTANCE_SEGMENTATION_MODEL_TYPE);
+  if (isRfDetrSegEnabled(config) || !hasSegEntry) return options;
+  return options.filter(o => o.value !== INSTANCE_SEGMENTATION_MODEL_TYPE);
 }
 
 /** The detector family a model source trains; null for non-detection sources. */
@@ -109,9 +140,22 @@ export function detectionArchForSource(source: unknown): DetectionArch | null {
   return null;
 }
 
+/**
+ * The detector family a (source, model type) pair trains — the request's
+ * `detection_arch`: the RF-DETR source trains `rf_detr_seg` for
+ * `instance_segmentation` and `rf_detr` otherwise; YOLO trains `yolo`; null
+ * for a non-detection source (rfdetr-seg-support Req 12.2).
+ */
+export function detectionArchFor(source: unknown, modelType: unknown): DetectionArch | null {
+  if (source === MODEL_SOURCE_RF_DETR) {
+    return modelType === INSTANCE_SEGMENTATION_MODEL_TYPE ? 'rf_detr_seg' : 'rf_detr';
+  }
+  return detectionArchForSource(source);
+}
+
 /** The model source that trains a given detector family. */
 export function modelSourceForDetectionArch(arch: unknown): string {
-  return arch === 'rf_detr' ? MODEL_SOURCE_RF_DETR : MODEL_SOURCE_YOLO;
+  return arch === 'rf_detr' || arch === 'rf_detr_seg' ? MODEL_SOURCE_RF_DETR : MODEL_SOURCE_YOLO;
 }
 
 /**
@@ -125,8 +169,21 @@ export function modelSourceForType(modelType: unknown, detectionArch?: unknown):
     : MODEL_SOURCE_MARKETPLACE;
 }
 
-/** The model source that can train from a labeling job's task type. */
+/** The labeling modality whose manifest only RF-DETR-Seg trains from (case-insensitive compare). */
+const INSTANCE_SEGMENTATION_TASK_TYPE = 'instancesegmentation';
+
+/** Is this labeling job task type the InstanceSegmentation modality? */
+export function isInstanceSegmentationTaskType(taskType: unknown): boolean {
+  return String(taskType ?? '').toLowerCase() === INSTANCE_SEGMENTATION_TASK_TYPE;
+}
+
+/**
+ * The model source that can train from a labeling job's task type. An
+ * InstanceSegmentation job trains under the RF-DETR source (with the
+ * `instance_segmentation` model type, which the page applies on top).
+ */
 export function modelSourceForLabelingTask(taskType: unknown): string {
+  if (isInstanceSegmentationTaskType(taskType)) return MODEL_SOURCE_RF_DETR;
   return String(taskType ?? '').toLowerCase().includes('detection')
     ? MODEL_SOURCE_YOLO
     : MODEL_SOURCE_MARKETPLACE;

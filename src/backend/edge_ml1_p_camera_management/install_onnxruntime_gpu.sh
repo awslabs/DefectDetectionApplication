@@ -29,10 +29,29 @@
 # This is a LONG build (~1-2 h, RAM-hungry). It is gated in the Dockerfiles by
 # the ONNXRUNTIME_GPU build-arg so routine/CPU builds stay fast.
 #
+# WHAT IS INSTALLED, in this order (onnxruntime-wheels.manifest beside this
+# script is the single source of versions, release commits and wheel digests):
+#   1. A STAGED WHEEL: when the manifest's wheel for this JetPack line is staged
+#      beside this script in onnxruntime-wheels/ (build-custom.sh fills that
+#      directory from the account's component bucket) and its sha256 equals the
+#      manifest value, it is installed and the clone + compile are skipped. A
+#      staged wheel whose name or digest differs stops the build (nothing
+#      unlisted is ever installed).
+#   2. A SOURCE BUILD otherwise: the onnxruntime repository is cloned and the
+#      manifest's upstream release commit for this JetPack line is checked out
+#      (a commit id, not a tag, so the checkout does not depend on which tags
+#      the clone source carries); the build stops unless the tree's
+#      VERSION_NUMBER equals the manifest's version. Then the compile below.
+#
 # Required env:
 #   JETPACK_MAJOR        5 | 6 | 7   (selects ORT version + CUDA arch defaults)
 # Optional env (override the per-JetPack defaults):
-#   ONNXRUNTIME_VERSION  git tag of onnxruntime to build (e.g. v1.16.3)
+#   ONNXRUNTIME_VERSION  ORT version to build (e.g. v1.16.3; the manifest's
+#                        version for the JetPack line by default). A value other
+#                        than the manifest's needs ONNXRUNTIME_COMMIT too, and
+#                        then no staged wheel applies.
+#   ONNXRUNTIME_COMMIT   40-hex commit to check out (the manifest's by default)
+#   ORT_SOURCE_REPO_URL  repository to clone (see onnxruntime_wheel_manifest.sh)
 #   CUDA_ARCHITECTURES   semicolon list (e.g. "72;87")
 #   CUDA_HOME            CUDA toolkit root (default /usr/local/cuda)
 #   ORT_BUILD_JOBS       parallel build jobs (default: nproc, capped)
@@ -40,6 +59,8 @@
 set -e
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+# shellcheck source=onnxruntime_wheel_manifest.sh
+. "${SCRIPT_DIR}/onnxruntime_wheel_manifest.sh"
 
 # Build against the interpreter selected by PYBIN. The build step below runs
 # ORT's build driver under ${PYBIN} directly, so the produced wheel is tagged
@@ -60,17 +81,16 @@ CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 #  JP7 (L4T r38.x): CUDA 13.0, TensorRT 10.13, cuDNN 9.x -> onnxruntime 1.23
 #                   line (the first line with CUDA 13 build support; v1.23.2
 #                   is its latest patch tag). Thor (sm_110).
+#  The versions (and the release commits the source build checks out) are the
+#  manifest's rows; the CUDA architectures and extra flags stay here.
 case "$JETPACK_MAJOR" in
     5)
-        ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.16.3}"
         CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-72;87}"
         ;;
     6)
-        ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.20.1}"
         CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-87}"
         ;;
     7)
-        ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.23.2}"
         CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-110}"
         # CUDA 13 deprecates longlong4 (use longlong4_16a/_32a); ORT
         # v1.23.2's bert attention kernels still reference it and the CI
@@ -84,16 +104,121 @@ case "$JETPACK_MAJOR" in
         exit 1
         ;;
 esac
+MANIFEST_VERSION="$(ort_manifest_version "${JETPACK_MAJOR}")" || {
+    echo "ERROR: ${ORT_MANIFEST_FILE} has no row for JetPack ${JETPACK_MAJOR}." >&2
+    exit 1
+}
+ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v${MANIFEST_VERSION}}"
+ONNXRUNTIME_VERSION="v${ONNXRUNTIME_VERSION#v}"
+if [ "${ONNXRUNTIME_VERSION#v}" = "${MANIFEST_VERSION}" ]; then
+    ONNXRUNTIME_COMMIT="${ONNXRUNTIME_COMMIT:-$(ort_manifest_commit "${JETPACK_MAJOR}")}"
+elif [ -z "${ONNXRUNTIME_COMMIT:-}" ]; then
+    echo "ERROR: ONNXRUNTIME_VERSION=${ONNXRUNTIME_VERSION} is not the manifest's version for JetPack ${JETPACK_MAJOR} (${MANIFEST_VERSION});" >&2
+    echo "       set ONNXRUNTIME_COMMIT to the 40-hex release commit of that version as well." >&2
+    exit 1
+fi
+
 
 # Cap parallelism: the ORT/CUDA compile is memory-heavy and OOMs with too many
 # jobs on Jetson-class RAM.
 NPROC=$(nproc)
 ORT_BUILD_JOBS="${ORT_BUILD_JOBS:-$(( NPROC > 6 ? 6 : NPROC ))}"
 
+# install_wheel_and_verify WHEEL: the install tail both paths share — keep a
+# copy of the wheel in the image, install it into ${PYBIN}, prove the CUDA and
+# TensorRT execution providers are present.
+install_wheel_and_verify() {
+    local whl="$1"
+    echo "Installing ${whl}"
+    # Stage a copy of the wheel outside the (soon-deleted) build tree so a
+    # successful long build is preserved in the image for inspection/reuse.
+    mkdir -p /opt/onnxruntime-wheels
+    cp "${whl}" /opt/onnxruntime-wheels/ || true
+    # Remove any CPU onnxruntime first so the GPU build is authoritative (the two
+    # packages must not coexist).
+    ${PYBIN} -m pip uninstall -y onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
+    ${PYBIN} -m pip install --no-cache-dir "${whl}"
+
+    # ── Verify the CUDA/TensorRT providers are present ─────────────────────
+    # Run from a neutral directory: the onnxruntime source tree contains an
+    # `onnxruntime/` package dir that would shadow the *installed* package (whose
+    # compiled onnxruntime.capi lives in site-packages), causing a spurious
+    # "No module named 'onnxruntime.capi'". cd / avoids the shadow.
+    cd /
+    ${PYBIN} - <<'PYEOF'
+import onnxruntime as ort
+provs = ort.get_available_providers()
+print("onnxruntime", ort.__version__, "providers:", provs)
+need = {"CUDAExecutionProvider", "TensorrtExecutionProvider"}
+missing = need - set(provs)
+if missing:
+    raise SystemExit(f"ERROR: GPU providers missing from build: {missing}")
+print("GPU execution providers present.")
+PYEOF
+}
+
+# install_build_dependencies: the apt and pip tooling this step has always
+# left in the image. Both paths run it, so an image built from a staged wheel
+# carries the same tools as one built from source: later Dockerfile layers
+# depend on them (the JP7 vLLM source build needs git), and the device image's
+# package set does not change with the path taken here.
+install_build_dependencies() {
+    # Derive the dev-headers package from the actual container interpreter
+    # (e.g. python3.11 -> libpython3.11-dev) rather than hardcoding a version. The
+    # Dockerfile already installs python${PYTHON_VERSION}-dev; this is a safety net.
+    PY_MM=$(${PYBIN} -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "")
+    echo "Installing build dependencies (python ${PY_MM})..."
+    apt-get update -y
+    apt-get install -y --no-install-recommends \
+        git build-essential cmake wget ca-certificates || {
+        echo "Failed to install build dependencies" >&2
+        exit 1
+    }
+    if [ -n "${PY_MM}" ]; then
+        apt-get install -y --no-install-recommends "libpython${PY_MM}-dev" || \
+            echo "WARNING: libpython${PY_MM}-dev not available via apt; relying on Dockerfile-provided dev headers"
+    fi
+    # onnxruntime's build driver needs CMake, but NOT CMake 4.x: ORT 1.16/1.17
+    # vendor third-party projects (e.g. google_nsync) that declare
+    # cmake_minimum_required < 3.5, and CMake 4 removed that compatibility, failing
+    # configure with "Compatibility with CMake < 3.5 has been removed". Pin to the
+    # 3.x line. (We also pass -DCMAKE_POLICY_VERSION_MINIMUM=3.5 below as a belt-
+    # and-suspenders for any sub-project that still trips the deprecation.)
+    ${PYBIN} -m pip install --no-cache-dir "cmake>=3.26,<4" packaging wheel
+}
+
+# ── 1. Staged wheel (preferred over the source build) ──────────────────────
+# build-custom.sh stages the manifest's wheel for this JetPack line in
+# ${SCRIPT_DIR}/onnxruntime-wheels/ when the account's component bucket holds
+# it. It is used only when this run builds the manifest's version and the
+# wheel's sha256 equals the manifest value; a digest or name mismatch stops
+# the build. No staged wheel: the source build below runs.
+STAGED_DIR="${SCRIPT_DIR}/${ORT_STAGED_WHEEL_DIRNAME}"
+STAGED_WHL=""
+if [ "${ONNXRUNTIME_VERSION#v}" = "${MANIFEST_VERSION}" ]; then
+    STAGED_WHL="$(ort_manifest_staged_wheel "${STAGED_DIR}" "${JETPACK_MAJOR}")" || STAGED_WHL=""
+fi
+if [ -n "${STAGED_WHL}" ]; then
+    ort_manifest_verify "${STAGED_WHL}" "${JETPACK_MAJOR}" || exit 1
+    echo "=========================================================="
+    echo " Installing the staged onnxruntime-gpu wheel (no source build)"
+    echo "   JetPack major     : ${JETPACK_MAJOR}"
+    echo "   wheel             : $(basename -- "${STAGED_WHL}")"
+    echo "   sha256            : verified against onnxruntime-wheels.manifest"
+    echo "   python            : $(${PYBIN} --version 2>&1)"
+    echo "=========================================================="
+    install_build_dependencies
+    install_wheel_and_verify "${STAGED_WHL}"
+    echo "onnxruntime-gpu installation completed successfully (staged wheel)"
+    exit 0
+fi
+
+# ── 2. Source build ────────────────────────────────────────────────────────
 echo "=========================================================="
 echo " Building onnxruntime-gpu from source"
 echo "   JetPack major     : ${JETPACK_MAJOR}"
-echo "   onnxruntime tag   : ${ONNXRUNTIME_VERSION}"
+echo "   onnxruntime       : ${ONNXRUNTIME_VERSION} at commit ${ONNXRUNTIME_COMMIT}"
+echo "   source            : ${ORT_SOURCE_REPO_URL}"
 echo "   CUDA home         : ${CUDA_HOME}"
 echo "   CUDA architectures: ${CUDA_ARCHITECTURES}"
 echo "   python            : $(${PYBIN} --version 2>&1)"
@@ -122,22 +247,8 @@ if ! ls /usr/include/aarch64-linux-gnu/NvInfer.h >/dev/null 2>&1 \
     exit 1
 fi
 
-# ── Build dependencies ─────────────────────────────────────────────────────
-# Derive the dev-headers package from the actual container interpreter
-# (e.g. python3.11 -> libpython3.11-dev) rather than hardcoding a version. The
-# Dockerfile already installs python${PYTHON_VERSION}-dev; this is a safety net.
-PY_MM=$(${PYBIN} -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "")
-echo "Installing build dependencies (python ${PY_MM})..."
-apt-get update -y
-apt-get install -y --no-install-recommends \
-    git build-essential cmake wget ca-certificates || {
-    echo "Failed to install build dependencies" >&2
-    exit 1
-}
-if [ -n "${PY_MM}" ]; then
-    apt-get install -y --no-install-recommends "libpython${PY_MM}-dev" || \
-        echo "WARNING: libpython${PY_MM}-dev not available via apt; relying on Dockerfile-provided dev headers"
-fi
+# ── Build dependencies (the same set the staged path installs) ─────────────
+install_build_dependencies
 
 # ── CUDA host-compiler selection ───────────────────────────────────────────
 # CUDA 11.4's nvcc (JetPack 5) does NOT support GCC 11 as the host compiler:
@@ -158,22 +269,17 @@ if [ "${JETPACK_MAJOR}" = "5" ]; then
     CUDA_HOST_COMPILER_DEFINE="CMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-10"
 fi
 
-# onnxruntime's build driver needs CMake, but NOT CMake 4.x: ORT 1.16/1.17
-# vendor third-party projects (e.g. google_nsync) that declare
-# cmake_minimum_required < 3.5, and CMake 4 removed that compatibility, failing
-# configure with "Compatibility with CMake < 3.5 has been removed". Pin to the
-# 3.x line. (We also pass -DCMAKE_POLICY_VERSION_MINIMUM=3.5 below as a belt-
-# and-suspenders for any sub-project that still trips the deprecation.)
-${PYBIN} -m pip install --no-cache-dir "cmake>=3.26,<4" packaging wheel
-
 WORK_DIR="${WORK_DIR:-/tmp/ort-build}"
 rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}"
 cd "${WORK_DIR}"
 
-echo "Cloning onnxruntime ${ONNXRUNTIME_VERSION}..."
-git clone --recursive --depth 1 --branch "${ONNXRUNTIME_VERSION}" \
-    https://github.com/microsoft/onnxruntime.git
+# Fetch exactly the pinned release commit (no tag or branch name is resolved
+# on the remote, so the clone source only has to carry the commit), check it
+# out detached, then the submodules as before; ort_fetch_pinned_source stops
+# the build unless the tree's VERSION_NUMBER is the version this run builds.
+echo "Cloning onnxruntime ${ONNXRUNTIME_VERSION} (commit ${ONNXRUNTIME_COMMIT}) from ${ORT_SOURCE_REPO_URL}..."
+ort_fetch_pinned_source onnxruntime "${ORT_SOURCE_REPO_URL}" "${ONNXRUNTIME_COMMIT}" "${ONNXRUNTIME_VERSION#v}" || exit 1
 cd onnxruntime
 
 # ── Fix eigen FetchContent SHA1 drift ──────────────────────────────────────
@@ -239,32 +345,7 @@ if [ -z "${WHL}" ]; then
     ls -R build/Linux/Release/dist/ 2>/dev/null || true
     exit 1
 fi
-echo "Installing ${WHL}"
-# Stage a copy of the built wheel outside the (soon-deleted) build tree so a
-# successful long build is preserved in the image for inspection/reuse.
-mkdir -p /opt/onnxruntime-wheels
-cp "${WHL}" /opt/onnxruntime-wheels/ || true
-# Remove any CPU onnxruntime first so the GPU build is authoritative (the two
-# packages must not coexist).
-${PYBIN} -m pip uninstall -y onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
-${PYBIN} -m pip install --no-cache-dir "${WHL}"
-
-# ── Verify the CUDA/TensorRT providers are present ─────────────────────────
-# Run from a neutral directory: the onnxruntime source tree contains an
-# `onnxruntime/` package dir that would shadow the *installed* package (whose
-# compiled onnxruntime.capi lives in site-packages), causing a spurious
-# "No module named 'onnxruntime.capi'". cd / avoids the shadow.
-cd /
-${PYBIN} - <<'PYEOF'
-import onnxruntime as ort
-provs = ort.get_available_providers()
-print("onnxruntime", ort.__version__, "providers:", provs)
-need = {"CUDAExecutionProvider", "TensorrtExecutionProvider"}
-missing = need - set(provs)
-if missing:
-    raise SystemExit(f"ERROR: GPU providers missing from build: {missing}")
-print("GPU execution providers present.")
-PYEOF
+install_wheel_and_verify "${WHL}"
 
 # Clean up the (large) build tree to keep the image small.
 cd /

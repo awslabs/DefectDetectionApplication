@@ -13,6 +13,18 @@
  *   adjustable brush size; regions are held as a label-indexed bitmap and
  *   RLE-encoded (COCO-style column-major counts, convertible to the
  *   backend's space-separated counts string) for submission (req 7.4).
+ * - InstanceSegmentation (rfdetr-seg-support Requirements 2.2, 2.3; DD9):
+ *   a polygon tool — click to place vertices, click the first vertex or
+ *   double-click to close (refused below three distinct vertices), drag a
+ *   vertex to edit, select / reclass / delete / undo per instance. Each
+ *   instance is drawn with its class fill at 40 % alpha and an outline
+ *   from a second, instance-indexed palette so touching instances of one
+ *   class stay distinguishable; instances may overlap. The polygon is
+ *   client state only: on save it is rasterised by an even-odd scanline
+ *   fill and RLE-encoded, with a client-side tight box sent as advisory
+ *   (the server recomputes it). Pre-label instances arrive as RLE without
+ *   vertices: they render from the decoded mask and can be reclassed or
+ *   deleted, not reshaped. The brush/eraser stay Segmentation-only.
  *
  * Pre_Labels initialize the editable annotation state and can be approved
  * as-is or corrected (req 8.3). Classless SAM proposals render as neutral
@@ -56,14 +68,28 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import type {
   DdaAnnotation,
   DdaBoundingBox,
+  DdaInstance,
   DdaMaskRegion,
 } from '../../services/api';
+import {
+  decodeRleColumnMajor,
+  encodeRleColumnMajor,
+  parseRleCounts,
+} from '../../utils/rle';
+
+/**
+ * The Canonical_RLE codec lives in `utils/rle.ts` (rfdetr-seg-support
+ * DD20) and is re-exported here so existing callers and tests of the
+ * canvas module are unchanged.
+ */
+export { decodeRleColumnMajor, encodeRleColumnMajor, parseRleCounts };
 
 /** Task-type identifiers used by DDA labeling jobs. */
 export type LabelingModality =
   | 'Classification'
   | 'Segmentation'
-  | 'ObjectDetection';
+  | 'ObjectDetection'
+  | 'InstanceSegmentation';
 
 /**
  * Fixed class palette (mirrors the job-wide mask palette used by the
@@ -88,95 +114,122 @@ const OVERLAY_ALPHA = 140;
 const EXPIRY_REFRESH_MARGIN_MS = 30_000;
 const MAX_CONSECUTIVE_LOAD_FAILURES = 3;
 
+/**
+ * Instance_Segmentation fill alpha: 40 % (Requirement 2.3), applied both
+ * to the rasterised pre-label masks and to the polygon fills.
+ */
+const INSTANCE_FILL_ALPHA = 102;
+/**
+ * Second palette for instance outlines, indexed by instance position, so
+ * two touching instances of one class remain distinguishable on screen
+ * (Requirement 2.3). Deliberately disjoint from CLASS_PALETTE.
+ */
+export const INSTANCE_OUTLINE_PALETTE = [
+  '#FFFFFF',
+  '#000000',
+  '#FFFF00',
+  '#00FFFF',
+  '#FF00FF',
+  '#FFA500',
+  '#7FFF00',
+  '#FF4500',
+  '#1E1E8F',
+  '#A0522D',
+] as const;
+/** Minimum distinct vertices before a polygon can be closed (Req 2.2). */
+export const POLYGON_MIN_VERTICES = 3;
+const POLYGON_TOO_FEW_VERTICES_HINT =
+  'A polygon needs at least three distinct vertices before it can be closed.';
+const POLYGON_DRAW_HINT =
+  'Click on the image to place vertices; click the first vertex or double-click to close the polygon.';
+const PRELABEL_INSTANCE_HINT =
+  'Pre-labelled instances are shown from their masks and keep their outline; assign or change their class, or delete them.';
+
 /* ------------------------------------------------------------------ */
-/* RLE helpers (COCO-style column-major counts)                        */
+/* Polygon helpers (Instance_Segmentation)                             */
 /* ------------------------------------------------------------------ */
 
+export type PolygonVertex = [number, number];
+
 /**
- * Encode the pixels of `bitmap` equal to `value` as COCO-style RLE counts:
- * pixels are visited in column-major order (down each column, left to
- * right) and counts alternate starting with the count of zeros. Joining
- * the returned counts with spaces yields the backend's canonical
- * space-separated counts string.
+ * Number of distinct vertices after rounding to integer pixels — the
+ * "fewer than three distinct vertices" rule of Requirement 2.2 counts a
+ * repeated click on one spot once.
  */
-export function encodeRleColumnMajor(
-  bitmap: Uint8Array,
-  width: number,
-  height: number,
-  value: number
-): number[] {
-  const counts: number[] = [];
-  let current = 0;
-  let run = 0;
-  for (let x = 0; x < width; x++) {
-    const columnBase = x;
-    for (let y = 0; y < height; y++) {
-      const v = bitmap[y * width + columnBase] === value ? 1 : 0;
-      if (v === current) {
-        run++;
-      } else {
-        counts.push(run);
-        current = v;
-        run = 1;
-      }
-    }
+export function distinctVertexCount(vertices: PolygonVertex[]): number {
+  const seen = new Set<string>();
+  for (const [x, y] of vertices) {
+    seen.add(`${Math.round(x)},${Math.round(y)}`);
   }
-  counts.push(run);
-  return counts;
+  return seen.size;
 }
 
 /**
- * Parse an RLE value from the API into numeric counts. The backend's
- * canonical form is the space-separated counts string ("4 1 4"); a
- * numeric array is tolerated for robustness. Iterating the string
- * directly must never happen — that walks characters, not counts.
+ * Rasterise a closed polygon (image pixel coordinates) into a row-major
+ * binary mask with an even-odd scanline fill (DD9): a pixel is inside when
+ * its centre crosses an odd number of edges along its row. Self-touching
+ * rings therefore leave holes rather than double-filling, and vertices on
+ * or beyond the image edge are clipped to it.
  */
-export function parseRleCounts(rle: string | number[]): number[] {
-  if (Array.isArray(rle)) {
-    return rle;
-  }
-  return rle
-    .split(/\s+/)
-    .filter((token) => token.length > 0)
-    .map(Number);
-}
-
-/**
- * Decode COCO-style column-major RLE counts into a binary mask stored in
- * row-major order (1 where the region is present). Inverse of
- * {@link encodeRleColumnMajor}. Accepts either a counts array or the
- * backend's canonical space-separated counts string (the shape
- * `DdaMaskRegion.rle` actually carries at runtime).
- */
-export function decodeRleColumnMajor(
-  rle: number[] | string,
+export function rasterizePolygonEvenOdd(
+  vertices: PolygonVertex[],
   width: number,
   height: number
 ): Uint8Array {
-  const counts =
-    typeof rle === 'string'
-      ? rle
-          .split(/\s+/)
-          .filter((token) => token.length > 0)
-          .map(Number)
-      : rle;
   const mask = new Uint8Array(width * height);
-  let value = 0;
-  let index = 0; // column-major pixel index
-  const total = width * height;
-  for (const count of counts) {
-    if (value === 1) {
-      for (let k = 0; k < count && index + k < total; k++) {
-        const p = index + k;
-        const x = Math.floor(p / height);
-        const y = p % height;
+  const n = vertices.length;
+  if (n < POLYGON_MIN_VERTICES) return mask;
+  for (let y = 0; y < height; y++) {
+    const cy = y + 0.5;
+    const crossings: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = vertices[i];
+      const [x1, y1] = vertices[(i + 1) % n];
+      if ((y0 <= cy && y1 > cy) || (y1 <= cy && y0 > cy)) {
+        crossings.push(x0 + ((cy - y0) * (x1 - x0)) / (y1 - y0));
+      }
+    }
+    if (crossings.length < 2) continue;
+    crossings.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < crossings.length; k += 2) {
+      // Pixel x is inside when its centre x + 0.5 lies in [start, end).
+      const start = Math.max(0, Math.ceil(crossings[k] - 0.5));
+      const end = Math.min(width - 1, Math.ceil(crossings[k + 1] - 0.5) - 1);
+      for (let x = start; x <= end; x++) {
         mask[y * width + x] = 1;
       }
     }
-    index += count;
-    value = 1 - value;
   }
   return mask;
+}
+
+/**
+ * The tight bounding box of a row-major binary mask, or null when the mask
+ * has no foreground pixel. Sent with each instance as advisory — the
+ * server derives the authoritative box from the RLE (Requirement 2.2).
+ */
+export function tightBoxFromMask(
+  mask: Uint8Array,
+  width: number,
+  height: number
+): { left: number; top: number; width: number; height: number } | null {
+  let left = width;
+  let top = height;
+  let right = -1;
+  let bottom = -1;
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      if (mask[row + x]) {
+        if (x < left) left = x;
+        if (x > right) right = x;
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+      }
+    }
+  }
+  if (right < 0) return null;
+  return { left, top, width: right - left + 1, height: bottom - top + 1 };
 }
 
 /**
@@ -219,6 +272,25 @@ interface SegProposal {
 }
 
 /**
+ * One Instance_Segmentation instance in canvas state (rfdetr-seg-support
+ * Requirement 2.3, DD9). A user-drawn instance carries its polygon
+ * `vertices` (rasterised to RLE only on save); a pre-label instance
+ * carries `rle` and no vertices, so it renders from `mask` and can be
+ * reclassed or deleted but not reshaped. `origin` is what the
+ * Clear_Prelabels_Control removes by (`'prelabel'`), unchanged by a reclass.
+ */
+export interface EditableInstance {
+  id: string;
+  class: string | null;
+  vertices: PolygonVertex[];
+  rle?: string;
+  box?: { left: number; top: number; width: number; height: number };
+  origin: 'prelabel' | 'user';
+  /** Decoded `rle` of a pre-label instance (row-major), for display. */
+  mask?: Uint8Array;
+}
+
+/**
  * Prelabel_Snapshot — the full annotation state captured at the moment the
  * Clear_Prelabels_Control is activated, backing the one-level restore
  * (labeling-job-cleanup-work-stealing-and-podium req 9.5).
@@ -229,6 +301,7 @@ interface PrelabelSnapshot {
   /** Deep copy of the label-indexed segmentation bitmap, when one exists. */
   bitmap: Uint8Array | null;
   proposals: SegProposal[];
+  instances: EditableInstance[];
 }
 
 export interface AnnotationCanvasHandle {
@@ -327,6 +400,29 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     const [segVersion, setSegVersion] = useState(0);
     const [proposals, setProposals] = useState<SegProposal[]>([]);
     const segInitializedRef = useRef(false);
+
+    /* ---------------- instance (polygon) state (rfdetr-seg Req 2.3) --- */
+    const [instances, setInstances] = useState<EditableInstance[]>([]);
+    const instancesInitializedRef = useRef(false);
+    /** Vertices of the polygon being drawn, in click order. */
+    const [draftVertices, setDraftVertices] = useState<PolygonVertex[]>([]);
+    const [selectedInstanceId, setSelectedInstanceId] = useState<
+      string | null
+    >(null);
+    const [polygonHint, setPolygonHint] = useState<string | null>(null);
+    // Undo stack over committed instance edits (add, reclass, delete,
+    // vertex drag): the state before each edit, newest last.
+    const instanceHistoryRef = useRef<EditableInstance[][]>([]);
+    const [instanceHistoryDepth, setInstanceHistoryDepth] = useState(0);
+    // The vertex being dragged: its instance, index, and the instances
+    // array as it was before the drag started (pushed to history on drop).
+    const vertexDragRef = useRef<{
+      instanceId: string;
+      vertexIndex: number;
+      before: EditableInstance[];
+      moved: boolean;
+    } | null>(null);
+    const instanceCounterRef = useRef(0);
 
     /* ---------------- clear pre-labels state (req 9.1–9.5) --------- */
     // Copy of the label bitmap taken right after the Segmentation
@@ -427,6 +523,33 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           setProposals(classless);
           setSegVersion((v) => v + 1);
         }
+
+        // Pre-label instances need the image dimensions to decode their
+        // RLE, so they are initialized here, once, like Segmentation
+        // (rfdetr-seg-support Req 2.4: one region -> one instance, class
+        // carried and null kept).
+        if (
+          taskType === 'InstanceSegmentation' &&
+          !instancesInitializedRef.current
+        ) {
+          instancesInitializedRef.current = true;
+          const fromPrelabel: EditableInstance[] = [];
+          (prelabel?.instances ?? []).forEach((instance: DdaInstance, i) => {
+            if (!instance.rle) return;
+            const mask = decodeRleColumnMajor(
+              parseRleCounts(instance.rle), width, height);
+            fromPrelabel.push({
+              id: `prelabel-instance-${i}`,
+              class: instance.class ?? null,
+              vertices: [],
+              rle: instance.rle,
+              box: instance.box ?? tightBoxFromMask(mask, width, height) ?? undefined,
+              origin: 'prelabel',
+              mask,
+            });
+          });
+          setInstances(fromPrelabel);
+        }
       },
       [taskType, prelabel, labelSet]
     );
@@ -496,6 +619,145 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       [segTool, selectedClassIndex, brushSize, stampCircle]
     );
 
+    /* ---------------- instance (polygon) editing (Req 2.2, 2.3) ----- */
+    /**
+     * Vertex hit radius in image pixels (1 % of the longer image side,
+     * at least 2): large enough to grab on a scaled display, small enough
+     * not to swallow neighbouring vertices.
+     */
+    const vertexHitRadius = imageSize
+      ? Math.max(2, Math.round(Math.max(imageSize.width, imageSize.height) / 100))
+      : 2;
+
+    /**
+     * A user polygon with its display box re-derived from the rasterised
+     * ring (the same derivation the save path applies; the server
+     * recomputes it from the RLE regardless, Req 2.2).
+     */
+    const withDerivedBox = useCallback(
+      (instance: EditableInstance): EditableInstance => {
+        if (instance.vertices.length === 0 || !imageSize) return instance;
+        const box = tightBoxFromMask(
+          rasterizePolygonEvenOdd(
+            instance.vertices, imageSize.width, imageSize.height),
+          imageSize.width,
+          imageSize.height
+        );
+        return { ...instance, box: box ?? undefined };
+      },
+      [imageSize]
+    );
+
+    /** Replace the instance list, recording the previous state for undo. */
+    const commitInstances = useCallback(
+      (next: EditableInstance[], previous: EditableInstance[]) => {
+        instanceHistoryRef.current.push(previous);
+        setInstanceHistoryDepth(instanceHistoryRef.current.length);
+        setInstances(next);
+        setEdited(true);
+        setValidationErrors([]);
+      },
+      []
+    );
+
+    const closeDraftPolygon = useCallback((): boolean => {
+      if (distinctVertexCount(draftVertices) < POLYGON_MIN_VERTICES) {
+        // Req 2.2: the close affordance is refused below three distinct
+        // vertices and the labeler is told why.
+        setPolygonHint(POLYGON_TOO_FEW_VERTICES_HINT);
+        return false;
+      }
+      instanceCounterRef.current += 1;
+      const id = `instance-${Date.now()}-${instanceCounterRef.current}`;
+      commitInstances(
+        [
+          ...instances,
+          withDerivedBox({
+            id,
+            class: labelSet[selectedClassIndex] ?? null,
+            vertices: draftVertices,
+            origin: 'user',
+          }),
+        ],
+        instances
+      );
+      setDraftVertices([]);
+      setSelectedInstanceId(id);
+      setPolygonHint(null);
+      return true;
+    }, [
+      draftVertices,
+      instances,
+      labelSet,
+      selectedClassIndex,
+      commitInstances,
+      withDerivedBox,
+    ]);
+
+    const setInstanceClass = useCallback(
+      (id: string, className: string) => {
+        commitInstances(
+          instances.map((instance) =>
+            instance.id === id ? { ...instance, class: className } : instance
+          ),
+          instances
+        );
+      },
+      [instances, commitInstances]
+    );
+
+    const deleteInstance = useCallback(
+      (id: string) => {
+        commitInstances(
+          instances.filter((instance) => instance.id !== id),
+          instances
+        );
+        setSelectedInstanceId((current) => (current === id ? null : current));
+      },
+      [instances, commitInstances]
+    );
+
+    /**
+     * Undo: an in-progress draft loses its last vertex first; otherwise the
+     * most recent committed instance edit is reverted.
+     */
+    const undoInstanceEdit = useCallback(() => {
+      if (draftVertices.length > 0) {
+        setDraftVertices(draftVertices.slice(0, -1));
+        setPolygonHint(null);
+        return;
+      }
+      const previous = instanceHistoryRef.current.pop();
+      setInstanceHistoryDepth(instanceHistoryRef.current.length);
+      if (previous) {
+        setInstances(previous);
+        setSelectedInstanceId((current) =>
+          previous.some((instance) => instance.id === current) ? current : null
+        );
+        setValidationErrors([]);
+      }
+    }, [draftVertices]);
+
+    /** The user-polygon vertex under `pos`, if any (selected instance first). */
+    const hitVertex = useCallback(
+      (pos: { x: number; y: number }) => {
+        const ordered = [
+          ...instances.filter((instance) => instance.id === selectedInstanceId),
+          ...instances.filter((instance) => instance.id !== selectedInstanceId),
+        ];
+        for (const instance of ordered) {
+          for (let index = 0; index < instance.vertices.length; index++) {
+            const [vx, vy] = instance.vertices[index];
+            if (Math.hypot(pos.x - vx, pos.y - vy) <= vertexHitRadius) {
+              return { instanceId: instance.id, vertexIndex: index };
+            }
+          }
+        }
+        return null;
+      },
+      [instances, selectedInstanceId, vertexHitRadius]
+    );
+
     /* ---------------- pointer handlers ---------------------------- */
     const handlePointerDown = useCallback(
       (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -510,9 +772,48 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           lastPaintPosRef.current = null;
           paintTo(pos);
           setEdited(true);
+        } else if (taskType === 'InstanceSegmentation') {
+          // 1. A vertex of an existing polygon under the pointer: select
+          //    its instance and start dragging it (Req 2.3 drag-to-edit).
+          if (draftVertices.length === 0) {
+            const hit = hitVertex(pos);
+            if (hit) {
+              vertexDragRef.current = { ...hit, before: instances, moved: false };
+              setSelectedInstanceId(hit.instanceId);
+              return;
+            }
+          }
+          // 2. Clicking the first vertex of the draft closes the ring.
+          if (draftVertices.length > 0) {
+            const [fx, fy] = draftVertices[0];
+            if (Math.hypot(pos.x - fx, pos.y - fy) <= vertexHitRadius) {
+              closeDraftPolygon();
+              return;
+            }
+            // A repeated click on the last vertex (the first half of a
+            // double-click) adds no duplicate vertex.
+            const [lx, ly] = draftVertices[draftVertices.length - 1];
+            if (Math.round(lx) === Math.round(pos.x)
+                && Math.round(ly) === Math.round(pos.y)) {
+              return;
+            }
+          }
+          // 3. Otherwise add a vertex to the draft polygon.
+          setDraftVertices([...draftVertices, [pos.x, pos.y]]);
+          setPolygonHint(null);
+          setSelectedInstanceId(null);
         }
       },
-      [taskType, toImageCoords, paintTo]
+      [
+        taskType,
+        toImageCoords,
+        paintTo,
+        draftVertices,
+        instances,
+        hitVertex,
+        vertexHitRadius,
+        closeDraftPolygon,
+      ]
     );
 
     const handlePointerMove = useCallback(
@@ -529,14 +830,55 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           });
         } else if (taskType === 'Segmentation' && paintingRef.current) {
           paintTo(pos);
+        } else if (taskType === 'InstanceSegmentation' && vertexDragRef.current) {
+          const drag = vertexDragRef.current;
+          drag.moved = true;
+          setInstances((prev) =>
+            prev.map((instance) =>
+              instance.id === drag.instanceId
+                ? {
+                    ...instance,
+                    vertices: instance.vertices.map((vertex, index) =>
+                      index === drag.vertexIndex ? [pos.x, pos.y] : vertex
+                    ),
+                  }
+                : instance
+            )
+          );
         }
       },
       [taskType, toImageCoords, paintTo]
     );
 
+    const handleDoubleClick = useCallback(() => {
+      if (taskType !== 'InstanceSegmentation') return;
+      if (draftVertices.length === 0) return;
+      closeDraftPolygon();
+    }, [taskType, draftVertices, closeDraftPolygon]);
+
     const handlePointerUp = useCallback(
       (event: React.PointerEvent<HTMLCanvasElement>) => {
         event.currentTarget.releasePointerCapture(event.pointerId);
+        if (taskType === 'InstanceSegmentation' && vertexDragRef.current) {
+          const drag = vertexDragRef.current;
+          vertexDragRef.current = null;
+          if (drag.moved) {
+            // One undo step per completed drag; the display box follows
+            // the new ring.
+            instanceHistoryRef.current.push(drag.before);
+            setInstanceHistoryDepth(instanceHistoryRef.current.length);
+            setInstances((prev) =>
+              prev.map((instance) =>
+                instance.id === drag.instanceId
+                  ? withDerivedBox(instance)
+                  : instance
+              )
+            );
+            setEdited(true);
+            setValidationErrors([]);
+          }
+          return;
+        }
         if (taskType === 'ObjectDetection' && dragStartRef.current) {
           dragStartRef.current = null;
           if (draftBox && imageSize) {
@@ -563,7 +905,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           lastPaintPosRef.current = null;
         }
       },
-      [taskType, draftBox, imageSize, labelSet, selectedClassIndex]
+      [taskType, draftBox, imageSize, labelSet, selectedClassIndex, withDerivedBox]
     );
 
     /* ---------------- box / proposal editing ----------------------- */
@@ -614,8 +956,17 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         boxes,
         bitmap: segBitmapRef.current ? segBitmapRef.current.slice() : null,
         proposals,
+        instances,
       };
-      if (taskType === 'Classification') {
+      if (taskType === 'InstanceSegmentation') {
+        // Prelabel_Origin instances keep `origin: 'prelabel'` through class
+        // edits, so a re-classed proposal is removed too; user-drawn
+        // polygons survive (rfdetr-seg-support design section 2).
+        setInstances((prev) =>
+          prev.filter((instance) => instance.origin !== 'prelabel')
+        );
+        setSelectedInstanceId(null);
+      } else if (taskType === 'Classification') {
         // Deselect only a selection still equal to the Pre_Label's
         // label; a selection the labeler changed is their own work
         // (req 9.4).
@@ -648,7 +999,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         setSegVersion((v) => v + 1);
       }
       setPrelabelsCleared(true);
-    }, [taskType, classification, boxes, proposals, prelabel]);
+    }, [taskType, classification, boxes, proposals, instances, prelabel]);
 
     const handleRestorePrelabels = useCallback(() => {
       const snapshot = prelabelSnapshotRef.current;
@@ -660,6 +1011,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         segBitmapRef.current = snapshot.bitmap.slice();
       }
       setProposals(snapshot.proposals);
+      setInstances(snapshot.instances);
       setSegVersion((v) => v + 1);
       setPrelabelsCleared(false);
     }, []);
@@ -740,9 +1092,121 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           );
           ctx.setLineDash([]);
         }
+      } else if (taskType === 'InstanceSegmentation') {
+        const lineWidth = Math.max(2, Math.round(width / 400));
+        const handle = Math.max(3, Math.round(width / 200));
+        const fillFor = (className: string | null) => {
+          const classIndex = className ? labelSet.indexOf(className) : -1;
+          const [r, g, b] = hexToRgb(
+            classIndex >= 0
+              ? CLASS_PALETTE[classIndex % CLASS_PALETTE.length]
+              : PROPOSAL_COLOR
+          );
+          return [r, g, b] as [number, number, number];
+        };
+        // Pre-label instances (masks, no vertices): one ImageData with
+        // the class fill at 40 % alpha and the boundary pixels in the
+        // instance's outline colour (Req 2.3).
+        const maskInstances = instances.filter((instance) => instance.mask);
+        if (maskInstances.length > 0) {
+          const imageData = ctx.createImageData(width, height);
+          const data = imageData.data;
+          for (const instance of maskInstances) {
+            const index = instances.indexOf(instance);
+            const [fr, fg, fb] = fillFor(instance.class);
+            const [or, og, ob] = hexToRgb(
+              INSTANCE_OUTLINE_PALETTE[index % INSTANCE_OUTLINE_PALETTE.length]
+            );
+            const mask = instance.mask!;
+            for (let p = 0; p < mask.length; p++) {
+              if (!mask[p]) continue;
+              const x = p % width;
+              const y = (p - x) / width;
+              const boundary =
+                x === 0 || y === 0 || x === width - 1 || y === height - 1 ||
+                !mask[p - 1] || !mask[p + 1] || !mask[p - width] || !mask[p + width];
+              const o = p * 4;
+              if (boundary) {
+                data[o] = or;
+                data[o + 1] = og;
+                data[o + 2] = ob;
+                data[o + 3] = 255;
+              } else {
+                data[o] = fr;
+                data[o + 1] = fg;
+                data[o + 2] = fb;
+                data[o + 3] = INSTANCE_FILL_ALPHA;
+              }
+            }
+          }
+          ctx.putImageData(imageData, 0, 0);
+        }
+        // User polygons: even-odd fill at 40 % alpha, outline from the
+        // instance-indexed palette, vertex handles on the selection.
+        ctx.lineWidth = lineWidth;
+        instances.forEach((instance, index) => {
+          if (instance.vertices.length === 0) return;
+          const [fr, fg, fb] = fillFor(instance.class);
+          const outline =
+            INSTANCE_OUTLINE_PALETTE[index % INSTANCE_OUTLINE_PALETTE.length];
+          ctx.beginPath();
+          instance.vertices.forEach(([vx, vy], vertexIndex) => {
+            if (vertexIndex === 0) ctx.moveTo(vx, vy);
+            else ctx.lineTo(vx, vy);
+          });
+          ctx.closePath();
+          ctx.fillStyle = `rgba(${fr}, ${fg}, ${fb}, ${INSTANCE_FILL_ALPHA / 255})`;
+          ctx.fill('evenodd');
+          ctx.strokeStyle = outline;
+          ctx.lineWidth =
+            instance.id === selectedInstanceId ? lineWidth * 2 : lineWidth;
+          ctx.setLineDash(instance.class ? [] : [8, 6]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          if (instance.id === selectedInstanceId) {
+            ctx.fillStyle = outline;
+            for (const [vx, vy] of instance.vertices) {
+              ctx.fillRect(vx - handle, vy - handle, handle * 2, handle * 2);
+            }
+          }
+        });
+        // The draft ring: dashed edges, handles, the first vertex marked
+        // once the ring can be closed.
+        if (draftVertices.length > 0) {
+          ctx.lineWidth = lineWidth;
+          ctx.strokeStyle = '#0972D3';
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          draftVertices.forEach(([vx, vy], vertexIndex) => {
+            if (vertexIndex === 0) ctx.moveTo(vx, vy);
+            else ctx.lineTo(vx, vy);
+          });
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = '#0972D3';
+          draftVertices.forEach(([vx, vy], vertexIndex) => {
+            const size =
+              vertexIndex === 0 &&
+              distinctVertexCount(draftVertices) >= POLYGON_MIN_VERTICES
+                ? handle * 2
+                : handle;
+            ctx.fillRect(vx - size, vy - size, size * 2, size * 2);
+          });
+        }
       }
       // Classification renders no overlay.
-    }, [taskType, imageSize, boxes, draftBox, proposals, labelSet, segVersion]);
+    }, [
+      taskType,
+      imageSize,
+      boxes,
+      draftBox,
+      proposals,
+      labelSet,
+      segVersion,
+      instances,
+      draftVertices,
+      selectedInstanceId,
+    ]);
 
     /* ---------------- annotation assembly / validation ------------- */
     const buildAnnotation = useCallback((): DdaAnnotation => {
@@ -761,6 +1225,42 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
               : box
           ),
           // The server validates box bounds against image_size.
+          ...(imageSize
+            ? { image_size: { width: imageSize.width, height: imageSize.height } }
+            : {}),
+          image_width: imageSize?.width,
+          image_height: imageSize?.height,
+        };
+      }
+      if (taskType === 'InstanceSegmentation') {
+        // Each polygon is rasterised by the even-odd scanline fill and
+        // RLE-encoded on save (DD9); pre-label instances keep their RLE.
+        // The tight box rides along as advisory — the server recomputes it.
+        const serialized: DdaInstance[] = [];
+        if (imageSize) {
+          const { width, height } = imageSize;
+          for (const instance of instances) {
+            const mask =
+              instance.vertices.length > 0
+                ? rasterizePolygonEvenOdd(instance.vertices, width, height)
+                : instance.mask ??
+                  decodeRleColumnMajor(
+                    parseRleCounts(instance.rle ?? ''), width, height);
+            const rle =
+              instance.vertices.length > 0 || !instance.rle
+                ? encodeRleColumnMajor(mask, width, height, 1).join(' ')
+                : instance.rle;
+            const box = tightBoxFromMask(mask, width, height);
+            serialized.push({
+              class: instance.class,
+              rle,
+              ...(box ? { box } : {}),
+            });
+          }
+        }
+        return {
+          modality: taskType,
+          instances: serialized,
           ...(imageSize
             ? { image_size: { width: imageSize.width, height: imageSize.height } }
             : {}),
@@ -799,7 +1299,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         image_width: imageSize?.width,
         image_height: imageSize?.height,
       };
-    }, [taskType, classification, boxes, imageSize, labelSet]);
+    }, [taskType, classification, boxes, imageSize, labelSet, instances]);
 
     const validate = useCallback((): string[] => {
       const missing: string[] = [];
@@ -815,6 +1315,33 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
             );
           }
         });
+      } else if (taskType === 'InstanceSegmentation') {
+        if (draftVertices.length > 0) {
+          missing.push(
+            'An unfinished polygon is open: close it (three or more vertices) or undo its vertices.'
+          );
+        }
+        instances.forEach((instance, i) => {
+          if (!instance.class || !labelSet.includes(instance.class)) {
+            missing.push(
+              `Instance ${i + 1} has no class assigned: pick a class or delete the instance.`
+            );
+          }
+          if (
+            instance.vertices.length > 0 &&
+            imageSize &&
+            tightBoxFromMask(
+              rasterizePolygonEvenOdd(
+                instance.vertices, imageSize.width, imageSize.height),
+              imageSize.width,
+              imageSize.height
+            ) === null
+          ) {
+            missing.push(
+              `Instance ${i + 1} covers no pixel: reshape or delete the instance.`
+            );
+          }
+        });
       } else {
         proposals.forEach((_, i) => {
           missing.push(
@@ -823,7 +1350,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         });
       }
       return missing;
-    }, [taskType, classification, boxes, proposals, labelSet]);
+    }, [
+      taskType,
+      classification,
+      boxes,
+      proposals,
+      labelSet,
+      instances,
+      draftVertices,
+      imageSize,
+    ]);
 
     useImperativeHandle(
       ref,
@@ -843,11 +1379,20 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       !!prelabel &&
       ((prelabel.label !== undefined && prelabel.label !== null) ||
         (prelabel.boxes?.length ?? 0) > 0 ||
-        (prelabel.regions?.length ?? 0) > 0);
+        (prelabel.regions?.length ?? 0) > 0 ||
+        (prelabel.instances?.length ?? 0) > 0);
     const prelabelHasClasslessItems =
       (prelabel?.boxes ?? []).some((b) => b.class === null) ||
-      (prelabel?.regions ?? []).some((r) => r.class === null);
+      (prelabel?.regions ?? []).some((r) => r.class === null) ||
+      (prelabel?.instances ?? []).some((i) => i.class === null);
     const showApproveAsIs = hasPrelabel && !edited;
+    const hasPrelabelInstances = instances.some(
+      (instance) => instance.origin === 'prelabel'
+    );
+    const draftDistinctCount = distinctVertexCount(draftVertices);
+    const canCloseDraft = draftDistinctCount >= POLYGON_MIN_VERTICES;
+    const canUndoInstances =
+      draftVertices.length > 0 || instanceHistoryDepth > 0;
 
     const classOptions = useMemo(
       () =>
@@ -956,6 +1501,65 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
           </SpaceBetween>
         )}
 
+        {taskType === 'InstanceSegmentation' && (
+          <SpaceBetween size="s">
+            <SpaceBetween size="s" direction="horizontal">
+              <FormField
+                label="Instance class"
+                description="New polygons get the selected class. Click to place vertices; click the first vertex or double-click to close."
+              >
+                <Select
+                  data-testid="instance-class-select"
+                  selectedOption={
+                    classOptions[selectedClassIndex] ?? classOptions[0] ?? null
+                  }
+                  onChange={({ detail }) =>
+                    setSelectedClassIndex(Number(detail.selectedOption.value))
+                  }
+                  options={classOptions}
+                />
+              </FormField>
+              <FormField label="Polygon">
+                <SpaceBetween size="xs" direction="horizontal">
+                  <Button
+                    data-testid="close-polygon"
+                    onClick={() => closeDraftPolygon()}
+                    disabled={!canCloseDraft}
+                  >
+                    Close polygon
+                  </Button>
+                  <Button
+                    data-testid="undo-instance-edit"
+                    onClick={undoInstanceEdit}
+                    disabled={!canUndoInstances}
+                  >
+                    Undo
+                  </Button>
+                </SpaceBetween>
+              </FormField>
+            </SpaceBetween>
+            <Box
+              variant="small"
+              color="text-body-secondary"
+              data-testid="polygon-hint"
+            >
+              {polygonHint ??
+                (draftVertices.length > 0 && !canCloseDraft
+                  ? `${draftDistinctCount} of ${POLYGON_MIN_VERTICES} distinct vertices placed. ${POLYGON_TOO_FEW_VERTICES_HINT}`
+                  : POLYGON_DRAW_HINT)}
+            </Box>
+            {hasPrelabelInstances && (
+              <Box
+                variant="small"
+                color="text-body-secondary"
+                data-testid="prelabel-instance-hint"
+              >
+                {PRELABEL_INSTANCE_HINT}
+              </Box>
+            )}
+          </SpaceBetween>
+        )}
+
         {/* Image with layered canvas */}
         {imageFailed ? (
           <Alert type="error" header="Image unavailable">
@@ -977,6 +1581,7 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
+              onDoubleClick={handleDoubleClick}
               style={{
                 position: 'absolute',
                 inset: 0,
@@ -985,7 +1590,8 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
                 cursor:
                   taskType === 'Classification'
                     ? 'default'
-                    : taskType === 'ObjectDetection'
+                    : taskType === 'ObjectDetection' ||
+                        taskType === 'InstanceSegmentation'
                       ? 'crosshair'
                       : segTool === 'brush'
                         ? 'crosshair'
@@ -994,6 +1600,58 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
               }}
             />
           </div>
+        )}
+
+        {/* Instance list (Instance_Segmentation only, Req 2.3) */}
+        {taskType === 'InstanceSegmentation' && instances.length > 0 && (
+          <SpaceBetween size="xs">
+            {instances.map((instance, i) => (
+              <SpaceBetween
+                key={instance.id}
+                size="xs"
+                direction="horizontal"
+              >
+                <Button
+                  variant={
+                    instance.id === selectedInstanceId ? 'primary' : 'normal'
+                  }
+                  data-testid={`select-instance-${i + 1}`}
+                  onClick={() => setSelectedInstanceId(instance.id)}
+                >
+                  {`Instance ${i + 1}`}
+                </Button>
+                <Box variant="span">
+                  {instance.vertices.length > 0
+                    ? `${instance.vertices.length} vertices`
+                    : 'pre-label mask'}
+                  {instance.box
+                    ? ` (${instance.box.left}, ${instance.box.top}) ${instance.box.width}×${instance.box.height}`
+                    : ''}
+                </Box>
+                <Select
+                  selectedOption={
+                    instance.class
+                      ? { label: instance.class, value: instance.class }
+                      : null
+                  }
+                  placeholder="Choose a class"
+                  onChange={({ detail }) => {
+                    if (detail.selectedOption.value) {
+                      setInstanceClass(instance.id, detail.selectedOption.value);
+                    }
+                  }}
+                  options={classSelectOptions}
+                  invalid={!instance.class}
+                />
+                <Button
+                  variant="icon"
+                  iconName="remove"
+                  ariaLabel={`Delete instance ${i + 1}`}
+                  onClick={() => deleteInstance(instance.id)}
+                />
+              </SpaceBetween>
+            ))}
+          </SpaceBetween>
         )}
 
         {/* Box list (Object_Detection only) */}

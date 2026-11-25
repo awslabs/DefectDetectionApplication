@@ -50,7 +50,7 @@ def list_inference_results_by_capture_task_id(db: Session, capture_task_id: str)
 
 def list_inference_result_data_by_capture_id_list(db: Session, capture_id_list: List[str]):
     stmt = (
-        select(InferenceResult.inputImageFilePath, InferenceResult.prediction, InferenceResult.confidence, InferenceResult.inferenceCreationTime, InferenceResult.humanClassification, InferenceResult.textNote)
+        select(InferenceResult.inputImageFilePath, InferenceResult.prediction, InferenceResult.confidence, InferenceResult.inferenceCreationTime, InferenceResult.humanClassification, InferenceResult.textNote, InferenceResult.detections)
         .where(InferenceResult.captureId.in_(capture_id_list))
     )
     return db.execute(stmt).all()
@@ -61,7 +61,7 @@ def list_inference_result_data(
     # TODO: add filter for model id
     if prediction_res:
         stmt = (
-            select(InferenceResult.inputImageFilePath, InferenceResult.prediction, InferenceResult.confidence, InferenceResult.inferenceCreationTime, InferenceResult.humanClassification, InferenceResult.textNote)
+            select(InferenceResult.inputImageFilePath, InferenceResult.prediction, InferenceResult.confidence, InferenceResult.inferenceCreationTime, InferenceResult.humanClassification, InferenceResult.textNote, InferenceResult.detections)
             .where(InferenceResult.workflowId == workflow_id)
             .where(InferenceResult.prediction == prediction_res)
             .where(between(InferenceResult.inferenceCreationTime, start_time, end_time))
@@ -70,7 +70,7 @@ def list_inference_result_data(
         )
     else:
         stmt = (
-            select(InferenceResult.inputImageFilePath, InferenceResult.prediction, InferenceResult.confidence, InferenceResult.inferenceCreationTime, InferenceResult.humanClassification, InferenceResult.textNote)
+            select(InferenceResult.inputImageFilePath, InferenceResult.prediction, InferenceResult.confidence, InferenceResult.inferenceCreationTime, InferenceResult.humanClassification, InferenceResult.textNote, InferenceResult.detections)
             .where(InferenceResult.workflowId == workflow_id)
             .where(between(InferenceResult.inferenceCreationTime, start_time, end_time))
             .order_by(func.abs(InferenceResult.anomalyScore - InferenceResult.anomalyThreshod))

@@ -171,9 +171,29 @@ LLM_MODEL_PREFIX = 'llm:'
 MODALITY_CLASSIFICATION = 'Classification'
 MODALITY_SEGMENTATION = 'Segmentation'
 MODALITY_OBJECT_DETECTION = 'ObjectDetection'
+# Instance_Segmentation (rfdetr-seg-support Requirement 2.4): the
+# mask-producing families pre-label it with `Segmentation` on the wire
+# (see `_wire_modality`); bedrock, which returns boxes only, does not.
+MODALITY_INSTANCE_SEGMENTATION = 'InstanceSegmentation'
 BEDROCK_MODALITIES = (MODALITY_CLASSIFICATION, MODALITY_OBJECT_DETECTION)
-SAM_MODALITIES = (MODALITY_SEGMENTATION, MODALITY_OBJECT_DETECTION)
-GROUNDED_SAM_MODALITIES = (MODALITY_SEGMENTATION, MODALITY_OBJECT_DETECTION)
+SAM_MODALITIES = (MODALITY_SEGMENTATION, MODALITY_OBJECT_DETECTION,
+                  MODALITY_INSTANCE_SEGMENTATION)
+GROUNDED_SAM_MODALITIES = (MODALITY_SEGMENTATION, MODALITY_OBJECT_DETECTION,
+                           MODALITY_INSTANCE_SEGMENTATION)
+
+
+def _wire_modality(modality: str) -> str:
+    """The modality value that leaves this worker: InstanceSegmentation
+    rides as Segmentation — the Grounded-SAM worker contract
+    (grounded-sam-autolabel Req 4) and `dda_llm_guidance` know exactly
+    the three original modalities and already return one region per
+    detection, so the stored Pre_Label is Segmentation-shaped
+    (`regions`) and the handler's task fetch maps each region to one
+    instance (rfdetr-seg-support Requirement 2.4). Every other value is
+    returned unchanged."""
+    if modality == MODALITY_INSTANCE_SEGMENTATION:
+        return MODALITY_SEGMENTATION
+    return modality
 
 # Test injection point: when set, used instead of a boto3 Lambda client
 # for synchronous SAM worker invocations.
@@ -779,7 +799,9 @@ def _generate_llm_prelabel(message: Dict, job: Dict, model_id: str) -> Dict:
     try:
         result = generate_llm_prelabel(
             model_identifier=model_id,
-            modality=modality,
+            # InstanceSegmentation goes to the guidance converter as
+            # Segmentation (rfdetr-seg-support Req 2.4).
+            modality=_wire_modality(modality),
             label_set=label_set,
             detection_prompt=detection_prompt,
             per_label_prompts=per_label_prompts,
@@ -886,7 +908,8 @@ def _generate_sam_prelabel(message: Dict, job: Dict) -> Dict:
         prelabel_regions.append(prelabel_region)
 
     return {
-        'modality': modality,
+        # Segmentation-shaped for InstanceSegmentation too (Req 2.4).
+        'modality': _wire_modality(modality),
         'regions': prelabel_regions,
         'image_width': image_width,
         'image_height': image_height,
@@ -950,6 +973,10 @@ def _generate_grounded_sam_prelabel(message: Dict, job: Dict) -> Dict:
     if not GROUNDED_SAM_WORKER_FUNCTION_NAME:
         raise GenerationFailure(
             'Grounded-SAM worker function is not configured')
+    # From here on the modality is the wire value: an InstanceSegmentation
+    # job sends `Segmentation` to the worker and stores the worker's
+    # per-detection regions unchanged (rfdetr-seg-support Req 2.4).
+    modality = _wire_modality(modality)
 
     bucket, key = _parse_s3_uri(message['image_s3_uri'])
     dataset_s3 = _dataset_s3_client(job, bucket)

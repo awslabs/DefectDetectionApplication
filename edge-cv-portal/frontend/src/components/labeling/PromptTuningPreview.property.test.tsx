@@ -466,9 +466,12 @@ function attachHint(container: HTMLElement): string | null {
  * prompt-guided LLM family covers every modality.
  */
 const ORACLE_MODALITIES: Record<'sam' | 'bedrock' | 'llm', string[]> = {
-  sam: ['Segmentation', 'ObjectDetection'],
+  // rfdetr-seg-support Requirement 2.4: sam and llm also pre-label
+  // InstanceSegmentation; bedrock (boxes only) does not. MODALITIES, the
+  // scenario generator, stays over the three pre-feature modalities.
+  sam: ['Segmentation', 'ObjectDetection', 'InstanceSegmentation'],
   bedrock: ['Classification', 'ObjectDetection'],
-  llm: ['Classification', 'Segmentation', 'ObjectDetection'],
+  llm: ['Classification', 'Segmentation', 'ObjectDetection', 'InstanceSegmentation'],
 };
 
 const PREVIEW_MODEL = { id: 'us.amazon.nova-pro-v1:0', label: 'Nova Pro' };

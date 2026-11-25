@@ -81,3 +81,13 @@ The two switches apply as soon as they are changed; **Save** stores the retentio
 ## 19.5 General
 
 Reserved for general portal settings; it currently shows "General settings coming soon".
+
+## 19.6 Deployment switches
+
+Some features are switched at deploy time rather than on this page. They are set as CDK context when the Portal infrastructure is deployed (`deploy-infrastructure.sh`, `-c <key>=<value>`), reach the Lambda functions as environment variables and the browser through the frontend's `config.json`.
+
+| Switch | CDK context | Lambda environment | `config.json` | Default | Effect when off |
+|--------|-------------|--------------------|---------------|---------|-----------------|
+| **RF-DETR-Seg instance segmentation** | `enableRfDetrSeg` | `PORTAL_RFDETR_SEG_ENABLED` on the Training, Model Converter and Packaging functions | `rfDetrSegEnabled` (written by `deploy-frontend.sh` from the stack's `RfDetrSegEnabled` output) | **on** — the context key absent, or any value other than `false`; an absent `rfDetrSegEnabled` also means on | The Portal hides the **Instance Segmentation** model type in **Start Training Job** and the **Instance Segmentation (RF-DETR-Seg)** tile in **Smart Import**, and `GET /models/types` omits the type. A request that still asks for it is refused with `403` and the reason `RF-DETR-Seg is disabled on this portal`: creating an RF-DETR-Seg training job, converting or importing an RF-DETR-Seg checkpoint or graph, and the Output mode override when packaging; the MCP tools that call these functions relay the same 403. **Inspect Model** still works and reports such a file as RF-DETR-Seg but not convertible, with that reason (`convertible: false` for a checkpoint, `disabled_reason` for a graph). Existing RF-DETR-Seg models, their packages and deployed workflows are not affected. |
+
+Turning the switch off and on again is a redeploy of the infrastructure followed by the frontend deployment (`-c enableRfDetrSeg=false` to turn it off; omit the key to turn it on).

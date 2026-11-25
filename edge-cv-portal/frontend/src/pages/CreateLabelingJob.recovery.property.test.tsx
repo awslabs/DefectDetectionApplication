@@ -427,6 +427,7 @@ describe('Feature: labeling-setup-session-recovery, Property 5: Restoring a draf
       'Classification',
       'Segmentation',
       'ObjectDetection',
+      'InstanceSegmentation', // rfdetr-seg-support Requirement 2.4
     ]);
 
     await fc.assert(

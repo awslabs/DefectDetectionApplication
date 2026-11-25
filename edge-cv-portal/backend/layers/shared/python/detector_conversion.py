@@ -1,9 +1,12 @@
 """Checkpoint conversion for imported detectors (spec: detector-checkpoint-import).
 
-Smart Import takes an ultralytics YOLO `.pt` or an RF-DETR `.pth`, converts it
-to ONNX in a network-isolated SageMaker job (the Conversion_Job, which runs
-datasets/detection_training/export_checkpoint.py on the Export_Image), and
-publishes the result through packaging.package_trained_detection_component.
+Smart Import takes an ultralytics YOLO `.pt` or an RF-DETR `.pth` (detection,
+or RF-DETR-Seg instance segmentation -- spec rfdetr-seg-support, Requirement 7:
+arch 'rf_detr_seg', model type 'instance_segmentation', the three-output
+Seg_Output_Contract), converts it to ONNX in a network-isolated SageMaker job
+(the Conversion_Job, which runs datasets/detection_training/export_checkpoint.py
+on the Export_Image), and publishes the result through
+packaging.package_trained_detection_component.
 This module holds every pure piece of that pipeline so the three handler
 modules that take part (model_converter, training / training_events,
 packaging) share one implementation:
@@ -83,12 +86,26 @@ PROGRESS_FOR_STATUS = {
 }
 
 MODEL_TYPE_OBJECT_DETECTION = 'object_detection'
+# RF-DETR-Seg Conversion_Records (spec rfdetr-seg-support, Req 1.3): model
+# type 'instance_segmentation' with detection_arch 'rf_detr_seg'. Mirrors
+# detection_training.MODEL_TYPE_INSTANCE_SEGMENTATION / DETECTION_MODEL_TYPES.
+MODEL_TYPE_INSTANCE_SEGMENTATION = 'instance_segmentation'
+DETECTION_MODEL_TYPES = (MODEL_TYPE_OBJECT_DETECTION, MODEL_TYPE_INSTANCE_SEGMENTATION)
+MODEL_TYPE_FOR_ARCH = {
+    'yolo': MODEL_TYPE_OBJECT_DETECTION,
+    'rf_detr': MODEL_TYPE_OBJECT_DETECTION,
+    'rf_detr_seg': MODEL_TYPE_INSTANCE_SEGMENTATION,
+}
 CHECKPOINT_EXTENSIONS = ('.pt', '.pth')
 UPLOAD_EXTENSIONS = ('.pt', '.pth', '.onnx')
 INPUT_STEP = 32
-INPUT_BOUNDS = {'yolo': (320, 2048), 'rf_detr': (224, 1120)}
-DEFAULT_SCORE_THRESHOLD = {'yolo': 0.25, 'rf_detr': 0.5}
+# rf_detr_seg bounds are for error wording only: a Seg input must be a size's
+# native resolution, and the `% INPUT_STEP` test never applies to it (312,
+# 432, 504 and 624 are not multiples of 32; Seg spec Req 7.3).
+INPUT_BOUNDS = {'yolo': (320, 2048), 'rf_detr': (224, 1120), 'rf_detr_seg': (240, 1152)}
+DEFAULT_SCORE_THRESHOLD = {'yolo': 0.25, 'rf_detr': 0.5, 'rf_detr_seg': 0.5}
 DEFAULT_IOU_THRESHOLD = 0.45
+DEFAULT_MASK_THRESHOLD = 0.5
 RFDETR_TOP_K = 300
 
 # ultralytics: the only model class / head classes the device decodes.
@@ -121,9 +138,41 @@ REJECTED_YOLO_HEAD_REASONS = {
 RFDETR_SIZES = {'nano': 384, 'small': 512, 'medium': 576, 'large': 704}
 RFDETR_CLASS_FOR_SIZE = {'nano': 'RFDETRNano', 'small': 'RFDETRSmall',
                          'medium': 'RFDETRMedium', 'large': 'RFDETRLarge'}
-RFDETR_PML_CLASSES = ('RFDETRXLarge', 'RFDETR2XLarge', 'RFDETRSegXLarge', 'RFDETRSeg2XLarge')
+# PML-licensed (rfdetr_plus) classes: only the two detection sizes. rfdetr
+# 1.10.1 `detr.py:173` lists `rfdetr_plus = ['RFDETRXLarge', 'RFDETR2XLarge']`
+# and `:193-197` applies the PML notice to exactly those; the PyPI README for
+# rfdetr 1.10.1 lists every RF-DETR-Seg size (Nano … 2XLarge) as Apache-2.0
+# (Seg spec D4, Req 1.4).
+RFDETR_PML_CLASSES = ('RFDETRXLarge', 'RFDETR2XLarge')
 RFDETR_LEGACY_CLASSES = ('RFDETRBase', 'RFDETRLargeDeprecated')
 RFDETR_NATIVE_INPUTS = tuple(sorted(set(RFDETR_SIZES.values())))
+# RF-DETR-Seg: all six sizes, their native resolutions, rfdetr classes and
+# decoder query counts (rfdetr 1.10.1 config.py; mirrors
+# detection_training.RFDETR_SEG_*, kept identical by
+# tests/test_rfdetr_seg_vocabulary_parity.py). The natives are pairwise
+# distinct, so RFDETR_SEG_SIZE_FOR_NATIVE names the size from the input a
+# request validated when the probe could not read the size itself.
+RFDETR_SEG_SIZES = {'nano': 312, 'small': 384, 'medium': 432,
+                    'large': 504, 'xlarge': 624, '2xlarge': 768}
+RFDETR_SEG_CLASS_FOR_SIZE = {'nano': 'RFDETRSegNano', 'small': 'RFDETRSegSmall',
+                             'medium': 'RFDETRSegMedium', 'large': 'RFDETRSegLarge',
+                             'xlarge': 'RFDETRSegXLarge', '2xlarge': 'RFDETRSeg2XLarge'}
+RFDETR_SEG_QUERIES_FOR_SIZE = {'nano': 100, 'small': 100, 'medium': 200,
+                               'large': 200, 'xlarge': 300, '2xlarge': 300}
+RFDETR_SEG_NATIVE_INPUTS = tuple(sorted(set(RFDETR_SEG_SIZES.values())))
+RFDETR_SEG_SIZE_FOR_NATIVE = {native: size for size, native in RFDETR_SEG_SIZES.items()}
+# The deprecated preview size is rejected by name (Req 7.2); mirrors
+# export_checkpoint.RFDETR_REJECTED_SEG_NAMES, the job's own gate.
+RFDETR_REJECTED_SEG_CLASSES = ('RFDETRSegPreview',)
+# RF-DETR-Seg Output_Mode and mask grid (mirrors detection_training.OUTPUT_MODES
+# / DEFAULT_OUTPUT_MODE / RFDETR_SEG_MASK_DOWNSAMPLE; parity-tested).
+OUTPUT_MODES = ('instance', 'semantic')
+DEFAULT_OUTPUT_MODE = 'instance'
+RFDETR_SEG_MASK_DOWNSAMPLE = 4
+# The DETR family: the branches that used to test `== 'rf_detr'` route both
+# DETR archs together, with Seg-only sub-branches where the two differ
+# (mirrors detection_training.DETR_FAMILY_ARCHES / is_detr_family).
+DETR_FAMILY_ARCHES = ('rf_detr', 'rf_detr_seg')
 
 REASON_TEXT = {
     'torchscript': ('this is a frozen TorchScript graph, not a training checkpoint; export ONNX '
@@ -190,44 +239,84 @@ def _valid_input(arch: str, value: Any) -> Optional[int]:
     return value if (value % INPUT_STEP == 0 and low <= value <= high) else None
 
 
+def is_detr_family(arch: Optional[str]) -> bool:
+    """True for 'rf_detr' and 'rf_detr_seg' (the shared-layer mirror of
+    detection_training.is_detr_family)."""
+    return arch in DETR_FAMILY_ARCHES
+
+
+def _seg_native_input(value: Any) -> Optional[int]:
+    """The value when it is one of the six RF-DETR-Seg native resolutions
+    (the Seg counterpart of _valid_input: no INPUT_STEP test, Req 7.3)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value in RFDETR_SEG_NATIVE_INPUTS else None
+
+
 # ---------------------------------------------------------------------------
 # Pre-flight assessment (Requirement 2)
 # ---------------------------------------------------------------------------
 
-def _rfdetr_size_from_evidence(evidence: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """(size, reason_if_rejected) from what the probe read without unpickling.
+def _rfdetr_size_from_evidence(evidence: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], str]:
+    """(size, reason_if_rejected, task) from what the probe read without
+    unpickling; `task` is 'segmentation' for an RF-DETR-Seg checkpoint (the
+    probe's `evidence.rfdetr_task`, decided by the state dict), else
+    'detection'.
 
     RF-DETR converts only at its size's native resolution (spike decision:
     rfdetr 1.10.1 re-derives positional_encoding_size from an explicit
     `resolution`, so a non-native export no longer loads the checkpoint's
     positional grid). A size of None means "unknown here": the job infers it
-    from the state_dict and still enforces the native resolution."""
+    from the state_dict and still enforces the native resolution. The task is
+    settled BEFORE the size table is chosen: 384 is detection nano and Seg
+    small, so a 384 checkpoint without a model_name goes to the Seg table iff
+    the probe saw the mask head (Seg spec Req 7.2). The six Seg natives are
+    pairwise distinct, so `args_picks.resolution` alone names the Seg size
+    when `model_name` is absent (the published weights); `encoder` cannot
+    help (every Seg config inherits dinov2_windowed_small)."""
+    task = 'segmentation' if evidence.get('rfdetr_task') == 'segmentation' else 'detection'
+    seg = task == 'segmentation'
+    family = 'RF-DETR-Seg' if seg else 'RF-DETR'
+    sizes = RFDETR_SEG_SIZES if seg else RFDETR_SIZES
+    class_for_size = RFDETR_SEG_CLASS_FOR_SIZE if seg else RFDETR_CLASS_FOR_SIZE
     model_name = evidence.get('model_name')
     if model_name in RFDETR_PML_CLASSES:
         return None, (f'{model_name} is a PML-licensed RF-DETR size; only the Apache-2.0 sizes '
-                      f'({", ".join(RFDETR_SIZES)}) can be converted')
-    if isinstance(model_name, str) and ('seg' in model_name.lower() or 'keypoint' in model_name.lower()):
-        return None, f'{model_name} is not an RF-DETR detection model; only detection converts'
+                      f'({", ".join(RFDETR_SIZES)}) can be converted'), task
+    if isinstance(model_name, str) and 'keypoint' in model_name.lower():
+        return None, (f'{model_name} is not an RF-DETR detection model; only detection and '
+                      f'RF-DETR-Seg instance segmentation convert'), task
+    if model_name in RFDETR_REJECTED_SEG_CLASSES:
+        return None, f'{model_name} is a deprecated preview size; re-export with a current Seg size', task
     if model_name in RFDETR_LEGACY_CLASSES:
         return None, (f'{model_name} is a legacy RF-DETR model; only the nano/small/medium/large '
-                      f'checkpoints of rfdetr >= 1.3 can be converted')
+                      f'checkpoints of rfdetr >= 1.3 can be converted'), task
     picks = evidence.get('args_picks') or {}
     encoder = picks.get('encoder')
     if encoder and encoder != 'dinov2_windowed_small':
         return None, (f'RF-DETR encoder {encoder!r} is a legacy/unsupported variant; only the '
-                      f'Apache-2.0 nano/small/medium/large checkpoints can be converted')
+                      f'Apache-2.0 nano/small/medium/large checkpoints can be converted'), task
     resolution = picks.get('resolution')
-    size = next((s for s, cls in RFDETR_CLASS_FOR_SIZE.items() if model_name == cls), None)
+    size = next((s for s, cls in class_for_size.items() if model_name == cls), None)
     if size is None:
-        size = next((s for s, native in RFDETR_SIZES.items() if resolution == native), None)
+        size = next((s for s, native in sizes.items() if resolution == native), None)
     if isinstance(resolution, int) and not isinstance(resolution, bool):
-        if size is not None and resolution != RFDETR_SIZES[size]:
-            return size, (f'the checkpoint was trained at {resolution}px; RF-DETR {size} converts only '
-                          f'at its native {RFDETR_SIZES[size]}px')
+        if size is not None and resolution != sizes[size]:
+            return size, (f'the checkpoint was trained at {resolution}px; {family} {size} converts only '
+                          f'at its native {sizes[size]}px'), task
         if size is None:
-            return None, (f'the checkpoint was trained at {resolution}px, which is not a native RF-DETR '
-                          f'resolution ({", ".join(f"{s} {r}" for s, r in RFDETR_SIZES.items())})')
-    return size, None
+            return None, (f'the checkpoint was trained at {resolution}px, which is not a native {family} '
+                          f'resolution ({", ".join(f"{s} {r}" for s, r in sizes.items())})'), task
+    if seg and size is not None:
+        # Consistency, not identification: Nano/Small, Medium/Large and
+        # XLarge/2XLarge share a query count, so num_queries cannot name the
+        # size, but a count that contradicts the named size is a reason.
+        queries = picks.get('num_queries')
+        if (isinstance(queries, int) and not isinstance(queries, bool)
+                and queries != RFDETR_SEG_QUERIES_FOR_SIZE[size]):
+            return size, (f'the checkpoint has {queries} queries; RF-DETR-Seg {size} has '
+                          f'{RFDETR_SEG_QUERIES_FOR_SIZE[size]}'), task
+    return size, None, task
 
 
 def assess_checkpoint(probe: Dict[str, Any], *, conversion_available: bool = True,
@@ -257,6 +346,11 @@ def assess_checkpoint(probe: Dict[str, Any], *, conversion_available: bool = Tru
         'framework': None,
         'framework_version': None,
         'rfdetr_size': None,
+        # RF-DETR-Seg (Seg spec Req 7.2): the model type the arch implies, the
+        # Seg_Size and its decoder query count; None for everything else.
+        'model_type': None,
+        'rfdetr_seg_size': None,
+        'num_queries': None,
         'convertible': False,
         'reasons': [],
     }
@@ -264,6 +358,7 @@ def assess_checkpoint(probe: Dict[str, Any], *, conversion_available: bool = Tru
 
     if kind == 'ultralytics_checkpoint':
         out['arch'] = 'yolo'
+        out['model_type'] = MODEL_TYPE_FOR_ARCH['yolo']
         out['framework'] = 'ultralytics'
         out['framework_version'] = evidence.get('version')
         out['model_class'] = evidence.get('model_class')
@@ -296,15 +391,29 @@ def assess_checkpoint(probe: Dict[str, Any], *, conversion_available: bool = Tru
         elif class_names is None or len(class_names) != num_classes:
             reasons.append('the class names could not be read from the checkpoint')
     elif kind == 'rfdetr_checkpoint':
-        out['arch'] = 'rf_detr'
+        size, rejection, task = _rfdetr_size_from_evidence(evidence)
+        seg = task == 'segmentation'
+        out['arch'] = 'rf_detr_seg' if seg else 'rf_detr'
+        out['model_type'] = MODEL_TYPE_FOR_ARCH[out['arch']]
         out['framework'] = 'rfdetr'
         out['model_class'] = evidence.get('model_name')
-        size, rejection = _rfdetr_size_from_evidence(evidence)
-        out['rfdetr_size'] = size
         picks = evidence.get('args_picks') or {}
-        resolution = _valid_input('rf_detr', picks.get('resolution'))
-        out['train_input_size'] = resolution or (RFDETR_SIZES[size] if size else None)
-        out['task'] = 'detect'
+        if seg:
+            # Seg: the native-only rule is the whole input rule -- never
+            # _valid_input('rf_detr', ...), whose % INPUT_STEP / INPUT_BOUNDS
+            # test rejects 312 / 432 / 504 / 624 (Req 7.3). An unknown size
+            # (the stripped published weights) leaves the pre-fill empty and
+            # the request picks one of the six natives.
+            out['rfdetr_seg_size'] = size
+            out['num_queries'] = RFDETR_SEG_QUERIES_FOR_SIZE[size] if size else None
+            resolution = _seg_native_input(picks.get('resolution'))
+            out['train_input_size'] = resolution or (RFDETR_SEG_SIZES[size] if size else None)
+            out['task'] = 'segmentation'
+        else:
+            out['rfdetr_size'] = size
+            resolution = _valid_input('rf_detr', picks.get('resolution'))
+            out['train_input_size'] = resolution or (RFDETR_SIZES[size] if size else None)
+            out['task'] = 'detect'
         if rejection:
             reasons.append(rejection)
         if not isinstance(num_classes, int) or num_classes < 1:
@@ -322,8 +431,9 @@ def assessment_prefill(assessment: Dict[str, Any]) -> Dict[str, Any]:
     """The existing inspection_result fields the Smart Import page pre-fills
     from (Requirement 2.5)."""
     size = assessment.get('train_input_size') if assessment.get('convertible') else None
-    hints = [f"{'Ultralytics YOLO' if assessment.get('arch') == 'yolo' else 'RF-DETR'} "
-             f"checkpoint" if assessment.get('arch') else 'PyTorch file']
+    arch = assessment.get('arch')
+    family = {'yolo': 'Ultralytics YOLO', 'rf_detr_seg': 'RF-DETR-Seg'}.get(arch, 'RF-DETR')
+    hints = [f"{family} checkpoint" if arch else 'PyTorch file']
     hints += [f'Not convertible: {r}' for r in assessment.get('reasons') or []]
     out = {
         'type': 'checkpoint',
@@ -334,8 +444,11 @@ def assessment_prefill(assessment: Dict[str, Any]) -> Dict[str, Any]:
         'input_height': size,
     }
     if assessment.get('convertible'):
-        out['suggested_type'] = MODEL_TYPE_OBJECT_DETECTION
-        out['detection_arch'] = assessment.get('arch')
+        # object_detection for yolo / rf_detr, instance_segmentation for
+        # rf_detr_seg (API / MCP callers; the UI drives the .pth form from
+        # conversionLocksFor(checkpoint)).
+        out['suggested_type'] = MODEL_TYPE_FOR_ARCH[arch]
+        out['detection_arch'] = arch
     return out
 
 
@@ -363,14 +476,20 @@ def validate_conversion_request(body: Dict[str, Any], assessment: Dict[str, Any]
         raise ValueError('Checkpoint cannot be converted to ONNX: ' +
                          '; '.join(assessment.get('reasons') or ['unknown reason']))
     arch = assessment['arch']
-    model_type = body.get('model_type') or MODEL_TYPE_OBJECT_DETECTION
-    if model_type != MODEL_TYPE_OBJECT_DETECTION:
-        raise ValueError(f"'model_type' must be '{MODEL_TYPE_OBJECT_DETECTION}' for a checkpoint "
+    seg = arch == 'rf_detr_seg'
+    # object_detection for yolo / rf_detr, instance_segmentation for
+    # rf_detr_seg (Seg spec Req 7.3): a mismatch names both.
+    expected_type = MODEL_TYPE_FOR_ARCH[arch]
+    model_type = body.get('model_type') or expected_type
+    if model_type != expected_type:
+        raise ValueError(f"'model_type' must be '{expected_type}' for "
+                         f"{'an RF-DETR-Seg' if seg else 'a'} checkpoint "
                          f"conversion; got {model_type!r}")
     requested_arch = body.get('detection_arch')
     if requested_arch not in (None, '') and str(requested_arch).lower() != arch:
+        family = {'yolo': 'an ultralytics YOLO', 'rf_detr_seg': 'an RF-DETR-Seg'}.get(arch, 'an RF-DETR')
         raise ValueError(f"'detection_arch' {requested_arch!r} contradicts the checkpoint, which is "
-                         f"{'an ultralytics YOLO' if arch == 'yolo' else 'an RF-DETR'} checkpoint")
+                         f"{family} checkpoint")
 
     width, height = body.get('image_width'), body.get('image_height')
     if width is None and height is None:
@@ -383,10 +502,22 @@ def validate_conversion_request(body: Dict[str, Any], assessment: Dict[str, Any]
         raise ValueError("'image_width' and 'image_height' must be integers")
     if width_i != height_i:
         raise ValueError(f"the network input must be square; got {width_i}x{height_i}")
-    low, high = INPUT_BOUNDS[arch]
-    if width_i % INPUT_STEP or not low <= width_i <= high:
-        raise ValueError(f"the network input must be a multiple of {INPUT_STEP} between {low} and "
-                         f"{high} for {'YOLO' if arch == 'yolo' else 'RF-DETR'}; got {width_i}")
+    if seg:
+        # The native-only rule is the whole input rule for RF-DETR-Seg: the
+        # INPUT_STEP / INPUT_BOUNDS gate below never runs for it (312, 432,
+        # 504 and 624 are not multiples of 32; Seg spec Req 7.3).
+        known = assessment.get('rfdetr_seg_size')
+        allowed = (RFDETR_SEG_SIZES[known],) if known in RFDETR_SEG_SIZES else RFDETR_SEG_NATIVE_INPUTS
+        if width_i not in allowed:
+            raise ValueError(
+                f"RF-DETR-Seg converts at its size's native resolution "
+                f"({'%s: %d' % (known, allowed[0]) if known in RFDETR_SEG_SIZES else ', '.join(map(str, allowed))}); "
+                f"got {width_i}")
+    else:
+        low, high = INPUT_BOUNDS[arch]
+        if width_i % INPUT_STEP or not low <= width_i <= high:
+            raise ValueError(f"the network input must be a multiple of {INPUT_STEP} between {low} and "
+                             f"{high} for {'YOLO' if arch == 'yolo' else 'RF-DETR'}; got {width_i}")
     if arch == 'rf_detr':
         # Native resolution only (spike decision; see _rfdetr_size_from_evidence).
         known = assessment.get('rfdetr_size')
@@ -422,7 +553,21 @@ def validate_conversion_request(body: Dict[str, Any], assessment: Dict[str, Any]
         if iou is None or not 0.0 < iou < 1.0:
             raise ValueError("'iou_threshold' must be strictly between 0 and 1")
     elif body.get('iou_threshold') is not None:
-        raise ValueError("'iou_threshold' does not apply to RF-DETR (set-based decoding, no NMS)")
+        # One rule for the DETR family (Req 7.3): never ignored, never persisted.
+        raise ValueError(f"'iou_threshold' does not apply to {'RF-DETR-Seg' if seg else 'RF-DETR'} "
+                         f"(set-based decoding, no NMS)")
+    mask = output_mode = None
+    if seg:
+        # An explicit null is "not given", as for output_mode below.
+        mask = _number(body, 'mask_threshold', DEFAULT_MASK_THRESHOLD)
+        if mask is None:
+            mask = DEFAULT_MASK_THRESHOLD
+        if not 0.0 < mask < 1.0:
+            raise ValueError("'mask_threshold' must be strictly between 0 and 1")
+        output_mode = str(body.get('output_mode') or DEFAULT_OUTPUT_MODE).strip().lower()
+        if output_mode not in OUTPUT_MODES:
+            raise ValueError(f"'output_mode' must be one of {', '.join(OUTPUT_MODES)}; "
+                             f"got {body.get('output_mode')!r}")
 
     derived_aspect = arch == 'yolo'
     requested_aspect = body.get('preserve_aspect')
@@ -433,6 +578,11 @@ def validate_conversion_request(body: Dict[str, Any], assessment: Dict[str, Any]
 
     size = assessment.get('rfdetr_size')
     requested_size = body.get('rfdetr_size')
+    if seg and requested_size not in (None, ''):
+        # A Seg request has no size field: the size is the assessment's (and,
+        # unknown there, the one the validated native input names).
+        raise ValueError("'rfdetr_size' does not apply to RF-DETR-Seg (the size is read from the "
+                         "checkpoint)")
     if arch == 'rf_detr' and requested_size not in (None, ''):
         requested_size = str(requested_size).lower()
         if requested_size not in RFDETR_SIZES:
@@ -440,19 +590,35 @@ def validate_conversion_request(body: Dict[str, Any], assessment: Dict[str, Any]
         if size and requested_size != size:
             raise ValueError(f"'rfdetr_size' {requested_size!r} contradicts the checkpoint ({size})")
         size = requested_size
+    # Seg: the probe may know neither model_name nor a usable
+    # args_picks.resolution (the stripped published weights), so the width the
+    # native-only rule has just validated names top_k (the six natives are
+    # pairwise distinct); rfdetr_seg_size itself stays None when unknown and
+    # the job's own native check settles the true size (Req 7.3).
+    seg_size = (assessment.get('rfdetr_seg_size') or RFDETR_SEG_SIZE_FOR_NATIVE[width_i]) if seg else None
 
-    return {
+    params = {
         'arch': arch,
         'network_input': width_i,
         'num_classes': num_classes,
         'class_names': names,
         'score_threshold': score,
         'iou_threshold': iou if arch == 'yolo' else None,
-        'top_k': RFDETR_TOP_K if arch == 'rf_detr' else None,
+        'top_k': (RFDETR_SEG_QUERIES_FOR_SIZE[seg_size] if seg
+                  else (RFDETR_TOP_K if arch == 'rf_detr' else None)),
         'preserve_aspect': derived_aspect,
         'onnx_opset': CONVERSION_OPSET,
         'rfdetr_size': size if arch == 'rf_detr' else None,
     }
+    if seg:
+        # Seg-only keys (Req 7.9, C28): a yolo / rf_detr params dict stays
+        # byte-identical to today's ten keys.
+        params.update({
+            'rfdetr_seg_size': assessment.get('rfdetr_seg_size'),
+            'mask_threshold': mask,
+            'output_mode': output_mode,
+        })
+    return params
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +674,16 @@ def build_conversion_job_request(*, job_name: str, image_uri: str, role_arn: str
     }
     if params.get('rfdetr_size'):
         environment['RFDETR_SIZE'] = params['rfdetr_size']
+    if params.get('rfdetr_seg_size'):
+        # One env key for both DETR archs; absent when the Seg size is unknown
+        # (the job's shell-signature match names it).
+        environment['RFDETR_SIZE'] = params['rfdetr_seg_size']
+    if params['arch'] == 'rf_detr_seg':
+        # Seg only (Req 7.3, C26): the job's task gate reads TASK (its default
+        # is detection) and the parity mask term reads MASK_THRESHOLD; a yolo /
+        # rf_detr environment is byte-identical to today's.
+        environment['TASK'] = 'segmentation'
+        environment['MASK_THRESHOLD'] = str(params['mask_threshold'])
     return {
         'TrainingJobName': job_name,
         'RoleArn': role_arn,
@@ -553,11 +729,19 @@ def build_conversion_record(*, training_id: str, usecase_id: str, model_name: st
         'preserve_aspect': params['preserve_aspect'],
         'onnx_opset': params['onnx_opset'],
     }
-    if arch == 'rf_detr':
+    if is_detr_family(arch):
         detection['top_k'] = params.get('top_k') or RFDETR_TOP_K
         detection['resolution'] = size
         if params.get('rfdetr_size'):
             detection['rfdetr_size'] = params['rfdetr_size']
+        if arch == 'rf_detr_seg':
+            # Seg keys (Req 7.3), inside the DETR-family block only: the YOLO
+            # branch and the rf_detr record are untouched. rfdetr_seg_size is
+            # None when the probe could not read the size (the job's
+            # training_metadata.rfdetr_seg_size carries the true one, 6.2).
+            detection['rfdetr_seg_size'] = params.get('rfdetr_seg_size')
+            detection['mask_threshold'] = params.get('mask_threshold')
+            detection['output_mode'] = params.get('output_mode')
     else:
         detection['iou_threshold'] = params['iou_threshold']
         detection['imgsz'] = size
@@ -568,7 +752,7 @@ def build_conversion_record(*, training_id: str, usecase_id: str, model_name: st
                               if framework_version else (assessment.get('framework') or 'PYTORCH')),
         'model_file': model_file,
         'pt_file': model_file,
-        'model_type': MODEL_TYPE_OBJECT_DETECTION,
+        'model_type': MODEL_TYPE_FOR_ARCH[arch],
         'image_width': size,
         'image_height': size,
         'input_shape': [1, 3, size, size],
@@ -582,7 +766,7 @@ def build_conversion_record(*, training_id: str, usecase_id: str, model_name: st
         'usecase_id': usecase_id,
         'model_name': model_name,
         'model_version': model_version,
-        'model_type': MODEL_TYPE_OBJECT_DETECTION,
+        'model_type': MODEL_TYPE_FOR_ARCH[arch],
         'source': 'imported',
         'runtime': 'onnx',
         'status': 'InProgress',
@@ -613,12 +797,13 @@ def build_conversion_record(*, training_id: str, usecase_id: str, model_name: st
 
 
 def is_detector_conversion_record(record: Any) -> bool:
-    """True for a Conversion_Record (Requirement 9.1). Never true for a
-    portal-trained record (no `source`) or a plain ONNX / PyTorch import (no
-    `conversion` block)."""
+    """True for a Conversion_Record (Requirement 9.1) of either detection model
+    type — object_detection or the Seg spec's instance_segmentation. Never
+    true for a portal-trained record (no `source`) or a plain ONNX / PyTorch
+    import (no `conversion` block)."""
     return (isinstance(record, dict)
             and record.get('source') == 'imported'
-            and record.get('model_type') == MODEL_TYPE_OBJECT_DETECTION
+            and record.get('model_type') in DETECTION_MODEL_TYPES
             and str(record.get('runtime', '')).lower() == 'onnx'
             and isinstance(record.get('conversion'), dict))
 
@@ -684,15 +869,24 @@ def _failed(from_status: str, reason: str, now_ms: int) -> Transition:
 def plan_finalize_transition(*, success: bool, now_ms: int, failure_reason: Optional[str] = None,
                              packaged_components: Optional[List[Dict[str, Any]]] = None,
                              onnx_sha256: Optional[str] = None,
-                             onnx_summary: Optional[Dict[str, Any]] = None) -> Transition:
-    """Finalizing -> Completed / Failed, written by the packaging finalize (pure)."""
+                             onnx_summary: Optional[Dict[str, Any]] = None,
+                             packaged_output_mode: Optional[str] = None) -> Transition:
+    """Finalizing -> Completed / Failed, written by the packaging finalize (pure).
+
+    `packaged_output_mode` (Seg spec Req 6.4, C32) is the Output_Mode an
+    RF-DETR-Seg Conversion_Record was packaged in; it joins `set_fields` only
+    when given, so a detection record's transition is unchanged."""
     if not success:
         return _failed(CONVERSION_FINALIZING, failure_reason or 'Conversion output rejected', now_ms)
+    set_fields: Dict[str, Any] = {
+        'status': 'Completed', 'progress': PROGRESS_FOR_STATUS[CONVERSION_COMPLETED],
+        'packaged_components': packaged_components or [],
+        'completed_at': now_ms, 'updated_at': now_ms}
+    if packaged_output_mode is not None:
+        set_fields['packaged_output_mode'] = packaged_output_mode
     return Transition(
         from_status=CONVERSION_FINALIZING, to_status=CONVERSION_COMPLETED,
-        set_fields={'status': 'Completed', 'progress': PROGRESS_FOR_STATUS[CONVERSION_COMPLETED],
-                    'packaged_components': packaged_components or [],
-                    'completed_at': now_ms, 'updated_at': now_ms},
+        set_fields=set_fields,
         conversion_fields={'completed_at': now_ms, 'onnx_sha256': onnx_sha256,
                            'onnx_summary': onnx_summary or {}})
 
@@ -1104,17 +1298,34 @@ def check_onnx_against_record(structure: Dict[str, Any], arch: str, network_inpu
                      f'expected FLOAT {expected_input}')
     outputs = structure['outputs']
     quoted = ', '.join(f'{o["name"]}={o["shape"]}:{o["dtype"]}' for o in outputs)
-    expected_count = 1 if arch == 'yolo' else 2
+    seg = arch == 'rf_detr_seg'
+    grid = network_input // RFDETR_SEG_MASK_DOWNSAMPLE
+    expected_count = 1 if arch == 'yolo' else (3 if seg else 2)
     if len(outputs) != expected_count:
         contract = (f'[1, {num_classes + 4}, N]' if arch == 'yolo'
-                    else f'[1, Q, 4] + [1, Q, {num_classes + 1}]')
+                    else f'[1, Q, 4] + [1, Q, {num_classes + 1}]'
+                    + (f' + [1, Q, {grid}, {grid}]' if seg else ''))
         raise ConversionValidationError(
             'output', f'expected exactly {expected_count} output{"s" if expected_count > 1 else ""} '
                       f'{contract}; got {len(outputs)}: [{quoted}]')
-    for o in outputs:
-        if o['dtype'] != 'FLOAT' or not _static(o['shape']) or len(o['shape']) != 3 or o['shape'][0] != 1:
+    if seg:
+        # Seg_Output_Contract (Req 7.6): two rank-3 tensors and one rank-4
+        # mask tensor, static FLOAT batch 1 -- the per-output rank test is
+        # (3, 3, 4), not rank 3 for every output (C30).
+        for o in outputs:
+            if o['dtype'] != 'FLOAT' or not _static(o['shape']) or len(o['shape']) not in (3, 4) \
+                    or o['shape'][0] != 1:
+                raise ConversionValidationError(
+                    'output', f'outputs must be static FLOAT batch-1 tensors of rank 3 (boxes, logits) '
+                              f'and rank 4 (masks); got [{quoted}]')
+        if sorted(len(o['shape']) for o in outputs) != [3, 3, 4]:
             raise ConversionValidationError(
-                'output', f'outputs must be static FLOAT rank-3 batch-1 tensors; got [{quoted}]')
+                'output', f'expected two rank-3 outputs and one rank-4 mask output; got [{quoted}]')
+    else:
+        for o in outputs:
+            if o['dtype'] != 'FLOAT' or not _static(o['shape']) or len(o['shape']) != 3 or o['shape'][0] != 1:
+                raise ConversionValidationError(
+                    'output', f'outputs must be static FLOAT rank-3 batch-1 tensors; got [{quoted}]')
     summary: Dict[str, Any] = {
         'ir_version': structure['ir_version'],
         'opset': opset,
@@ -1131,6 +1342,37 @@ def check_onnx_against_record(structure: Dict[str, Any], arch: str, network_inpu
                           f'(num_classes {num_classes} + 4); an embedded-NMS or one-to-one export is '
                           f'[1, K, 6] and a segmentation head adds mask channels')
         summary['anchors'] = max(a, b)
+    elif seg:
+        # Identify by shape, never by position (C30): boxes is the rank-3
+        # shape ending in 4, logits the other rank-3 shape, masks the rank-4
+        # one. When both rank-3 shapes end in 4 (num_classes + 1 == 4, a
+        # three-class model) the graph's output names settle it -- dets /
+        # labels, which verify_seg_outputs required for exactly that case --
+        # falling back to output order as the detection branch does.
+        rank3 = [o for o in outputs if len(o['shape']) == 3]
+        masks = next(o['shape'] for o in outputs if len(o['shape']) == 4)
+        first, second = rank3
+        if first['shape'][2] == 4 and second['shape'][2] != 4:
+            boxes, logits = first['shape'], second['shape']
+        elif second['shape'][2] == 4 and first['shape'][2] != 4:
+            boxes, logits = second['shape'], first['shape']
+        else:
+            names = [o['name'] for o in rank3]
+            if 'labels' in names and 'dets' not in names:
+                logits = rank3[names.index('labels')]['shape']
+                boxes = rank3[1 - names.index('labels')]['shape']
+            elif 'dets' in names:
+                boxes = rank3[names.index('dets')]['shape']
+                logits = rank3[1 - names.index('dets')]['shape']
+            else:
+                boxes, logits = first['shape'], second['shape']
+        if (boxes[2] != 4 or boxes[1] != logits[1] or masks[1] != boxes[1]
+                or logits[2] != num_classes + 1 or masks[2] != grid or masks[3] != grid):
+            raise ConversionValidationError(
+                'output', f'outputs [{quoted}] are not [1, Q, 4] + [1, Q, {num_classes + 1}] + '
+                          f'[1, Q, {grid}, {grid}] (num_classes {num_classes} + 1 background slot; '
+                          f'mask grid network input {network_input} // {RFDETR_SEG_MASK_DOWNSAMPLE})')
+        summary['top_k'] = boxes[1]
     else:
         shapes = [o['shape'] for o in outputs]
         boxes = next((s for s in shapes if s[2] == 4), None)

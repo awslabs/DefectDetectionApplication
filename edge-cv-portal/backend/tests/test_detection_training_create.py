@@ -13,12 +13,18 @@ Two halves:
    MetricDefinitions, no InputDataConfig, no network isolation) and persists
    the Detection_Record_Fields; wrong manifest / bad hyperparameters -> 400
    with no SageMaker call; GET hydrates metrics from FinalMetricDataList.
+3. RF-DETR-Seg path (rfdetr-seg-support Group 5, section 5 below) —
+   `model_type='instance_segmentation'` launches train_rfdetr_seg.py with the
+   Seg env and MetricDefinitions, persists the Seg record (mask_threshold,
+   top_k, output_mode, no iou_threshold), every 400 of Req 5.1 / 5.2 / 5.4 /
+   5.5 and the Seg_Switch 403 before the access check (Req 15.2).
 
 Fixture conventions follow test_onnx_compile_diagnostics_units.py (module env
 on the moto aws_stack, FakeSageMakerService recording stub, own table/bucket).
 
 # Validates: Requirements 1.1, 1.2, 1.3, 2.1, 2.4, 2.5, 3.1, 3.3, 3.4, 3.6,
 # 3.7, 3.8, 3.10, 4.1, 4.2, 4.3, 9.2
+# rfdetr-seg-support: Requirements 5.1, 5.2, 5.3, 5.4, 5.5, 5.7, 15.2, 15.3, 17.1
 """
 import importlib.util
 import json
@@ -116,6 +122,7 @@ def fresh_service():
 CLASSIFICATION_MANIFEST_KEY = "manifests/classification.manifest"
 DETECTION_MANIFEST_KEY = "labeled/labeling-abc/output.manifest"
 GT_DETECTION_MANIFEST_KEY = "labeled/gt-plates/output.manifest"
+INSTANCE_MANIFEST_KEY = "labeled/labeling-inst/output.manifest"
 IMAGE_KEY = "images/frame_0001.jpg"
 
 
@@ -146,6 +153,27 @@ def _detection_line(bucket, attr="bounding-box", class_map=None):
             "human-annotated": "yes",
             "creation-date": "2026-09-12T00:00:00",
             "job-name": attr,
+        },
+    })
+
+
+def _instance_line(bucket):
+    """An Instance_Manifest line (rfdetr-seg-support Req 3.1): an 8x4 image
+    with one 2x2 instance at (1, 1); the rle is its Canonical_RLE."""
+    return json.dumps({
+        "source-ref": f"s3://{bucket}/{IMAGE_KEY}",
+        "instance-segmentation": {
+            "image_size": [{"width": 8, "height": 4, "depth": 3}],
+            "annotations": [{"class_id": 0, "left": 1, "top": 1, "width": 2,
+                             "height": 2, "rle": "5 2 2 2 21"}],
+        },
+        "instance-segmentation-metadata": {
+            "objects": [{"confidence": 1.0}],
+            "class-map": {"0": "blue_plate"},
+            "type": "groundtruth/instance-segmentation",
+            "human-annotated": "yes",
+            "creation-date": "2026-11-22T00:00:00",
+            "job-name": "labeling-inst",
         },
     })
 
@@ -195,6 +223,8 @@ def env(aws_stack):
     s3.put_object(Bucket=USECASE_BUCKET, Key=GT_DETECTION_MANIFEST_KEY,
                   Body=(_detection_line(USECASE_BUCKET, attr="plates-bbox",
                                         class_map={"1": "luggage", "0": "plate"}) + "\n").encode())
+    s3.put_object(Bucket=USECASE_BUCKET, Key=INSTANCE_MANIFEST_KEY,
+                  Body=(_instance_line(USECASE_BUCKET) + "\n").encode())
 
     training = _load_module("training.py", "portal_training_detection")
 
@@ -364,6 +394,65 @@ def test_lfv_detection_manifest_still_goes_through_marketplace_validator(env):
     assert body["error"] == "Manifest validation failed"
     assert "Manifest Transformer" in body["suggestion"]
     assert svc.create_training_calls == []
+
+
+INSTANCE_MISMATCH_ERROR = (
+    "Manifest is an instance-segmentation manifest; it trains RF-DETR-Seg "
+    "(model_type instance_segmentation), not the Marketplace "
+    "classification/segmentation model.")
+
+
+@pytest.mark.parametrize("model_type", ["segmentation", "classification"])
+def test_lfv_rejects_an_instance_manifest_naming_instance_segmentation(env, model_type):
+    """rfdetr-seg-support Req 3.2 / 3.6 (task 3.3): an Instance_Manifest offered
+    to the Marketplace path gets the validator's early-return 400 naming
+    model_type instance_segmentation -- not the Ground Truth "requires
+    transformation" dead end -- and no SageMaker call."""
+    svc = fresh_service()
+    status, body = create(env, lfv_body(
+        env, model_type=model_type,
+        dataset_manifest_s3=f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}"))
+
+    assert status == 400, body
+    assert body["error"] == "Manifest validation failed"
+    assert body["details"] == [INSTANCE_MISMATCH_ERROR]
+    assert "instance_segmentation" in body["details"][0]
+    assert body["detected_attributes"] == [
+        "source-ref", "instance-segmentation", "instance-segmentation-metadata"]
+    assert body["required_attributes"] == []
+    assert "transformation_needed" not in body
+    assert svc.create_training_calls == []
+
+
+@pytest.mark.parametrize("model_type", ["segmentation", "classification"])
+def test_validate_marketplace_manifest_early_returns_on_an_instance_manifest(env, model_type):
+    """The validator's own result has the task-type-mismatch shape: no
+    transformation_needed, no suggestion, no field mapping (design section 5)."""
+    usecase = {
+        "usecase_id": env.usecase_id, "account_id": ACCOUNT_ID,
+        "s3_bucket": USECASE_BUCKET, "region": REGION,
+        "cross_account_role_arn": f"arn:aws:iam::{ACCOUNT_ID}:root",
+    }
+
+    result = env.training.validate_marketplace_manifest(
+        f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}", usecase, model_type)
+
+    assert result == {
+        "valid": False,
+        "errors": [INSTANCE_MISMATCH_ERROR],
+        "message": "Task type mismatch: manifest is instance segmentation",
+        "detected_attributes": [
+            "source-ref", "instance-segmentation", "instance-segmentation-metadata"],
+    }
+
+    # The existing paths are untouched: a classification manifest validates,
+    # a bounding-box manifest still takes the transformation branch.
+    ok = env.training.validate_marketplace_manifest(
+        f"s3://{USECASE_BUCKET}/{CLASSIFICATION_MANIFEST_KEY}", usecase, "classification")
+    assert ok["valid"] is True
+    bbox = env.training.validate_marketplace_manifest(
+        f"s3://{USECASE_BUCKET}/{DETECTION_MANIFEST_KEY}", usecase, model_type)
+    assert bbox["valid"] is False and bbox["transformation_needed"] is True
 
 
 def test_lfv_get_does_not_touch_metrics(env):
@@ -1163,3 +1252,683 @@ def test_yolo_request_without_arch_or_base_model_is_unchanged(env):
     }
     assert det["base_model"] == _published_descriptor("yolo", "yolo11s.pt")
     assert "top_k" not in det and "rfdetr_size" not in det and "resolution" not in det
+
+
+# ---------------------------------------------------------------------------
+# 5. RF-DETR-Seg request shape, 400s, base-model matrix and the Seg_Switch
+#    (rfdetr-seg-support tasks 5.1-5.3; Req 5.1-5.5, 5.7, 15.2, 15.3, 17.1).
+#    The LFV / YOLO / RF-DETR cases above are the preservation pins and are
+#    unmodified; `env.training.DETECTION_METRIC_DEFINITIONS` is still read
+#    off the handler module by test_yolo_request_without_arch_or_base_model_is_unchanged.
+# ---------------------------------------------------------------------------
+
+# Exactly what train_rfdetr_seg.py reads (detection_job_environment for the
+# Seg arch): RFDETR_SEG_SIZE instead of RFDETR_SIZE, no IOU, no SCORE, no MASK.
+SEG_ENV_KEYS = {"MANIFEST_S3", "RFDETR_SEG_SIZE", "RESOLUTION", "EPOCHS", "BATCH",
+                "GRAD_ACCUM", "LR", "PATIENCE", "ONNX_OPSET"}
+# The Seg Detection_Record_Fields (design "Portal records"): the RF-DETR set
+# with rfdetr_seg_size for rfdetr_size, plus mask_threshold and output_mode.
+SEG_RECORD_KEYS = {
+    "detection_arch", "network_input_width", "network_input_height", "class_names",
+    "num_classes", "score_threshold", "mask_threshold", "top_k", "preserve_aspect",
+    "rfdetr_seg_size", "resolution", "epochs", "batch", "grad_accum", "lr", "patience",
+    "onnx_opset", "sourcedir_s3", "output_mode",
+}
+DETECTION_METRIC_NAMES = {"test:mAP50", "test:mAP50-95", "test:precision", "test:recall"}
+SEG_METRIC_NAMES = DETECTION_METRIC_NAMES | {"test:mask-mAP50", "test:mask-mAP50-95"}
+SEG_SOURCEDIR_MEMBERS = ["dedupe_frames.py", "manifest_to_detector_dataset.py",
+                         "requirements.txt", "train_rfdetr.py", "train_rfdetr_seg.py"]
+SEG_DISABLED_ERROR = "RF-DETR-Seg is disabled on this portal"
+SEMANTIC_MANIFEST_KEY = "labeled/semantic/output.manifest"
+
+
+def _semantic_line(bucket):
+    """An LFV semantic-segmentation line (anomaly-mask-ref), the manifest
+    validate_detection_manifest_entry(expected='instance') names precisely."""
+    return json.dumps({
+        "source-ref": f"s3://{bucket}/{IMAGE_KEY}",
+        "anomaly-label": 1,
+        "anomaly-label-metadata": {
+            "class-name": "anomaly", "confidence": 1.0,
+            "type": "groundtruth/image-classification", "job-name": "j",
+            "human-annotated": "yes", "creation-date": "2026-09-12T00:00:00",
+        },
+        "anomaly-mask-ref": f"s3://{bucket}/masks/frame_0001.png",
+        "anomaly-mask-ref-metadata": {
+            "internal-color-map": {"0": {"class-name": "BACKGROUND", "hex-color": "#ffffff"}},
+            "type": "groundtruth/semantic-segmentation", "job-name": "j",
+            "human-annotated": "yes", "creation-date": "2026-09-12T00:00:00",
+        },
+    })
+
+
+@pytest.fixture
+def all_arch_code_dir(env, monkeypatch):
+    """Stage a code dir holding the THREE entry points flat, the way the CDK
+    TrainingHandler asset does: the real repo files (train_rfdetr_seg.py
+    imports train_rfdetr.py as a sibling, so build_sourcedir_tarball bundles
+    both for the Seg arch). No `_common.py`, so the YOLO tarball keeps its
+    pinned four members."""
+    code_dir = tempfile.mkdtemp(prefix="dda-all-arch-code-")
+    for rel in ("datasets/detection_training/train.py",
+                "datasets/detection_training/requirements.txt",
+                "datasets/detection_training/train_rfdetr.py",
+                "datasets/detection_training/requirements-rfdetr.txt",
+                "datasets/detection_training/train_rfdetr_seg.py",
+                "datasets/manifest_to_detector_dataset.py",
+                "datasets/dedupe_frames.py"):
+        shutil.copy(os.path.join(_REPO_ROOT, rel), code_dir)
+    monkeypatch.setenv("DETECTION_TRAINING_CODE_DIR", code_dir)
+    yield code_dir
+    shutil.rmtree(code_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def seg_switch(monkeypatch):
+    """Set the Seg_Switch for one test ('false' = OFF, 'true' = ON, None =
+    absent, which rfdetr_seg_enabled reads as ON)."""
+    def _set(value):
+        if value is None:
+            monkeypatch.delenv("PORTAL_RFDETR_SEG_ENABLED", raising=False)
+        else:
+            monkeypatch.setenv("PORTAL_RFDETR_SEG_ENABLED", value)
+    _set(None)
+    return _set
+
+
+def seg_body(env, **overrides):
+    body = {
+        "usecase_id": env.usecase_id,
+        "model_source": "marketplace",   # ignored for the detection model types
+        "model_name": "blue-plate-seg",
+        "model_version": "1.0.0",
+        "model_type": "instance_segmentation",
+        "dataset_manifest_s3": f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}",
+    }
+    body.update(overrides)
+    return body
+
+
+def _record(env, training_id):
+    return env.training_jobs.get_item(Key={"training_id": training_id})["Item"]
+
+
+def _audit_details(aws_stack, training_id):
+    entries = [e for e in aws_stack.tables.audit_log.scan()["Items"]
+               if e.get("resource_id") == training_id and e.get("action") == "create_training_job"]
+    assert len(entries) == 1, entries
+    return entries[0]["details"]
+
+
+def _completed_seg_base_job(env, svc):
+    """A Completed instance_segmentation job of this use case with its
+    artifact_s3 persisted by GET — the record a Seg `training_job` base
+    resolves against. Returns (training_id, artifact_s3)."""
+    status, created = create(env, seg_body(env, model_name="base-rf-detr-seg", model_version="1.0.0"))
+    assert status == 201, created
+    _complete(svc, created["training_job_name"])
+    status, job = get(env, created["training_id"])
+    assert status == 200 and job["status"] == "Completed", job
+    assert job["model_type"] == "instance_segmentation"
+    assert job["artifact_s3"].endswith("/output/model.tar.gz")
+    return created["training_id"], job["artifact_s3"]
+
+
+# --- (1) request shape: entry point, env, MetricDefinitions, sourcedir, record
+
+def test_seg_request_shape_env_sourcedir_record_and_audit(env, aws_stack, all_arch_code_dir):
+    """Req 5.1 / 5.3 / 5.5: the Seg entry point, ITS env (RFDETR_SEG_SIZE, no
+    IOU, no thresholds), the Seg MetricDefinitions list, a sourcedir carrying
+    train_rfdetr.py as a sibling with requirements-rfdetr.txt renamed, and
+    the Seg record (model_type instance_segmentation, mask_threshold, top_k
+    = the size's query count, output_mode, no iou_threshold); the audit
+    entry names the model type too."""
+    svc = fresh_service()
+    status, body = create(env, seg_body(
+        env, detection_arch="rf_detr_seg", output_mode="instance",
+        hyperparameters={"rfdetr_seg_size": "medium", "resolution": 432, "epochs": 50,
+                         "batch": 2, "grad_accum": 8, "lr": 0.0002, "patience": 5,
+                         "score_threshold": 0.4, "mask_threshold": 0.6},
+    ))
+    assert status == 201, body
+    assert set(body) == {"training_id", "training_job_name", "training_job_arn", "status", "message"}
+    assert len(svc.create_training_calls) == 1
+    kw = svc.create_training_calls[0]
+    assert set(kw) == CREATE_TRAINING_JOB_KWARGS
+    # Entry point + env (passed both as HyperParameters and Environment).
+    assert kw["HyperParameters"]["sagemaker_program"] == "train_rfdetr_seg.py"
+    env_vars = kw["Environment"]
+    assert env_vars == {
+        "MANIFEST_S3": f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}",
+        "RFDETR_SEG_SIZE": "medium", "RESOLUTION": "432", "EPOCHS": "50", "BATCH": "2",
+        "GRAD_ACCUM": "8", "LR": "0.0002", "PATIENCE": "5", "ONNX_OPSET": "17",
+    }
+    assert set(env_vars) == SEG_ENV_KEYS
+    assert not any("IOU" in k or "SCORE" in k or "MASK" in k or "IMGSZ" in k for k in env_vars)
+    assert "RFDETR_SIZE" not in env_vars
+    assert "BASE_WEIGHTS_S3" not in env_vars and "BASE_WEIGHTS_MEMBER" not in env_vars
+    for k, v in env_vars.items():
+        assert kw["HyperParameters"][k] == v
+    assert kw["EnableNetworkIsolation"] is False
+    assert kw["ResourceConfig"] == {
+        "InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1, "VolumeSizeInGB": 60}
+    assert kw["StoppingCondition"] == {"MaxRuntimeInSeconds": 10800}
+    assert "InputDataConfig" not in kw
+    # MetricDefinitions = METRIC_DEFINITIONS_FOR_ARCH['rf_detr_seg'] (Req 4.7):
+    # the detection four plus the two mask-mAP regexes.
+    metric_defs = kw["AlgorithmSpecification"]["MetricDefinitions"]
+    assert metric_defs is env.training.METRIC_DEFINITIONS_FOR_ARCH["rf_detr_seg"]
+    assert {m["Name"] for m in metric_defs} == SEG_METRIC_NAMES
+    assert metric_defs[:4] == env.training.DETECTION_METRIC_DEFINITIONS
+    # Sourcedir: the Seg entry point, its sibling train_rfdetr.py, and
+    # requirements-rfdetr.txt renamed to requirements.txt; no train.py.
+    members, contents = _sourcedir_members(env, kw)
+    assert members == SEG_SOURCEDIR_MEMBERS
+    for name, src in (("requirements.txt", "requirements-rfdetr.txt"),
+                      ("train_rfdetr_seg.py", "train_rfdetr_seg.py"),
+                      ("train_rfdetr.py", "train_rfdetr.py")):
+        with open(os.path.join(all_arch_code_dir, src), "rb") as fh:
+            assert contents[name] == fh.read(), name
+    # Record.
+    item = _record(env, body["training_id"])
+    assert set(item.keys()) == LFV_ITEM_KEYS | {"runtime", "detection"}
+    assert item["model_type"] == "instance_segmentation" and item["runtime"] == "onnx"
+    assert "source" not in item
+    det = item["detection"]
+    assert set(det) == SEG_RECORD_KEYS | {"base_model"}
+    assert det["detection_arch"] == "rf_detr_seg"
+    assert det["rfdetr_seg_size"] == "medium"
+    assert det["resolution"] == 432
+    assert det["network_input_width"] == 432 and det["network_input_height"] == 432
+    assert det["preserve_aspect"] is False
+    assert det["score_threshold"] == Decimal("0.4")
+    assert det["mask_threshold"] == Decimal("0.6")
+    assert det["top_k"] == 200                       # RFDETR_SEG_QUERIES_FOR_SIZE['medium']
+    assert det["output_mode"] == "instance"
+    assert det["epochs"] == 50 and det["batch"] == 2 and det["patience"] == 5
+    assert det["grad_accum"] == 8 and det["lr"] == Decimal("0.0002") and det["onnx_opset"] == 17
+    assert det["class_names"] == ["blue_plate"] and det["num_classes"] == 1
+    assert det["sourcedir_s3"] == kw["HyperParameters"]["sagemaker_submit_directory"]
+    assert "iou_threshold" not in det
+    assert "rfdetr_size" not in det and "imgsz" not in det and "base_weights" not in det
+    assert det["base_model"] == _published_descriptor("rf_detr_seg", "medium")
+    # Audit entry (C33): the model type the handler was given.
+    details = _audit_details(aws_stack, body["training_id"])
+    assert details["model_type"] == "instance_segmentation"
+    assert details["detection_arch"] == "rf_detr_seg" and details["imgsz"] == 432
+
+
+def test_seg_detection_arch_defaults_and_resolution_native(env, all_arch_code_dir):
+    """Req 5.1 / 5.2 / 5.5: `detection_arch` absent -> rf_detr_seg; no
+    hyperparameters -> size small at its native 384, batch 4 x grad_accum 4,
+    thresholds 0.5, top_k 100, output_mode 'instance', published base 'small'."""
+    svc = fresh_service()
+    status, body = create(env, seg_body(env))
+    assert status == 201, body
+    kw = svc.create_training_calls[0]
+    assert kw["HyperParameters"]["sagemaker_program"] == "train_rfdetr_seg.py"
+    assert kw["Environment"] == {
+        "MANIFEST_S3": f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}",
+        "RFDETR_SEG_SIZE": "small", "RESOLUTION": "384", "EPOCHS": "100", "BATCH": "4",
+        "GRAD_ACCUM": "4", "LR": "0.0001", "PATIENCE": "10", "ONNX_OPSET": "17",
+    }
+    det = _record(env, body["training_id"])["detection"]
+    assert det["detection_arch"] == "rf_detr_seg" and det["rfdetr_seg_size"] == "small"
+    assert det["resolution"] == 384 and det["network_input_width"] == 384
+    assert det["score_threshold"] == Decimal("0.5") and det["mask_threshold"] == Decimal("0.5")
+    assert det["top_k"] == 100 and det["output_mode"] == "instance"
+    assert det["base_model"] == _published_descriptor("rf_detr_seg", "small")
+
+
+@pytest.mark.parametrize("size,native,top_k", [
+    ("nano", 312, 100), ("small", 384, 100), ("medium", 432, 200),
+    ("large", 504, 200), ("xlarge", 624, 300), ("2xlarge", 768, 300),
+])
+def test_seg_every_size_resolves_native_resolution_and_query_count(env, all_arch_code_dir, size, native, top_k):
+    """D4: all six Seg sizes launch; the record's top_k is the size's decoder
+    query count and the published base ref is the size."""
+    svc = fresh_service()
+    status, body = create(env, seg_body(env, hyperparameters={"rfdetr_seg_size": size}))
+    assert status == 201, body
+    assert svc.create_training_calls[0]["Environment"]["RFDETR_SEG_SIZE"] == size
+    assert svc.create_training_calls[0]["Environment"]["RESOLUTION"] == str(native)
+    det = _record(env, body["training_id"])["detection"]
+    assert det["top_k"] == top_k and det["resolution"] == native
+    assert det["base_model"]["ref"] == size
+
+
+def test_seg_nano_accepts_a_multiple_of_12(env, all_arch_code_dir):
+    """Req 5.2: the resolution rule is the selected size's block (12 for
+    nano), never 32 — 324 launches for nano."""
+    svc = fresh_service()
+    status, body = create(env, seg_body(
+        env, hyperparameters={"rfdetr_seg_size": "nano", "resolution": 324}))
+    assert status == 201, body
+    assert svc.create_training_calls[0]["Environment"]["RESOLUTION"] == "324"
+    det = _record(env, body["training_id"])["detection"]
+    assert det["resolution"] == 324 and det["network_input_width"] == 324
+
+
+@pytest.mark.parametrize("requested,stored", [
+    ("instance", "instance"), ("semantic", "semantic"), ("SEMANTIC", "semantic"),
+    (None, "instance"), ("", "instance"),
+])
+def test_seg_output_mode_is_a_top_level_field_persisted_on_the_record(env, all_arch_code_dir, requested, stored):
+    """Req 5.5: `output_mode` is read from the request's top level (default
+    'instance' when absent or empty, case-insensitive) and persisted; it
+    never reaches the env."""
+    svc = fresh_service()
+    overrides = {} if requested is None else {"output_mode": requested}
+    status, body = create(env, seg_body(env, **overrides))
+    assert status == 201, body
+    assert "OUTPUT_MODE" not in svc.create_training_calls[0]["Environment"]
+    assert _record(env, body["training_id"])["detection"]["output_mode"] == stored
+
+
+def test_seg_instance_type_and_max_runtime_stay_request_fields(env, all_arch_code_dir):
+    """Req 5.3: the instance type is the request's (default
+    DETECTION_DEFAULT_INSTANCE_TYPE, asserted above) — no per-size backend map."""
+    svc = fresh_service()
+    status, body = create(env, seg_body(
+        env, instance_type="ml.g5.xlarge", max_runtime_seconds=7200,
+        hyperparameters={"rfdetr_seg_size": "2xlarge"}))
+    assert status == 201, body
+    kw = svc.create_training_calls[0]
+    assert kw["ResourceConfig"]["InstanceType"] == "ml.g5.xlarge"
+    assert kw["StoppingCondition"] == {"MaxRuntimeInSeconds": 7200}
+    assert _record(env, body["training_id"])["instance_type"] == "ml.g5.xlarge"
+
+
+# --- (2) model_type <-> detection_arch cross-check (Req 5.1) -----------------
+
+@pytest.mark.parametrize("arch", ["rf_detr", "yolo"])
+def test_seg_model_type_with_a_detection_arch_is_400_with_no_side_effects(env, s3_spy, arch):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(env, detection_arch=arch))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == "instance_segmentation requires detection_arch rf_detr_seg"
+
+
+def test_seg_arch_with_object_detection_model_type_is_400_with_no_side_effects(env, s3_spy):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, detection_body(env, detection_arch="rf_detr_seg"))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == "detection_arch rf_detr_seg requires model_type instance_segmentation"
+
+
+def test_seg_unknown_detection_arch_is_still_the_vocabulary_400(env, s3_spy):
+    """An unknown arch on a Seg request gets normalize_detection_arch's
+    message (naming rf_detr_seg), not the cross-check text."""
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(env, detection_arch="mask-rcnn"))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error.startswith("Invalid detection_arch 'mask-rcnn'")
+    assert "rf_detr_seg" in error
+
+
+# --- (3) output_mode 400s (Req 5.5) -----------------------------------------
+
+@pytest.mark.parametrize("value", ["panoptic", "both", 7])
+def test_seg_output_mode_outside_the_vocabulary_is_400_with_no_side_effects(env, s3_spy, value):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(env, output_mode=value))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == f"Invalid output_mode '{value}': expected one of instance, semantic"
+
+
+@pytest.mark.parametrize("arch,mode", [("yolo", "instance"), ("rf_detr", "semantic")])
+def test_output_mode_on_a_detection_request_is_400_with_no_side_effects(env, s3_spy, arch, mode):
+    """A YOLO / RF-DETR request cannot carry a silent no-op output_mode."""
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, detection_body(env, detection_arch=arch, output_mode=mode))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == "output_mode applies to instance_segmentation only"
+
+
+# --- (4) hyperparameter 400s (Req 5.2) --------------------------------------
+
+@pytest.mark.parametrize("hp,field", [
+    ({"rfdetr_seg_size": "tiny"}, "rfdetr_seg_size"),
+    ({"resolution": 320}, "resolution"),                       # not a multiple of 24 (small)
+    ({"rfdetr_seg_size": "small", "resolution": 324}, "resolution"),  # 12-multiple, not 24
+    ({"resolution": 1176}, "resolution"),                      # above 1152
+    ({"mask_threshold": 1.0}, "mask_threshold"),
+    ({"mask_threshold": 0}, "mask_threshold"),
+    ({"score_threshold": 1.5}, "score_threshold"),
+    ({"grad_accum": 0}, "grad_accum"),
+    ({"lr": 1.0}, "lr"),
+    ({"iou_threshold": 0.5}, "iou_threshold"),                 # no IoU on a set-based decoder
+    ({"rfdetr_size": "small"}, "rfdetr_size"),                 # the detection size knob
+    ({"imgsz": 640}, "imgsz"),                                 # the YOLO knob
+])
+def test_seg_bad_hyperparameter_is_400_with_no_side_effects(env, s3_spy, hp, field):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(env, hyperparameters=hp))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert field in error
+
+
+def test_seg_resolution_message_names_the_block_and_the_seg_bounds(env, s3_spy):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(env, hyperparameters={"resolution": 500}))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == ("Invalid hyperparameter 'resolution': must be a multiple of 24 "
+                     "between 240 and 1152 for RF-DETR-Seg small")
+
+
+# --- (5) manifest kind (Req 3.5 / 5.1) --------------------------------------
+
+def test_seg_request_with_a_bbox_manifest_is_400_with_no_side_effects(env, s3_spy):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(
+        env, dataset_manifest_s3=f"s3://{USECASE_BUCKET}/{DETECTION_MANIFEST_KEY}"))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == "RF-DETR-Seg requires an instance-segmentation manifest"
+    assert body["message"] == "Manifest is not an instance-segmentation manifest"
+    assert body["details"] == ["RF-DETR-Seg needs instance masks; this manifest has boxes only"]
+    assert body["detected_attributes"] == ["source-ref", "bounding-box", "bounding-box-metadata"]
+    assert "Manifest Transformer" not in json.dumps(body)
+
+
+def test_seg_request_with_a_semantic_manifest_is_400_naming_anomaly_mask_ref(env, s3_spy):
+    svc = fresh_service()
+    env.s3.put_object(Bucket=USECASE_BUCKET, Key=SEMANTIC_MANIFEST_KEY,
+                      Body=(_semantic_line(USECASE_BUCKET) + "\n").encode())
+    s3_spy.writes.clear()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(
+        env, dataset_manifest_s3=f"s3://{USECASE_BUCKET}/{SEMANTIC_MANIFEST_KEY}"))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == "RF-DETR-Seg requires an instance-segmentation manifest"
+    assert body["details"] == [
+        "Manifest is a semantic segmentation manifest (anomaly-mask-ref); "
+        "RF-DETR-Seg requires an instance-segmentation manifest"]
+    assert "Manifest Transformer" not in json.dumps(body)
+
+
+def test_detection_request_with_an_instance_manifest_keeps_the_bbox_400(env, s3_spy):
+    """The reverse: an RF-DETR (object_detection) request offered the
+    Instance_Manifest gets the unchanged bounding-box 400 (expected='bbox'
+    is byte-identical to the pre-Seg validator)."""
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, detection_body(
+        env, detection_arch="rf_detr",
+        dataset_manifest_s3=f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}"))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == "Object Detection requires a bounding-box manifest"
+    assert body["message"] == "Manifest is not an Object Detection manifest"
+    assert body["detected_attributes"] == [
+        "source-ref", "instance-segmentation", "instance-segmentation-metadata"]
+
+
+def test_validate_detection_manifest_expected_kinds(env):
+    """The handler-side validator forwards `expected` to the shared entry
+    check: 'instance' accepts the Instance_Manifest and names the model
+    type; the default is the pre-Seg bbox behaviour, message included."""
+    usecase = {
+        "usecase_id": env.usecase_id, "account_id": ACCOUNT_ID,
+        "s3_bucket": USECASE_BUCKET, "region": REGION,
+        "cross_account_role_arn": f"arn:aws:iam::{ACCOUNT_ID}:root",
+    }
+    instance = env.training.validate_detection_manifest(
+        f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}", usecase, expected="instance")
+    assert instance["valid"] is True, instance
+    assert instance["message"] == "Manifest is valid for instance_segmentation training"
+    assert instance["class_names"] == ["blue_plate"]
+    assert instance["attribute"] == "instance-segmentation"
+    bbox = env.training.validate_detection_manifest(
+        f"s3://{USECASE_BUCKET}/{DETECTION_MANIFEST_KEY}", usecase)
+    assert bbox["valid"] is True
+    assert bbox["message"] == "Manifest is valid for object_detection training"
+    assert bbox["attribute"] == "bounding-box"
+    crossed = env.training.validate_detection_manifest(
+        f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}", usecase)
+    assert crossed["valid"] is False
+    assert crossed["message"] == "Manifest is not an Object Detection manifest"
+
+
+# --- (6) base model (Req 5.4) -----------------------------------------------
+
+def test_seg_base_model_from_a_completed_seg_job_uses_the_rfdetr_checkpoint_member(env, all_arch_code_dir):
+    svc = fresh_service()
+    base_id, artifact_s3 = _completed_seg_base_job(env, svc)
+    status, body = create(env, seg_body(env, base_model={"kind": "training_job", "ref": base_id}))
+    assert status == 201, body
+    kw = svc.create_training_calls[1]
+    assert kw["HyperParameters"]["sagemaker_program"] == "train_rfdetr_seg.py"
+    assert kw["Environment"]["BASE_WEIGHTS_S3"] == artifact_s3
+    assert kw["Environment"]["BASE_WEIGHTS_MEMBER"] == "checkpoint_best_total.pth"
+    assert set(kw["Environment"]) == SEG_ENV_KEYS | {"BASE_WEIGHTS_S3", "BASE_WEIGHTS_MEMBER"}
+    det = _record(env, body["training_id"])["detection"]
+    assert det["base_model"] == {
+        "kind": "training_job", "ref": base_id, "weights_s3": artifact_s3,
+        "member": "checkpoint_best_total.pth", "detection_arch": "rf_detr_seg",
+        "class_names": ["blue_plate"],
+    }
+
+
+@pytest.mark.parametrize("base_arch,request_arch,expected", [
+    ("rf_detr", "rf_detr_seg", "is a rf_detr detector; cannot start an rf_detr_seg run from it"),
+    ("yolo", "rf_detr_seg", "is a yolo detector; cannot start an rf_detr_seg run from it"),
+    ("rf_detr_seg", "rf_detr", "is a rf_detr_seg detector; cannot start an rf_detr run from it"),
+    ("rf_detr_seg", "yolo", "is a rf_detr_seg detector; cannot start a yolo run from it"),
+])
+def test_seg_base_model_arch_mismatch_is_400_naming_both_archs(
+        env, all_arch_code_dir, s3_spy, base_arch, request_arch, expected):
+    """A detection checkpoint offered as a Seg base, or the reverse, is a 400
+    naming both archs, with nothing staged for the rejected request."""
+    svc = fresh_service()
+    if base_arch == "rf_detr_seg":
+        base_id, _artifact = _completed_seg_base_job(env, svc)
+        base_name = "base-rf-detr-seg v1.0.0"
+    else:
+        base_id, _artifact = _completed_base_job(env, svc, arch=base_arch)
+        base_name = f"base-{base_arch.replace('_', '-')} v1.0.0"
+    s3_spy.writes.clear()          # the base job legitimately staged its own sourcedir
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    base_model = {"kind": "training_job", "ref": base_id}
+    if request_arch == "rf_detr_seg":
+        request = seg_body(env, base_model=base_model)
+    else:
+        request = detection_body(env, detection_arch=request_arch, base_model=base_model)
+    status, body = create(env, request)
+    error = _assert_rejected_without_side_effects(
+        env, svc, s3_spy, status, body, n_before, expected_calls=1)
+    assert base_name in error
+    assert expected in error
+
+
+def test_seg_base_model_from_an_imported_seg_checkpoint(env, all_arch_code_dir, s3_spy):
+    """`imported` -> an Imported_Model whose metadata.fine_tunable.arch is
+    rf_detr_seg (its bare checkpoint, no member); a detection import is a 400
+    naming both archs."""
+    svc = fresh_service()
+    seg_ref, det_ref = str(uuid.uuid4()), str(uuid.uuid4())
+    checkpoint_s3 = f"s3://{USECASE_BUCKET}/models/imported/{seg_ref}/checkpoint.pth"
+    env.training_jobs.put_item(Item={
+        "training_id": seg_ref, "usecase_id": env.usecase_id, "source": "imported",
+        "model_name": "seg-import", "model_version": "0.1.0",
+        "model_type": "instance_segmentation", "status": "Completed",
+        "metadata": {"fine_tunable": {"arch": "rf_detr_seg", "checkpoint_s3": checkpoint_s3,
+                                      "class_names": ["plate", "cup"]}},
+        "detection": {"detection_arch": "rf_detr_seg", "class_names": ["plate", "cup"]},
+    })
+    env.training_jobs.put_item(Item={
+        "training_id": det_ref, "usecase_id": env.usecase_id, "source": "imported",
+        "model_name": "det-import", "model_version": "0.1.0",
+        "model_type": "object_detection", "status": "Completed",
+        "metadata": {"fine_tunable": {"arch": "rf_detr",
+                                      "checkpoint_s3": f"s3://{USECASE_BUCKET}/models/imported/{det_ref}/c.pth"}},
+    })
+    status, body = create(env, seg_body(env, base_model={"kind": "imported", "ref": seg_ref}))
+    assert status == 201, body
+    kw = svc.create_training_calls[0]
+    assert kw["Environment"]["BASE_WEIGHTS_S3"] == checkpoint_s3
+    assert "BASE_WEIGHTS_MEMBER" not in kw["Environment"]
+    det = _record(env, body["training_id"])["detection"]
+    assert det["base_model"] == {
+        "kind": "imported", "ref": seg_ref, "weights_s3": checkpoint_s3, "member": None,
+        "detection_arch": "rf_detr_seg", "class_names": ["plate", "cup"],
+    }
+    # The manifest's class names win on the record; the base's are kept on the descriptor.
+    assert det["class_names"] == ["blue_plate"]
+    s3_spy.writes.clear()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(env, base_model={"kind": "imported", "ref": det_ref}))
+    error = _assert_rejected_without_side_effects(
+        env, svc, s3_spy, status, body, n_before, expected_calls=1)
+    assert "det-import v0.1.0 is a rf_detr model; cannot start an rf_detr_seg run from it" in error
+
+
+def test_seg_base_model_outside_this_usecase_is_400_with_no_leak(env, s3_spy):
+    """Cross-use-case refs are rejected as today: one message, no existence leak."""
+    svc = fresh_service()
+    ref = str(uuid.uuid4())
+    env.training_jobs.put_item(Item={
+        "training_id": ref, "usecase_id": f"uc-other-{uuid.uuid4()}",
+        "model_name": "their-seg", "model_version": "3.0.0",
+        "model_type": "instance_segmentation", "runtime": "onnx", "status": "Completed",
+        "artifact_s3": "s3://their-bucket/models/training/their-seg-x/output/model.tar.gz",
+        "detection": {"detection_arch": "rf_detr_seg", "class_names": ["plate"], "num_classes": 1},
+    })
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(env, base_model={"kind": "training_job", "ref": ref}))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == f"Base model training job '{ref}' was not found in this use case"
+    assert "their-seg" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("base_model,expected_ref", [
+    (None, "small"),
+    ({"kind": "published"}, "small"),
+    ({"kind": "published", "ref": "large"}, "large"),
+])
+def test_seg_published_base_model_adds_no_base_weights_env(env, all_arch_code_dir, base_model, expected_ref):
+    svc = fresh_service()
+    overrides = {} if base_model is None else {"base_model": base_model}
+    status, body = create(env, seg_body(env, **overrides))
+    assert status == 201, body
+    env_vars = svc.create_training_calls[0]["Environment"]
+    assert set(env_vars) == SEG_ENV_KEYS
+    assert "BASE_WEIGHTS_S3" not in svc.create_training_calls[0]["HyperParameters"]
+    det = _record(env, body["training_id"])["detection"]
+    assert det["base_model"] == _published_descriptor("rf_detr_seg", expected_ref)
+
+
+# --- (7) Seg_Switch: 403 before the access check, both states (Req 15.2 / 15.3)
+
+def _create_as(env, user_id, body):
+    response = env.training.create_training_job({
+        "httpMethod": "POST", "path": "/api/v1/training", "resource": "/training",
+        "body": json.dumps(body),
+        "requestContext": {"authorizer": {"claims": {
+            "sub": user_id, "email": f"{user_id}@example.com", "cognito:username": user_id}}},
+    }, None)
+    return response["statusCode"], json.loads(response["body"])
+
+
+def test_seg_switch_off_is_403_before_validation_with_no_side_effects(env, s3_spy, seg_switch):
+    """OFF: the Seg request is refused with the disabled message before any
+    body validation — a request that would otherwise fail three 400s (bad
+    arch, bad hyperparameters, missing manifest) still gets the 403 — and
+    nothing is staged, recorded or launched."""
+    seg_switch("false")
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(
+        env, detection_arch="yolo", hyperparameters={"imgsz": 7},
+        dataset_manifest_s3=f"s3://{USECASE_BUCKET}/labeled/does-not-exist/output.manifest"))
+    assert status == 403, body
+    assert body == {"error": SEG_DISABLED_ERROR}
+    assert svc.create_training_calls == []
+    assert s3_spy.writes == []
+    assert env.training_jobs.scan(Select="COUNT")["Count"] == n_before
+
+
+def test_seg_switch_off_precedes_the_access_check(env, aws_stack, seg_switch):
+    """A Viewer gets the disabled message when OFF (the switch is read before
+    check_user_access) and 'Insufficient permissions' when ON."""
+    viewer = f"user-{uuid.uuid4()}"
+    aws_stack.tables.user_roles.put_item(Item={
+        "user_id": viewer, "usecase_id": env.usecase_id, "role": "Viewer"})
+    svc = fresh_service()
+    seg_switch("false")
+    status, body = _create_as(env, viewer, seg_body(env))
+    assert (status, body) == (403, {"error": SEG_DISABLED_ERROR})
+    seg_switch("true")
+    status, body = _create_as(env, viewer, seg_body(env))
+    assert (status, body) == (403, {"error": "Insufficient permissions"})
+    assert svc.create_training_calls == []
+
+
+@pytest.mark.parametrize("value", [None, "true", "TRUE", "1"])
+def test_seg_switch_on_or_absent_launches(env, all_arch_code_dir, seg_switch, value):
+    """ON (explicit) or absent: the Seg request launches."""
+    seg_switch(value)
+    svc = fresh_service()
+    status, body = create(env, seg_body(env))
+    assert status == 201, body
+    assert svc.create_training_calls[0]["HyperParameters"]["sagemaker_program"] == "train_rfdetr_seg.py"
+
+
+@pytest.mark.parametrize("arch", ["yolo", "rf_detr"])
+def test_seg_switch_off_leaves_detection_and_lfv_requests_alone(env, both_arch_code_dir, seg_switch, arch):
+    """The switch gates only the Seg model type: YOLO / RF-DETR and an LFV
+    classification job launch exactly as with the switch ON."""
+    seg_switch("false")
+    svc = fresh_service()
+    status, body = create(env, detection_body(env, detection_arch=arch))
+    assert status == 201, body
+    assert _record(env, body["training_id"])["model_type"] == "object_detection"
+    status, body = create(env, lfv_body(env))
+    assert status == 201, body
+    assert len(svc.create_training_calls) == 2
+
+
+def test_seg_switch_off_still_rejects_an_unknown_model_type_first(env, seg_switch):
+    """The model-type vocabulary check is the dispatch and runs first: an
+    unknown type is the 400 whatever the switch says, and its message lists
+    instance_segmentation."""
+    seg_switch("false")
+    svc = fresh_service()
+    status, body = create(env, lfv_body(env, model_type="pose"))
+    assert status == 400
+    assert "instance_segmentation" in body["error"] and "object_detection" in body["error"]
+    assert svc.create_training_calls == []
+
+
+# --- (8) preservation: the detection archs' MetricDefinitions object -------
+
+@pytest.mark.parametrize("arch", ["yolo", "rf_detr"])
+def test_detection_archs_still_send_the_detection_metric_definitions_object(env, both_arch_code_dir, arch):
+    """Req 17.1 / 4.7: METRIC_DEFINITIONS_FOR_ARCH maps yolo / rf_detr to the
+    DETECTION_METRIC_DEFINITIONS object itself, so the SageMaker request and
+    the audit / record model_type are byte-identical to the pre-Seg handler."""
+    svc = fresh_service()
+    status, body = create(env, detection_body(env, detection_arch=arch))
+    assert status == 201, body
+    metric_defs = svc.create_training_calls[0]["AlgorithmSpecification"]["MetricDefinitions"]
+    assert metric_defs is env.training.DETECTION_METRIC_DEFINITIONS
+    assert {m["Name"] for m in metric_defs} == DETECTION_METRIC_NAMES
+    item = _record(env, body["training_id"])
+    assert item["model_type"] == "object_detection"
+    assert "output_mode" not in item["detection"] and "mask_threshold" not in item["detection"]
+
+
+def test_detection_audit_model_type_is_unchanged(env, aws_stack):
+    svc = fresh_service()
+    status, body = create(env, detection_body(env))
+    assert status == 201, body
+    details = _audit_details(aws_stack, body["training_id"])
+    assert details["model_type"] == "object_detection"
+    assert details["detection_arch"] == "yolo"
+    assert svc.create_training_calls[0]["HyperParameters"]["sagemaker_program"] == "train.py"

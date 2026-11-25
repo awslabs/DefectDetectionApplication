@@ -444,3 +444,20 @@ def test_requirements_rfdetr_pins():
     assert {"train", "onnx"} <= extras
     assert any(re.match(r"^onnxruntime==", ln) for ln in lines)
     assert "numpy<2" in lines
+
+
+def test_requirements_rfdetr_pins_transformers():
+    # rfdetr 1.10.1 leaves `transformers` open (<6.0.0,>=5.1.0) and imports
+    # BackboneConfigMixin from its top level, which newer 5.x releases no
+    # longer export: the trainer DLC resolved 5.24.0 and `import rfdetr` failed
+    # (rfdetr-seg-support spike S5, run (ii) attempt 1; the two attempts with
+    # the pin trained, evaluated and exported). The pin is the exact version
+    # the detector-export-image lock carries, so trainer and exporter agree.
+    with open(os.path.join(_DETECTION_TRAINING, "requirements-rfdetr.txt")) as fh:
+        lines = [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
+    transformers = [ln for ln in lines if re.match(r"^transformers\b", ln)]
+    assert transformers == ["transformers==5.17.0"], lines
+    export_lock = os.path.join(_HERE, "..", "..", "detector-export-image", "requirements.lock")
+    with open(export_lock) as fh:
+        locked = [ln.strip() for ln in fh if ln.strip().startswith("transformers==")]
+    assert locked == transformers

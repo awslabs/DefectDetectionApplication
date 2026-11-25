@@ -89,6 +89,24 @@ RFDETR_PUBLISHED_PROBE = {
 }
 
 
+# RF-DETR-Seg (spec rfdetr-seg-support, task 7.2): the DDA-trained
+# checkpoint_best_total.pth of the Seg spike (S1b): a 1.10.1 PTL checkpoint
+# whose `args` is the TrainConfig dump (class_names, no model picks),
+# model_name RFDETRSegNano, 35 segmentation_head.* keys, a 3-slot head.
+RFDETR_SEG_OWN_PROBE = {
+    "kind": "rfdetr_checkpoint", "arch": "rf_detr_seg", "fine_tunable": True,
+    "num_classes": 2, "class_names": ["disc", "block"],
+    "evidence": {
+        "pickle_globals": [], "model_name": "RFDETRSegNano", "rfdetr_task": "segmentation",
+        "rfdetr_signals": {"class_embed": True, "enc_out_class_embed_groups": 13,
+                           "backbone.0.encoder.*": 223, "args_fields": [], "args_type": "dict",
+                           "state_dict_prefix": "", "n_tensors": 544,
+                           "segmentation_head_keys": 35, "args_segmentation_head": None},
+        "names_source": "args.class_names",
+    },
+}
+
+
 def other_kind(kind):
     """A probe result for a file that is not an ultralytics / RF-DETR checkpoint."""
     return {"kind": kind, "arch": None, "fine_tunable": False, "num_classes": None,

@@ -184,6 +184,38 @@ def test_rfdetr_pth_keeps_source_extension(harness):
     assert result["fine_tunable"]["checkpoint_s3"] == f"s3://{h['bucket']}/{sidecars[0]}"
 
 
+def test_rfdetr_seg_pth_descriptor_carries_the_probes_seg_arch(harness):
+    """rfdetr-seg-support task 7.5 (Req 7.7): the legacy export_format='pytorch'
+    import of an RF-DETR-Seg .pth packages it verbatim and posts the sidecar
+    descriptor with `arch` from the probe -- rf_detr_seg -- through the same
+    auto_import payload as a detection checkpoint (model_import admits that
+    arch once task 8.3 widens FINE_TUNABLE_ARCHES; the import Lambda is a
+    recorder here, so the payload itself is what is checked)."""
+    h = harness
+    src_bytes = _put_source(h, lambda p: fx.rfdetr_seg_checkpoint(p, envelope="training"),
+                            "uploads/checkpoint_best_total.pth")
+
+    status, result = _convert(h, "uploads/checkpoint_best_total.pth", model_name="disc seg")
+    assert status == 200, result
+    sidecars = _sidecars(h)
+    assert len(sidecars) == 1 and sidecars[0].endswith("/checkpoint.pth"), _keys(h)
+    stored = h["s3"].get_object(Bucket=h["bucket"], Key=sidecars[0])["Body"].read()
+    assert stored == src_bytes
+    expected = {
+        "arch": "rf_detr_seg",
+        "kind": "rfdetr_checkpoint",
+        "checkpoint_s3": f"s3://{h['bucket']}/{sidecars[0]}",
+        "class_names": ["disc", "block"],
+        "num_classes": 2,
+    }
+    assert result["fine_tunable"] == expected
+    assert len(h["lambda"].payloads) == 1
+    assert h["lambda"].payloads[0]["fine_tunable"] == expected
+    # The payload is the detection one key for key: nothing else changed here.
+    assert set(h["lambda"].payloads[0]) == {"usecase_id", "model_name", "model_version", "model_s3_uri",
+                                            "description", "fine_tunable"}
+
+
 # ---------------------------------------------------------------------------
 # TorchScript / state_dict → no sidecar, fine_tunable: null
 # ---------------------------------------------------------------------------

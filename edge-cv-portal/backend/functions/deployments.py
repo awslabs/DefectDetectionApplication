@@ -270,6 +270,26 @@ WORKFLOW_MIN_LOCAL_SERVER_VERSIONS = _fill_missing_arch_floors(
 WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
     'WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS')
 
+# The RF-DETR-Seg FEATURE floor (rfdetr-seg-support Requirement 14.8,
+# design DD8): the minimum LocalServer version per architecture that
+# carries the Seg device contract (the rf_detr_instance_segmentation stage
+# type, mask_rle in the Detection_List, the detections column and the
+# mask-forwarding marshal). An older LocalServer fails a Seg workflow at
+# model load in instance mode and runs the pre-Seg decoder in semantic
+# mode, so a workflow referencing a Seg model must never be deployed to a
+# device below this floor.
+#
+# Read from the SAME environment map the Component_Packager reads
+# (workflow_packaging.RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS), set in
+# compute-stack.ts on both Lambdas, and — like the stream floor and for the
+# same reason — NOT passed through _fill_missing_arch_floors: an arch with no
+# entry has NO LocalServer build known to carry the Seg contract, so it must
+# FAIL CLOSED (reject). Until the map is configured (the six Seg-capable
+# builds, spec group 20) it is empty and every Seg workflow is rejected on
+# every device, which is the intended pre-enablement state.
+WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
+    'WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS')
+
 # Minimum Greengrass Nucleus version required for DDA components
 # Nucleus is already installed on the device — we don't pin versions in deployments.
 # The DDA LocalServer recipe declares >=2.4.0 as a dependency.
@@ -3501,10 +3521,24 @@ def stream_feature_floor_for(arch):
     return WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS.get(arch)
 
 
+def rfdetr_seg_feature_floor_for(arch):
+    """The RF-DETR-Seg FEATURE floor for ``arch``, or None when that
+    architecture has no LocalServer build known to carry the Seg device
+    contract (rfdetr-seg-support Requirement 14.8, design DD8).
+
+    None is a rejection, never a pass, for the reason stream_feature_floor_
+    for gives: "no entry" means "no supporting build exists for this
+    lineage". Mirrors the packager's min_local_server_version_for(arch,
+    rfdetr_seg=True), which raises PackagingError in the same situation.
+    """
+    return WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS.get(arch)
+
+
 def check_local_server_compatibility(greengrass_client, thing_names,
                                      min_local_server_version,
                                      min_versions_by_arch=None,
-                                     stream_features=False):
+                                     stream_features=False,
+                                     rfdetr_seg=False):
     """
     Pre-submit compatibility check (Requirement 8.4): compare each target
     device's installed LocalServer component version against the
@@ -3538,6 +3572,17 @@ def check_local_server_compatibility(greengrass_client, thing_names,
     device. ``stream_features=False`` (the default) resolves exactly as
     before, so every workflow without the new node types is gated
     identically to pre-feature behaviour (Requirement 18.1).
+
+    ``rfdetr_seg=True`` (the workflow references an RF-DETR-Seg model —
+    the packager records this on the version item as
+    ``has_rfdetr_seg_model``, rfdetr-seg-support Requirement 14.8, design
+    DD8) applies the Seg feature floor the same way: each device's
+    effective minimum is raised to the MAXIMUM of the floor resolved so far
+    and WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS for the device's own
+    arch, and a device whose arch carries no entry is rejected outright
+    with a reason naming the architecture — also under a per-version
+    override. ``rfdetr_seg=False`` (the default) changes nothing, so every
+    workflow without a Seg model is gated exactly as before (17.1).
     """
     incompatible = []
     by_arch = min_versions_by_arch or {}
@@ -3587,6 +3632,26 @@ def check_local_server_compatibility(greengrass_client, thing_names,
                 continue
             effective_min = max(effective_min, feature_floor,
                                 key=_version_key)
+        if rfdetr_seg:
+            seg_floor = rfdetr_seg_feature_floor_for(arch)
+            if seg_floor is None:
+                # No build of this lineage carries the Seg contract: there
+                # is no version to name, so the reason names the arch.
+                incompatible.append({
+                    'device': thing_name,
+                    'local_server_version': installed,
+                    'min_local_server_version': None,
+                    'reason': (
+                        'This workflow uses an RF-DETR-Seg model, which '
+                        'requires a LocalServer build that supports it; '
+                        'no supported LocalServer version is configured '
+                        'for this device'
+                        + (f" (architecture '{arch}')" if arch else
+                           ' (its LocalServer architecture could not be '
+                           'determined)'))
+                })
+                continue
+            effective_min = max(effective_min, seg_floor, key=_version_key)
         if _version_key(installed) < _version_key(effective_min):
             incompatible.append({
                 'device': thing_name,
@@ -4600,11 +4665,21 @@ def create_workflow_deployment(body, user):
         # unfed appsrc for 120 s. Absent/false (every pre-feature workflow)
         # resolves the gate exactly as before (Requirement 18.1).
         stream_features = bool(version_item.get('has_stream_features'))
+        # RF-DETR-Seg feature floor (rfdetr-seg-support Requirement 14.8,
+        # design DD8): the packager records has_rfdetr_seg_model on the
+        # version item when a referenced model's record is an RF-DETR-Seg
+        # record, exactly as it records has_stream_features. When set, each
+        # device's floor is raised to the Seg floor for its own arch and a
+        # device whose arch has no entry is rejected, so a LocalServer
+        # without the Seg device contract never receives the workflow.
+        # Absent/false (every workflow without a Seg model) resolves the
+        # gate exactly as before (Requirement 17.1).
+        rfdetr_seg = bool(version_item.get('has_rfdetr_seg_model'))
         resolved_devices = resolve_target_thing_names(
             iot_client, target_devices, target_thing_group)
         incompatible = check_local_server_compatibility(
             greengrass_client, resolved_devices, min_local_server, by_arch,
-            stream_features=stream_features)
+            stream_features=stream_features, rfdetr_seg=rfdetr_seg)
         if incompatible:
             details = {
                 'workflow_id': workflow_id,
@@ -4621,6 +4696,14 @@ def create_workflow_deployment(body, user):
                 details['stream_features'] = True
                 details['stream_camera_min_local_server_versions'] = dict(
                     WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS)
+            if rfdetr_seg:
+                # Likewise only for a workflow referencing an RF-DETR-Seg
+                # model (rfdetr-seg-support 14.8): the configured Seg floor
+                # that produced the per-device minimums, so an operator can
+                # see which LocalServer build to publish or install.
+                details['rfdetr_seg_model'] = True
+                details['rfdetr_seg_min_local_server_versions'] = dict(
+                    WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS)
             return _workflow_error(
                 409, 'INCOMPATIBLE_LOCAL_SERVER',
                 'One or more target devices do not have a LocalServer '

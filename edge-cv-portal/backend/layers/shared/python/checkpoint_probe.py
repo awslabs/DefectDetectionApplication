@@ -57,7 +57,17 @@ Kinds and how they are told apart
     args(dict), epoch, callbacks, model_name, model_config[, ema_model]}``
     (which carries ``args.class_names``), as is the PTL ``.ckpt`` layout the
     loader normalises (``state_dict`` with ``model.`` prefix +
-    ``hyper_parameters``).
+    ``hyper_parameters``).  An RF-DETR-**Seg** checkpoint is the same kind
+    with ``arch='rf_detr_seg'``: the state dict carries the mask head
+    (``segmentation_head.*`` keys, counted in
+    ``evidence.rfdetr_signals.segmentation_head_keys``) and
+    ``evidence.rfdetr_task`` is ``'segmentation'`` instead of
+    ``'detection'``.  The state dict is the authoritative signal;
+    ``args.segmentation_head`` (``None`` when absent -- the published Seg
+    weights are stripped ``{model}``-only files and a 1.10.1 training
+    checkpoint's ``args`` is the TrainConfig dump) is recorded beside it, and
+    an explicit flag that contradicts the state dict is flagged as
+    ``task_signals_disagree``.  ``model_name`` (``RFDETRSeg*``) is optional.
 ``state_dict``
     Torch zip (or bare pickle) holding only tensors — a raw ``OrderedDict`` of
     tensors, or a dict whose ``state_dict``/``model`` member is one — with no
@@ -74,7 +84,7 @@ Kinds and how they are told apart
 
 ``fine_tunable`` is ``True`` only for ``ultralytics_checkpoint`` (loadable by
 ``YOLO(path)``) and ``rfdetr_checkpoint`` (loadable by
-``RFDETR*(pretrain_weights=path)``).
+``RFDETR*(pretrain_weights=path)`` / ``RFDETRSeg*(pretrain_weights=path)``).
 
 CLI: ``python3 checkpoint_probe.py <file> [<file> ...]`` prints one JSON
 object per path.
@@ -101,7 +111,12 @@ KINDS = (
     "legacy_torch",
     "unknown",
 )
-ARCHES = ("yolo", "rf_detr", None)
+# ``rf_detr_seg`` is an RF-DETR checkpoint whose state dict carries the mask
+# head (spec rfdetr-seg-support, Requirement 7.1 / 7.7; the mirrors
+# ``detection_training.DETECTION_ARCHES``, ``export_checkpoint.ARCHES`` and
+# ``model_import.FINE_TUNABLE_ARCHES`` are kept identical by
+# tests/test_rfdetr_seg_vocabulary_parity.py).
+ARCHES = ("yolo", "rf_detr", "rf_detr_seg", None)
 # The only kinds a portal trainer can continue training from (Requirement 7.5):
 # ``YOLO(path)`` for ultralytics, ``RFDETR*(pretrain_weights=path)`` for RF-DETR.
 FINE_TUNABLE_KINDS = ("ultralytics_checkpoint", "rfdetr_checkpoint")
@@ -119,6 +134,18 @@ _TORCH_LEGACY_MAGIC = 0x1950A86A20F9469CFC6C
 
 _RFDETR_HEAD_KEYS = ("class_embed.weight", "class_embed.bias")
 _RFDETR_ARGS_FIELDS = ("num_queries", "group_detr", "encoder", "resolution")
+# RF-DETR-Seg mask head (rfdetr 1.10.1 ``LWDETR.__init__`` stores it as
+# ``self.segmentation_head``; its 35 tensors are ``segmentation_head.bias``,
+# ``.blocks.{0..3}.*``, ``.query_features_block.*``, ``.query_features_proj.*``,
+# ``.spatial_features_proj.*`` -- no ``mask_`` prefix exists). A non-empty
+# match is THE task signal: ``arch`` becomes ``rf_detr_seg`` and
+# ``evidence.rfdetr_task`` ``'segmentation'`` (Seg spec Requirement 7.1).
+_RFDETR_SEG_HEAD_PREFIXES = ("segmentation_head.",)
+# ``args`` / ``model_config`` picks recorded for the assessment: the detection
+# picks plus the ones that tell the Seg configs apart (``patch_size`` is 12 for
+# every Seg size, ``segmentation_head`` is the flag rfdetr's own loader reads).
+_RFDETR_ARGS_PICKS = ("encoder", "resolution", "num_queries", "group_detr", "num_classes",
+                      "segmentation_head", "patch_size", "num_windows", "dec_layers")
 _STORAGE_GLOBAL_PREFIXES = (
     "torch._utils._rebuild",
     "torch.storage._load_from_bytes",
@@ -547,7 +574,25 @@ def _classify_torch_tree(tree: Any, globals_: set[str], result: dict) -> None:
         if sd is not None and all(k in sd for k in _RFDETR_HEAD_KEYS):
             enc_out = [k for k in sd if k.startswith("transformer.enc_out_class_embed.")]
             backbone = [k for k in sd if k.startswith("backbone.0.encoder.")]
+            seg_keys = [k for k in sd if k.startswith(_RFDETR_SEG_HEAD_PREFIXES)]
             args_hits = [f for f in _RFDETR_ARGS_FIELDS if isinstance(args, dict) and f in args]
+            # Picks come from `args` first and from `model_config` second: a
+            # 1.10.1 training checkpoint's `args` is the TrainConfig dump
+            # (no model fields) and only the EMA file carries `model_config`
+            # (spike S1b / mismatch M-2); the published Seg weights have neither.
+            mc = top.get("model_config")
+            mc = mc if isinstance(mc, dict) else {}
+            picks: dict = {}
+            for k in _RFDETR_ARGS_PICKS:
+                for holder in (args if isinstance(args, dict) else {}, mc):
+                    if k in holder and isinstance(holder[k], (str, int, float, bool, type(None))):
+                        picks[k] = holder[k]
+                        break
+            # The flag rfdetr's own loader decides seg-vs-detection from; None
+            # (absent, every checkpoint seen live) is never a disagreement --
+            # only an explicit bool that contradicts the state dict is.
+            args_seg = picks.get("segmentation_head")
+            args_seg = args_seg if isinstance(args_seg, bool) else None
             ev["rfdetr_signals"] = {
                 "class_embed": True,
                 "enc_out_class_embed_groups": len({k.split(".")[2] for k in enc_out}) if enc_out else 0,
@@ -556,10 +601,17 @@ def _classify_torch_tree(tree: Any, globals_: set[str], result: dict) -> None:
                 "args_type": (args_node.callable if isinstance(args_node, _Opaque) else type(args_node).__name__),
                 "state_dict_prefix": prefix,
                 "n_tensors": len(sd),
+                "segmentation_head_keys": len(seg_keys),
+                "args_segmentation_head": args_seg,
             }
+            if args_seg is not None and args_seg != bool(seg_keys):
+                ev["rfdetr_signals"]["task_signals_disagree"] = True
             if enc_out or backbone or args_hits:
                 result["kind"] = "rfdetr_checkpoint"
-                result["arch"] = "rf_detr"
+                # The state dict is the authoritative task signal (M-2): a
+                # stripped or foreign file cannot become Seg on `args` alone.
+                result["arch"] = "rf_detr_seg" if seg_keys else "rf_detr"
+                ev["rfdetr_task"] = "segmentation" if seg_keys else "detection"
                 result["fine_tunable"] = True
                 bias = sd.get("class_embed.bias")
                 if bias and len(bias) == 1 and bias[0] > 0:
@@ -570,15 +622,13 @@ def _classify_torch_tree(tree: Any, globals_: set[str], result: dict) -> None:
                     names = _clean_class_names(args.get("class_names"))
                     if names:
                         ev["names_source"] = "args.class_names"
-                    for k in ("encoder", "resolution", "num_queries", "group_detr", "num_classes"):
-                        if k in args and isinstance(args[k], (str, int, float, bool, type(None))):
-                            ev.setdefault("args_picks", {})[k] = args[k]
+                if picks:
+                    ev["args_picks"] = picks
                 result["class_names"] = names
                 for k in ("model_name", "epoch"):
                     if k in top and isinstance(top[k], (str, int)):
                         ev[k] = top[k]
-                mc = top.get("model_config")
-                if isinstance(mc, dict) and isinstance(mc.get("num_classes"), int):
+                if isinstance(mc.get("num_classes"), int):
                     ev["model_config.num_classes"] = mc["num_classes"]
                 return
 

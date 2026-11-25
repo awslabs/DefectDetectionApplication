@@ -19,7 +19,7 @@
 import { Alert, Button, DateRangePicker, DateRangePickerProps, Form, FormField, Input, Modal, Select, SpaceBetween, TextContent } from "@cloudscape-design/components";
 import { useEffect, useState } from "react";
 import { css } from "@emotion/css";
-import { PredictionResult, retrainInputImages } from "api/WorkflowAPI";
+import { ExportManifestFormat, PredictionResult, retrainInputImages } from "api/WorkflowAPI";
 import { OptionDefinition } from "@cloudscape-design/components/internal/components/option/interfaces";
 import useAuth from "components/auth/authHook";
 
@@ -47,6 +47,23 @@ const imageClassificationOptions: OptionDefinition[] = [
   }
 ]
 
+/**
+ * The export's manifest (rfdetr-seg-support Requirement 11.4): the default
+ * keeps today's classification manifest and URL; the instance option writes
+ * the instance-segmentation manifest from the stored RF-DETR-Seg masks.
+ */
+export const MANIFEST_FORMAT_LABEL = "Manifest format";
+export const manifestFormatOptions: OptionDefinition[] = [
+  {
+    label: "Classification (default)",
+    value: "classification"
+  },
+  {
+    label: "Instance segmentation (RF-DETR-Seg masks)",
+    value: "instance"
+  }
+]
+
 const getTimestampInSeconds = (timestampInMs: number): number => Math.floor(timestampInMs / 1000);
 
 export default function DownloadResultModal({
@@ -58,6 +75,7 @@ export default function DownloadResultModal({
   const [dateRange, setTimeRange] = useState<DateRangePickerProps.Value | null>(null);
   const [imageQuantity, setImageQuantity] = useState(`${MIN_QUANTITY}`);
   const [selectedOption, setSelectedOption] = useState(imageClassificationOptions[0]);
+  const [manifestFormatOption, setManifestFormatOption] = useState(manifestFormatOptions[0]);
   const [showErrorAlert, setShowErrorAlert] = useState(NaN);
   const [isDownloading, setIsDownloading] = useState(false);
   const isReadyToDownload = !!dateRange && Number.parseInt(imageQuantity) > 0 && !!selectedOption;
@@ -66,6 +84,7 @@ export default function DownloadResultModal({
     setTimeRange(null);
     setImageQuantity(`${MIN_QUANTITY}`);
     setSelectedOption(imageClassificationOptions[0]);
+    setManifestFormatOption(manifestFormatOptions[0]);
     setShowErrorAlert(NaN);
     setIsDownloading(false);
   }
@@ -170,6 +189,19 @@ export default function DownloadResultModal({
                   options={imageClassificationOptions}
                 />
               </FormField>
+              <FormField
+                label={MANIFEST_FORMAT_LABEL}
+                description="The manifest written beside the images. Instance segmentation lists the stored RF-DETR-Seg masks of each result."
+              >
+                <Select
+                  data-testid="manifest-format-select"
+                  selectedOption={manifestFormatOption}
+                  onChange={({ detail }): void =>
+                    setManifestFormatOption(detail.selectedOption)
+                  }
+                  options={manifestFormatOptions}
+                />
+              </FormField>
               <FormField>
                 <Button
                   disabled={!isReadyToDownload}
@@ -186,7 +218,11 @@ export default function DownloadResultModal({
                       endTime,
                       inputImageLimit: Number.parseInt(imageQuantity),
                       predictionResult: selectedOption.value as PredictionResult,
-                      ...(authEnabled ? { token } : {})
+                      ...(authEnabled ? { token } : {}),
+                      // The default adds nothing to the request or the URL.
+                      ...(manifestFormatOption.value === "instance"
+                        ? { manifestFormat: manifestFormatOption.value as ExportManifestFormat }
+                        : {})
                     })
                       .then(() => setShowErrorAlert(NaN))
                       .catch((errorStatusCode) => setShowErrorAlert(errorStatusCode))

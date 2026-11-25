@@ -134,6 +134,18 @@ def _load_model_converter():
         "edge-cv-portal/backend/layers/shared/python/s3_cors.py",
         injected_modules=aws_stubs,
     )
+    # rfdetr-seg-support (tasks 7.2 / 6.3): model_converter imports the
+    # stdlib-only shared-layer detection_training (the RF-DETR-Seg off switch
+    # and the shared device-manifest builder). Loaded REAL, like
+    # test_preservation_secrets_packaging does for packaging.py; its own
+    # ``from checkpoint_probe import ...`` resolves to the stub above. None of
+    # the #8 sites under test reach it (the classification branch of
+    # generate_dda_package is untouched).
+    dtrain = load_module_from_path(
+        "detection_training_preservation",
+        "edge-cv-portal/backend/layers/shared/python/detection_training.py",
+        injected_modules={"checkpoint_probe": cp},
+    )
 
     return load_module_from_path(
         "model_converter_preservation",
@@ -142,6 +154,7 @@ def _load_model_converter():
             "shared_utils": su, **aws_stubs,
             "checkpoint_probe": cp,
             "detector_conversion": dconv,
+            "detection_training": dtrain,
             "s3_cors": s3_cors,
         },
     )

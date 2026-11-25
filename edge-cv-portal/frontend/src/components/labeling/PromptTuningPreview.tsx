@@ -146,8 +146,16 @@ const GSAM_PER_SAMPLE_BOUND_MS = 240_000;
  * polls `min(n × 240 + 60, 900) + 60` seconds (Requirement 3.9).
  */
 const GSAM_RUN_BOUND_CAP_MS = 900_000;
-/** The grounded-sam family accepts exactly these modalities (Req 3.3). */
-const GROUNDED_SAM_MODALITIES = ['Segmentation', 'ObjectDetection'];
+/**
+ * The grounded-sam family accepts exactly these modalities (Req 3.3;
+ * rfdetr-seg-support Requirement 2.1 adds InstanceSegmentation, which
+ * rides the worker contract as Segmentation) — the Preview_API's gate.
+ */
+const GROUNDED_SAM_MODALITIES = [
+  'Segmentation',
+  'ObjectDetection',
+  'InstanceSegmentation',
+];
 
 /**
  * Max_Image_Edge_Options — the six selectable Max_Image_Edge values, which
@@ -282,7 +290,8 @@ export function previewFewShotExamples(refs: {
  * Requirement 2.3): an `llm:`-prefixed identifier takes the pre-feature
  * rules verbatim; exactly `grounded-sam` takes the family's arm — no
  * detection-prompt rule and no token-budget rule (the family has neither
- * input), modality restricted to Segmentation and ObjectDetection, the
+ * input), modality restricted to the geometry modalities (Segmentation,
+ * InstanceSegmentation, ObjectDetection), the
  * same label-set and sample-count rules, plus one violation per
  * Prompt_Guardrail offender in Label_Set order using the shared
  * `promptOverrideGuardrails` wording, so the panel rejects exactly the
@@ -330,14 +339,15 @@ export function validatePreviewRunInputs(input: {
   }
 
   if (isGroundedSamModel) {
-    // The family's two geometry modalities, the Preview_API's wording
-    // (grounded-sam-prompt-tuning-preview Req 3.3). The Label_Set rules
-    // still apply beside a modality violation — the family has no
-    // Classification arm to auto-supply a fixed set, so the label rule is
-    // always decidable, keeping the enumerate-everything posture.
+    // The family's geometry modalities, the Preview_API's wording
+    // (grounded-sam-prompt-tuning-preview Req 3.3; rfdetr-seg-support
+    // Req 2.1). The Label_Set rules still apply beside a modality
+    // violation — the family has no Classification arm to auto-supply a
+    // fixed set, so the label rule is always decidable, keeping the
+    // enumerate-everything posture.
     if (!GROUNDED_SAM_MODALITIES.includes(input.taskType)) {
       violations.push(
-        'The grounded-sam family supports Segmentation and ObjectDetection'
+        'The grounded-sam family supports Segmentation, InstanceSegmentation and ObjectDetection'
       );
     }
     const labels = input.labelSet.map((l) => l.trim());
@@ -353,10 +363,14 @@ export function validatePreviewRunInputs(input: {
       violations.push('Label names must be distinct');
     }
   } else {
+    // The llm: family covers every DDA labeling modality, InstanceSegmentation
+    // included (rfdetr-seg-support Requirement 2.1; the Preview_API's
+    // VALID_MODALITIES).
     const modalities: string[] = [
       'Classification',
       'Segmentation',
       'ObjectDetection',
+      'InstanceSegmentation',
     ];
     if (!modalities.includes(input.taskType)) {
       violations.push(

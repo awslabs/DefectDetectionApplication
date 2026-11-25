@@ -39,6 +39,7 @@ import {
   MCP_COMPUTE_BACKEND_KEYS,
   MCP_LAYER_SOURCE_DIR,
   MCP_LOG_GROUP_NAME,
+  MCP_SERVER_VERSION,
   McpBackendKey,
   McpStack,
   McpStackProps,
@@ -256,6 +257,23 @@ describe('EdgeCVPortalMcpStack (unit app)', () => {
       Object.fromEntries(Object.entries(variables).map(([k, v]) => [k, worstCase(v)])),
     );
     expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThan(3000);
+  });
+
+  test('MCP_SERVER_VERSION equals the CDK constant and mcp_portal.__version__ (rfdetr-seg-support 14.6, C15)', () => {
+    // The deployed Lambda prefers the environment value over __version__
+    // (mcp_portal/server.py, auth_audit.py), so the two literals must move
+    // together: the CDK constant here and the package's __version__,
+    // read from the source file the way the backend floor-coverage tests
+    // read compute-stack.ts.
+    const variables = handlerOf(unit.template).Properties.Environment.Variables;
+    expect(variables.MCP_SERVER_VERSION).toBe(MCP_SERVER_VERSION);
+    const initSource = fs.readFileSync(
+      path.join(INFRA_DIR, '..', 'backend', 'functions', 'mcp_portal', '__init__.py'),
+      'utf8',
+    );
+    const match = initSource.match(/^__version__ = '(.+)'$/m);
+    expect(match).not.toBeNull();
+    expect(variables.MCP_SERVER_VERSION).toBe(match![1]);
   });
 
   test('the Advanced-tier dispatch-map parameter imports all 43 handler ARNs', () => {
