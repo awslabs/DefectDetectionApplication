@@ -6,9 +6,12 @@ Pure module — imported directly, no moto needed. conftest puts the shared
 layer on sys.path.
 
 # Validates: Requirements 2.2, 2.3, 2.4, 2.6, 3.2, 3.8, 3.9, 4.4, 5.3
+# Validates (rfdetr-seg-support): Requirements 1.1, 1.2, 1.3, 3.5, 4.7, 5.4, 6.1, 15.3, 17.1, 17.3
 """
 import io
+import json
 import os
+import re
 import tarfile
 import tempfile
 
@@ -71,6 +74,65 @@ def dda_classification_entry():
         'anomaly-label-metadata': {
             'class-name': 'anomaly', 'confidence': 1.0,
             'type': 'groundtruth/image-classification',
+            'job-name': 'j', 'human-annotated': 'yes', 'creation-date': 'x',
+        },
+    }
+
+
+def dda_instance_entry(class_map=None, n_instances=2):
+    """Shape written by dda_manifest._serialize_instance_segmentation (Seg spec Req 3.1):
+    one line per image, a box AND a Canonical_RLE per instance, GT-style metadata."""
+    class_map = class_map or {'0': 'scratch', '1': 'dent'}
+    return {
+        'source-ref': 's3://bucket/plates/frame_0001.jpg',
+        'instance-segmentation': {
+            'image_size': [{'width': 640, 'height': 480, 'depth': 3}],
+            'annotations': [
+                {'class_id': i % 2, 'left': 10 * i, 'top': 20, 'width': 30, 'height': 28,
+                 'rle': '12000 840 294360'}
+                for i in range(n_instances)
+            ],
+        },
+        'instance-segmentation-metadata': {
+            'objects': [{'confidence': 1.0} for _ in range(n_instances)],
+            'class-map': class_map,
+            'type': 'groundtruth/instance-segmentation',
+            'human-annotated': 'yes',
+            'creation-date': '2026-11-22T00:00:00',
+            'job-name': 'labeling-seg-1',
+        },
+    }
+
+
+def gt_instance_entry():
+    """A Ground Truth job-named instance-segmentation attribute."""
+    return {
+        'source-ref': 's3://bucket/frames/frame_0007.jpg',
+        'plates-inst': {
+            'image_size': [{'width': 1920, 'height': 1080, 'depth': 3}],
+            'annotations': [{'class_id': 1, 'left': 5, 'top': 5, 'width': 50, 'height': 50,
+                             'rle': '10 2500 2071090'}],
+        },
+        'plates-inst-metadata': {
+            'objects': [{'confidence': 0.9}],
+            'class-map': {'1': 'luggage', '0': 'plate'},
+            'type': 'groundtruth/instance-segmentation',
+            'human-annotated': 'yes',
+            'creation-date': '2026-11-22T00:00:00',
+            'job-name': 'plates-inst',
+        },
+    }
+
+
+def dda_semantic_entry():
+    """The LFV semantic-segmentation manifest line (anomaly-mask-ref PNG per image)."""
+    return {
+        'source-ref': 's3://bucket/img.jpg',
+        'anomaly-mask-ref': 's3://bucket/masks/img.png',
+        'anomaly-mask-ref-metadata': {
+            'internal-color-map': {'0': {'class-name': 'BACKGROUND', 'hex-color': '#ffffff'},
+                                   '1': {'class-name': 'scratch', 'hex-color': '#2ca02c'}},
+            'type': 'groundtruth/semantic-segmentation',
             'job-name': 'j', 'human-annotated': 'yes', 'creation-date': 'x',
         },
     }
@@ -384,12 +446,15 @@ RFDETR_RESOLUTION_ERROR = (
 # ---------------------------------------------------------------------------
 
 def test_detection_arch_vocabulary():
-    assert dt.DETECTION_ARCHES == ('yolo', 'rf_detr')
-    assert dt.ENTRY_POINT_FOR_ARCH == {'yolo': 'train.py', 'rf_detr': 'train_rfdetr.py'}
+    assert dt.DETECTION_ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg')
+    assert dt.ENTRY_POINT_FOR_ARCH == {
+        'yolo': 'train.py', 'rf_detr': 'train_rfdetr.py', 'rf_detr_seg': 'train_rfdetr_seg.py'}
     assert dt.REQUIREMENTS_FOR_ARCH == {
-        'yolo': 'requirements.txt', 'rf_detr': 'requirements-rfdetr.txt'}
+        'yolo': 'requirements.txt', 'rf_detr': 'requirements-rfdetr.txt',
+        'rf_detr_seg': 'requirements-rfdetr.txt'}
     assert dt.CHECKPOINT_MEMBER_FOR_ARCH == {
-        'yolo': 'best.pt', 'rf_detr': 'checkpoint_best_total.pth'}
+        'yolo': 'best.pt', 'rf_detr': 'checkpoint_best_total.pth',
+        'rf_detr_seg': 'checkpoint_best_total.pth'}
     assert dt.RFDETR_SIZES == {'nano': 384, 'small': 512, 'medium': 576, 'large': 704}
     assert dt.RFDETR_TOP_K == 300
     assert dt.RFDETR_STAGE_TYPE == 'rf_detr_object_detection'
@@ -641,12 +706,471 @@ def test_job_environment_unknown_arch_rejected():
 
 
 # ---------------------------------------------------------------------------
+# RF-DETR-Seg vocabulary and predicates (Seg spec Req 1.1, 1.3, 4.7, 15.3)
+# ---------------------------------------------------------------------------
+
+def test_rfdetr_seg_vocabulary():
+    assert dt.MODEL_TYPE_INSTANCE_SEGMENTATION == 'instance_segmentation'
+    assert dt.DETECTION_MODEL_TYPES == ('object_detection', 'instance_segmentation')
+    assert dt.DETR_FAMILY_ARCHES == ('rf_detr', 'rf_detr_seg')
+    assert dt.RFDETR_SEG_INSTANCE_STAGE_TYPE == 'rf_detr_instance_segmentation'
+    assert dt.RFDETR_SEG_SEMANTIC_STAGE_TYPE == 'rf_detr_semantic_segmentation'
+    assert dt.STAGE_TYPE_FOR_ARCH == {
+        'yolo': 'yolo_object_detection', 'rf_detr': 'rf_detr_object_detection',
+        'rf_detr_seg': 'rf_detr_instance_segmentation'}
+    assert dt.OUTPUT_MODES == ('instance', 'semantic') and dt.DEFAULT_OUTPUT_MODE == 'instance'
+    # A top-level request field, never a hyperparameter key (C5).
+    assert 'output_mode' not in dt.RFDETR_SEG_DEFAULTS
+    assert dt.RFDETR_SEG_SIZES == {'nano': 312, 'small': 384, 'medium': 432,
+                                   'large': 504, 'xlarge': 624, '2xlarge': 768}
+    assert dt.RFDETR_SEG_CLASS_FOR_SIZE == {
+        'nano': 'RFDETRSegNano', 'small': 'RFDETRSegSmall', 'medium': 'RFDETRSegMedium',
+        'large': 'RFDETRSegLarge', 'xlarge': 'RFDETRSegXLarge', '2xlarge': 'RFDETRSeg2XLarge'}
+    assert dt.RFDETR_SEG_QUERIES_FOR_SIZE == {'nano': 100, 'small': 100, 'medium': 200,
+                                              'large': 200, 'xlarge': 300, '2xlarge': 300}
+    assert dt.RFDETR_SEG_INPUT_BLOCK_FOR_SIZE == {'nano': 12, 'small': 24, 'medium': 24,
+                                                  'large': 24, 'xlarge': 24, '2xlarge': 24}
+    assert (dt.RFDETR_SEG_RESOLUTION_MIN, dt.RFDETR_SEG_RESOLUTION_MAX) == (240, 1152)
+    assert dt.RFDETR_SEG_MASK_DOWNSAMPLE == 4
+    assert dt.RFDETR_SEG_DEFAULTS == {
+        'rfdetr_seg_size': 'small', 'resolution': None, 'epochs': 100, 'batch': 4,
+        'grad_accum': 4, 'lr': 1e-4, 'patience': 10, 'score_threshold': 0.5,
+        'mask_threshold': 0.5, 'onnx_opset': 17}
+    assert dt.DEFAULTS_FOR_ARCH['rf_detr_seg'] is dt.RFDETR_SEG_DEFAULTS
+    assert dt.SOURCEDIR_SIBLINGS_FOR_ARCH == {
+        'yolo': (), 'rf_detr': (), 'rf_detr_seg': ('train_rfdetr.py',)}
+    assert dt._ARTICLE_FOR_ARCH['rf_detr_seg'] == 'an'
+    # Every arch-keyed map has exactly one entry per arch: map-driven callers
+    # need no special case.
+    for mapping in (dt.STAGE_TYPE_FOR_ARCH, dt.ENTRY_POINT_FOR_ARCH, dt.REQUIREMENTS_FOR_ARCH,
+                    dt.CHECKPOINT_MEMBER_FOR_ARCH, dt.DEFAULTS_FOR_ARCH,
+                    dt.SOURCEDIR_SIBLINGS_FOR_ARCH, dt.METRIC_DEFINITIONS_FOR_ARCH,
+                    dt._ARTICLE_FOR_ARCH):
+        assert set(mapping) == set(dt.DETECTION_ARCHES)
+    # ... and the two entry-point mirrors cover every entry point.
+    assert set(dt._SIBLINGS_FOR_ENTRY_POINT) == set(dt.ENTRY_POINT_FOR_ARCH.values())
+    assert set(dt._REQUIREMENTS_FOR_ENTRY_POINT) == set(dt.ENTRY_POINT_FOR_ARCH.values())
+    assert dt._SIBLINGS_FOR_ENTRY_POINT['train_rfdetr_seg.py'] == ('train_rfdetr.py',)
+    # The detection constants the RF-DETR spec pinned are untouched.
+    assert dt.RFDETR_DEFAULTS == {
+        'rfdetr_size': 'small', 'resolution': None, 'epochs': 100, 'batch': 4,
+        'grad_accum': 4, 'lr': 1e-4, 'patience': 10, 'score_threshold': 0.5, 'onnx_opset': 17}
+    assert (dt.RFDETR_RESOLUTION_STEP, dt.RFDETR_RESOLUTION_MIN, dt.RFDETR_RESOLUTION_MAX) == \
+        (32, 224, 1120)
+
+
+def test_metric_definitions_for_arch_identity_and_seg_extension():
+    # Identity, not equality (Req 4.7): the YOLO / RF-DETR SageMaker requests
+    # keep passing the very object they passed before.
+    assert dt.METRIC_DEFINITIONS_FOR_ARCH['yolo'] is dt.DETECTION_METRIC_DEFINITIONS
+    assert dt.METRIC_DEFINITIONS_FOR_ARCH['rf_detr'] is dt.DETECTION_METRIC_DEFINITIONS
+    seg = dt.METRIC_DEFINITIONS_FOR_ARCH['rf_detr_seg']
+    assert seg is dt.RFDETR_SEG_METRIC_DEFINITIONS
+    n = len(dt.DETECTION_METRIC_DEFINITIONS)
+    assert seg[:n] == dt.DETECTION_METRIC_DEFINITIONS
+    assert [m['Name'] for m in seg[n:]] == ['test:mask-mAP50', 'test:mask-mAP50-95']
+    line = ('TEST METRICS: {"test_map50": 0.91, "test_map50_95": 0.72, "test_precision": 0.9, '
+            '"test_recall": 0.8, "test_mask_map50": 0.85, "test_mask_map50_95": 0.61}')
+    found = {m['Name']: re.search(m['Regex'], line).group(1) for m in seg}
+    assert found == {'test:mAP50': '0.91', 'test:mAP50-95': '0.72', 'test:precision': '0.9',
+                     'test:recall': '0.8', 'test:mask-mAP50': '0.85', 'test:mask-mAP50-95': '0.61'}
+
+
+def test_is_detr_family():
+    assert dt.is_detr_family('rf_detr') is True
+    assert dt.is_detr_family('rf_detr_seg') is True
+    assert dt.is_detr_family('yolo') is False
+    assert dt.is_detr_family(None) is False
+    assert dt.is_detr_family('detr') is False
+
+
+@pytest.mark.parametrize('raw', ['rf_detr_seg', 'RF_DETR_SEG', ' rf_detr_seg '])
+def test_normalize_detection_arch_accepts_seg(raw):
+    assert dt.normalize_detection_arch(raw) == 'rf_detr_seg'
+
+
+@pytest.mark.parametrize('mode,expected', [
+    (None, 'rf_detr_instance_segmentation'),
+    ('instance', 'rf_detr_instance_segmentation'),
+    ('semantic', 'rf_detr_semantic_segmentation'),
+    (' Semantic ', 'rf_detr_semantic_segmentation'),
+])
+def test_stage_type_for_seg_modes(mode, expected):
+    assert dt.stage_type_for('rf_detr_seg', mode) == expected
+
+
+@pytest.mark.parametrize('arch,expected', [
+    ('yolo', 'yolo_object_detection'), ('rf_detr', 'rf_detr_object_detection'),
+])
+def test_stage_type_for_non_seg_arch_ignores_output_mode(arch, expected):
+    assert dt.stage_type_for(arch) == expected
+    assert dt.stage_type_for(arch, 'semantic') == expected
+    assert dt.stage_type_for(arch, 'instance') == expected
+    assert dt.stage_type_for(arch) == dt.STAGE_TYPE_FOR_ARCH[arch]
+
+
+def test_stage_type_for_rejects_unknown_mode_and_arch():
+    with pytest.raises(ValueError) as exc:
+        dt.stage_type_for('rf_detr_seg', 'panoptic')
+    assert 'output_mode' in str(exc.value)
+    with pytest.raises(ValueError) as exc:
+        dt.stage_type_for('detr')
+    assert 'detection_arch' in str(exc.value)
+
+
+def test_rfdetr_seg_enabled_reads_the_switch(monkeypatch):
+    monkeypatch.delenv('PORTAL_RFDETR_SEG_ENABLED', raising=False)
+    assert dt.rfdetr_seg_enabled() is True          # absent -> ON (DD7)
+    monkeypatch.setenv('PORTAL_RFDETR_SEG_ENABLED', 'true')
+    assert dt.rfdetr_seg_enabled() is True
+    monkeypatch.setenv('PORTAL_RFDETR_SEG_ENABLED', 'false')
+    assert dt.rfdetr_seg_enabled() is False
+    monkeypatch.setenv('PORTAL_RFDETR_SEG_ENABLED', ' FALSE ')
+    assert dt.rfdetr_seg_enabled() is False
+    monkeypatch.setenv('PORTAL_RFDETR_SEG_ENABLED', '')
+    assert dt.rfdetr_seg_enabled() is True
+
+
+@pytest.mark.parametrize('job,expected', [
+    ({'model_type': 'instance_segmentation', 'runtime': 'onnx'}, True),
+    ({'model_type': 'instance_segmentation', 'runtime': 'ONNX', 'source': 'trained'}, True),
+    ({'model_type': 'instance_segmentation'}, False),
+    ({'model_type': 'instance_segmentation', 'runtime': 'onnx', 'source': 'imported'}, False),
+    ({'model_type': 'segmentation', 'runtime': 'onnx'}, False),       # LFV semantic path
+])
+def test_is_trained_detection_record_seg(job, expected):
+    assert dt.is_trained_detection_record(job) is expected
+
+
+# ---------------------------------------------------------------------------
+# RF-DETR-Seg hyperparameter schema (Seg spec Req 1.2)
+# ---------------------------------------------------------------------------
+
+def _seg_resolution_error(size):
+    block = dt.RFDETR_SEG_INPUT_BLOCK_FOR_SIZE[size]
+    return (f"Invalid hyperparameter 'resolution': must be a multiple of {block} "
+            f"between 240 and 1152 for RF-DETR-Seg {size}")
+
+
+def test_rfdetr_seg_hyperparameter_defaults():
+    assert dt.parse_detection_hyperparameters(None, arch='rf_detr_seg') == {
+        'rfdetr_seg_size': 'small', 'resolution': 384, 'epochs': 100, 'batch': 4,
+        'grad_accum': 4, 'lr': 1e-4, 'patience': 10, 'score_threshold': 0.5,
+        'mask_threshold': 0.5, 'onnx_opset': 17,
+    }
+    assert dt.parse_detection_hyperparameters({}, arch='rf_detr_seg') == \
+        dt.parse_detection_hyperparameters(None, arch='rf_detr_seg')
+
+
+@pytest.mark.parametrize('size,native', sorted(dt.RFDETR_SEG_SIZES.items()))
+def test_rfdetr_seg_native_resolution_accepted_for_its_size(size, native):
+    parsed = dt.parse_detection_hyperparameters({'rfdetr_seg_size': size}, arch='rf_detr_seg')
+    assert parsed['rfdetr_seg_size'] == size and parsed['resolution'] == native
+    assert dt.parse_detection_hyperparameters(
+        {'rfdetr_seg_size': size, 'resolution': None}, arch='rf_detr_seg')['resolution'] == native
+    assert dt.parse_detection_hyperparameters(
+        {'rfdetr_seg_size': size, 'resolution': native}, arch='rf_detr_seg')['resolution'] == native
+    assert dt.parse_detection_hyperparameters(
+        {'rfdetr_seg_size': size.upper()}, arch='rf_detr_seg')['rfdetr_seg_size'] == size
+
+
+@pytest.mark.parametrize('size', sorted(dt.RFDETR_SEG_SIZES))
+def test_rfdetr_seg_320_is_rejected_for_every_size(size):
+    with pytest.raises(ValueError) as exc:
+        dt.parse_detection_hyperparameters(
+            {'rfdetr_seg_size': size, 'resolution': 320}, arch='rf_detr_seg')
+    assert str(exc.value) == _seg_resolution_error(size)
+
+
+@pytest.mark.parametrize('size', sorted(dt.RFDETR_SEG_SIZES))
+def test_rfdetr_seg_324_is_accepted_for_nano_only(size):
+    raw = {'rfdetr_seg_size': size, 'resolution': 324}
+    if size == 'nano':
+        assert dt.parse_detection_hyperparameters(raw, arch='rf_detr_seg')['resolution'] == 324
+    else:
+        with pytest.raises(ValueError) as exc:
+            dt.parse_detection_hyperparameters(raw, arch='rf_detr_seg')
+        assert str(exc.value) == _seg_resolution_error(size)
+
+
+@pytest.mark.parametrize('size,resolution', [
+    ('nano', 228),      # multiple of 12 but below 240
+    ('nano', 1164),     # multiple of 12 but above 1152
+    ('small', 216),     # multiple of 24 but below 240
+    ('small', 1176),    # multiple of 24 but above 1152
+    ('medium', 512),    # a multiple of 32 (the detection rule) is not a Seg resolution
+    ('large', 0),
+    ('large', -24),
+])
+def test_rfdetr_seg_resolution_bounds_and_block(size, resolution):
+    with pytest.raises(ValueError) as exc:
+        dt.parse_detection_hyperparameters(
+            {'rfdetr_seg_size': size, 'resolution': resolution}, arch='rf_detr_seg')
+    assert str(exc.value) == _seg_resolution_error(size)
+
+
+@pytest.mark.parametrize('size,resolution', [
+    ('small', 240), ('small', 1152), ('nano', 240), ('nano', 1152), ('2xlarge', 960),
+    ('medium', 480), ('xlarge', 1128),
+])
+def test_rfdetr_seg_in_range_block_multiples_accepted(size, resolution):
+    parsed = dt.parse_detection_hyperparameters(
+        {'rfdetr_seg_size': size, 'resolution': resolution}, arch='rf_detr_seg')
+    assert parsed['resolution'] == resolution and parsed['rfdetr_seg_size'] == size
+
+
+@pytest.mark.parametrize('bad', ['big', 384.5, True])
+def test_rfdetr_seg_resolution_must_be_an_integer(bad):
+    with pytest.raises(ValueError) as exc:
+        dt.parse_detection_hyperparameters({'resolution': bad}, arch='rf_detr_seg')
+    assert "'resolution'" in str(exc.value)
+
+
+@pytest.mark.parametrize('raw,field', [
+    ({'mask_threshold': 0}, 'mask_threshold'),
+    ({'mask_threshold': 1}, 'mask_threshold'),
+    ({'mask_threshold': -0.1}, 'mask_threshold'),
+    ({'mask_threshold': 'x'}, 'mask_threshold'),
+    ({'mask_threshold': True}, 'mask_threshold'),
+    ({'score_threshold': 0}, 'score_threshold'),
+    ({'score_threshold': 1}, 'score_threshold'),
+    ({'rfdetr_seg_size': 'base'}, 'rfdetr_seg_size'),
+    ({'rfdetr_seg_size': 'huge'}, 'rfdetr_seg_size'),
+    ({'rfdetr_seg_size': 5}, 'rfdetr_seg_size'),
+    ({'rfdetr_seg_size': None}, 'rfdetr_seg_size'),
+    ({'epochs': 0}, 'epochs'),
+    ({'epochs': 1001}, 'epochs'),
+    ({'batch': 65}, 'batch'),
+    ({'grad_accum': 0}, 'grad_accum'),
+    ({'lr': 1}, 'lr'),
+    ({'patience': -1}, 'patience'),
+    ({'onnx_opset': 21}, 'onnx_opset'),
+])
+def test_rfdetr_seg_hyperparameter_violations_name_the_field(raw, field):
+    with pytest.raises(ValueError) as exc:
+        dt.parse_detection_hyperparameters(raw, arch='rf_detr_seg')
+    assert f"'{field}'" in str(exc.value)
+
+
+def test_rfdetr_seg_mask_threshold_accepted_in_the_open_interval():
+    assert dt.parse_detection_hyperparameters(
+        {'mask_threshold': '0.3'}, arch='rf_detr_seg')['mask_threshold'] == 0.3
+    assert dt.parse_detection_hyperparameters(
+        {'mask_threshold': 0.99}, arch='rf_detr_seg')['mask_threshold'] == 0.99
+
+
+@pytest.mark.parametrize('key,value', [
+    ('iou_threshold', 0.45), ('rfdetr_size', 'small'), ('imgsz', 640),
+    ('base_weights', 'yolo11s.pt'), ('output_mode', 'instance'),
+])
+def test_rfdetr_seg_rejects_foreign_keys(key, value):
+    with pytest.raises(ValueError) as exc:
+        dt.parse_detection_hyperparameters({key: value}, arch='rf_detr_seg')
+    assert key in str(exc.value)
+    assert 'Unknown detection hyperparameter' in str(exc.value)
+
+
+@pytest.mark.parametrize('arch', ['yolo', 'rf_detr'])
+@pytest.mark.parametrize('key', ['rfdetr_seg_size', 'mask_threshold'])
+def test_detection_archs_reject_seg_only_keys(arch, key):
+    with pytest.raises(ValueError) as exc:
+        dt.parse_detection_hyperparameters({key: 0.5}, arch=arch)
+    assert key in str(exc.value)
+
+
+def test_rfdetr_seg_hyperparameters_accept_string_numbers_and_are_idempotent():
+    raw = {'rfdetr_seg_size': ' Medium ', 'resolution': '480', 'epochs': '5', 'batch': 2.0,
+           'grad_accum': '8', 'lr': '0.0002', 'patience': 3, 'score_threshold': '0.3',
+           'mask_threshold': 0.6, 'onnx_opset': 17}
+    parsed = dt.parse_detection_hyperparameters(raw, arch='rf_detr_seg')
+    assert parsed == {
+        'rfdetr_seg_size': 'medium', 'resolution': 480, 'epochs': 5, 'batch': 2, 'grad_accum': 8,
+        'lr': 0.0002, 'patience': 3, 'score_threshold': 0.3, 'mask_threshold': 0.6, 'onnx_opset': 17}
+    assert isinstance(parsed['resolution'], int)
+    assert set(parsed) == set(dt.RFDETR_SEG_DEFAULTS)
+    assert dt.parse_detection_hyperparameters(parsed, arch='rf_detr_seg') == parsed
+
+
+@given(
+    size=st.sampled_from(sorted(dt.RFDETR_SEG_SIZES)),
+    resolution=st.one_of(st.none(), st.integers(min_value=10, max_value=48).map(lambda k: k * 24)),
+    epochs=st.integers(min_value=1, max_value=1000),
+    batch=st.integers(min_value=1, max_value=64),
+    grad_accum=st.integers(min_value=1, max_value=64),
+    lr=st.floats(min_value=1e-6, max_value=0.5),
+    patience=st.integers(min_value=0, max_value=1000),
+    score=st.floats(min_value=0.01, max_value=0.99),
+    mask=st.floats(min_value=0.01, max_value=0.99),
+    opset=st.integers(min_value=11, max_value=20),
+)
+def test_rfdetr_seg_valid_hyperparameters_round_trip(size, resolution, epochs, batch, grad_accum,
+                                                     lr, patience, score, mask, opset):
+    raw = {'rfdetr_seg_size': size, 'epochs': epochs, 'batch': batch, 'grad_accum': grad_accum,
+           'lr': lr, 'patience': patience, 'score_threshold': score, 'mask_threshold': mask,
+           'onnx_opset': opset}
+    if resolution is not None:
+        raw['resolution'] = resolution          # every multiple of 24 is a multiple of 12 too
+    parsed = dt.parse_detection_hyperparameters(raw, arch='rf_detr_seg')
+    for key, value in raw.items():
+        assert parsed[key] == value
+    assert parsed['resolution'] == (resolution if resolution is not None else dt.RFDETR_SEG_SIZES[size])
+    assert parsed['resolution'] % dt.RFDETR_SEG_INPUT_BLOCK_FOR_SIZE[size] == 0
+    assert set(parsed) == set(dt.RFDETR_SEG_DEFAULTS)
+    assert dt.parse_detection_hyperparameters(parsed, arch='rf_detr_seg') == parsed
+    env = dt.detection_job_environment('s3://b/m.manifest', parsed, arch='rf_detr_seg')
+    assert env['RESOLUTION'] == str(parsed['resolution'])
+    assert env['RFDETR_SEG_SIZE'] == size and 'RFDETR_SIZE' not in env
+    assert all(isinstance(v, str) for v in env.values())
+    assert not any('THRESHOLD' in k or k.startswith('IOU') for k in env)
+
+
+# ---------------------------------------------------------------------------
+# RF-DETR-Seg job environment (Seg spec Req 1.1, 5.4)
+# ---------------------------------------------------------------------------
+
+def test_rfdetr_seg_job_environment_names():
+    params = dt.parse_detection_hyperparameters(None, arch='rf_detr_seg')
+    env = dt.detection_job_environment('s3://b/labeled/output.manifest', params, arch='rf_detr_seg')
+    # The RF-DETR env with RFDETR_SEG_SIZE in place of RFDETR_SIZE; no score or
+    # mask threshold (they only shape the device manifest), nothing IOU-related.
+    assert env == {
+        'MANIFEST_S3': 's3://b/labeled/output.manifest',
+        'RFDETR_SEG_SIZE': 'small', 'RESOLUTION': '384', 'EPOCHS': '100', 'BATCH': '4',
+        'GRAD_ACCUM': '4', 'LR': '0.0001', 'PATIENCE': '10', 'ONNX_OPSET': '17',
+    }
+    with_base = dt.detection_job_environment(
+        's3://b/labeled/output.manifest', params, arch='rf_detr_seg',
+        base_weights_s3='s3://uc/training/j/output/model.tar.gz',
+        base_weights_member='checkpoint_best_total.pth')
+    assert with_base == {**env, 'BASE_WEIGHTS_S3': 's3://uc/training/j/output/model.tar.gz',
+                         'BASE_WEIGHTS_MEMBER': 'checkpoint_best_total.pth'}
+
+
+def test_rfdetr_seg_job_environment_reflects_size_and_resolution():
+    env = dt.detection_job_environment(
+        's3://b/m.manifest',
+        dt.parse_detection_hyperparameters({'rfdetr_seg_size': '2xlarge'}, arch='rf_detr_seg'),
+        arch='rf_detr_seg')
+    assert env['RFDETR_SEG_SIZE'] == '2xlarge' and env['RESOLUTION'] == '768'
+    env = dt.detection_job_environment(
+        's3://b/m.manifest',
+        dt.parse_detection_hyperparameters(
+            {'rfdetr_seg_size': 'nano', 'resolution': 324}, arch='rf_detr_seg'),
+        arch='rf_detr_seg')
+    assert env['RFDETR_SEG_SIZE'] == 'nano' and env['RESOLUTION'] == '324'
+
+
+# ---------------------------------------------------------------------------
+# Instance manifest validation (Seg spec Req 3.5)
+# ---------------------------------------------------------------------------
+
+def test_detect_instance_attribute():
+    assert dt.detect_instance_attribute(dda_instance_entry()) == 'instance-segmentation'
+    assert dt.detect_instance_attribute(gt_instance_entry()) == 'plates-inst'
+    assert dt.detect_instance_attribute(dda_detection_entry()) is None
+    assert dt.detect_instance_attribute(gt_detection_entry()) is None
+    assert dt.detect_instance_attribute(dda_semantic_entry()) is None
+    assert dt.detect_instance_attribute(dda_classification_entry()) is None
+    assert dt.detect_instance_attribute('nope') is None
+    # Neither detector sees the other's attribute.
+    assert dt.detect_bbox_attribute(dda_instance_entry()) is None
+    assert dt.detect_bbox_attribute(gt_instance_entry()) is None
+
+
+def test_validate_instance_entry_accepted_with_class_names():
+    result = dt.validate_detection_manifest_entry(dda_instance_entry(), expected='instance')
+    assert result['valid'], result['errors']
+    assert result['kind'] == 'instance'
+    assert result['attribute'] == 'instance-segmentation'
+    assert result['class_names'] == ['scratch', 'dent']
+    assert set(result) == {'valid', 'errors', 'class_names', 'attribute',
+                           'detected_attributes', 'kind'}
+    gt = dt.validate_detection_manifest_entry(gt_instance_entry(), expected='instance')
+    assert gt['valid'], gt['errors']
+    assert gt['attribute'] == 'plates-inst' and gt['class_names'] == ['plate', 'luggage']
+
+
+def test_validate_instance_rejects_bbox_only_manifest():
+    for entry in (dda_detection_entry(), gt_detection_entry()):
+        result = dt.validate_detection_manifest_entry(entry, expected='instance')
+        assert not result['valid'] and result['kind'] == 'instance'
+        assert result['attribute'] is None and result['class_names'] == []
+        assert result['errors'] == ['RF-DETR-Seg needs instance masks; this manifest has boxes only']
+        assert 'transform' not in ' '.join(result['errors']).lower()
+
+
+def test_validate_instance_rejects_semantic_manifest_naming_the_modality():
+    result = dt.validate_detection_manifest_entry(dda_semantic_entry(), expected='instance')
+    assert not result['valid'] and result['kind'] == 'instance'
+    assert result['errors'] == [
+        'Manifest is a semantic segmentation manifest (anomaly-mask-ref); '
+        'RF-DETR-Seg requires an instance-segmentation manifest']
+    assert 'transform' not in ' '.join(result['errors']).lower()
+    assert 'anomaly-mask-ref' in result['detected_attributes']
+
+
+def test_validate_instance_names_the_missing_attribute_for_other_manifests():
+    result = dt.validate_detection_manifest_entry(dda_classification_entry(), expected='instance')
+    assert not result['valid'] and result['kind'] == 'instance'
+    assert result['errors'] == [
+        "No instance-segmentation attribute found: expected 'instance-segmentation' with an "
+        "'instance-segmentation-metadata' companion, or a Ground Truth attribute whose "
+        "metadata type is 'groundtruth/instance-segmentation'"]
+    assert 'transform' not in ' '.join(result['errors']).lower()
+    assert dt.validate_detection_manifest_entry('not-an-object', expected='instance') == {
+        'valid': False, 'errors': ['Manifest entry is not a JSON object'], 'class_names': [],
+        'attribute': None, 'detected_attributes': [], 'kind': 'instance'}
+
+
+def test_validate_instance_checks_the_body_like_the_bbox_form():
+    entry = dda_instance_entry()
+    entry['instance-segmentation']['annotations'] = 'nope'
+    del entry['instance-segmentation']['image_size']
+    del entry['instance-segmentation-metadata']['class-map']
+    result = dt.validate_detection_manifest_entry(entry, expected='instance')
+    assert not result['valid'] and result['kind'] == 'instance'
+    assert result['attribute'] == 'instance-segmentation'
+    assert result['errors'] == [
+        "'instance-segmentation.annotations' must be a list",
+        "'instance-segmentation.image_size' must be a non-empty list",
+        "'instance-segmentation-metadata.class-map' must be a non-empty object"]
+    bad_map = dda_instance_entry(class_map={'a': 'scratch'})
+    result = dt.validate_detection_manifest_entry(bad_map, expected='instance')
+    assert result['errors'] == [
+        "'instance-segmentation-metadata.class-map' keys must be integer class ids"]
+    no_ref = dda_instance_entry()
+    no_ref['source-ref'] = ''
+    assert dt.validate_detection_manifest_entry(no_ref, expected='instance')['errors'] == [
+        'source-ref must be a non-empty string (S3 URI)']
+
+
+def test_validate_bbox_form_is_unchanged_and_implicit():
+    for entry in (dda_detection_entry(), gt_detection_entry(), dda_classification_entry(),
+                  dda_instance_entry(), dda_semantic_entry(), 'x', None):
+        implicit = dt.validate_detection_manifest_entry(entry)
+        explicit = dt.validate_detection_manifest_entry(entry, expected='bbox')
+        assert implicit == explicit
+        assert set(implicit) == {'valid', 'errors', 'class_names', 'attribute', 'detected_attributes'}
+    # An Instance_Manifest offered to Object Detection training is "no bounding-box attribute".
+    result = dt.validate_detection_manifest_entry(dda_instance_entry())
+    assert not result['valid']
+    assert result['errors'][0].startswith('No bounding-box attribute found')
+
+
+def test_validate_rejects_an_unknown_expected_kind():
+    with pytest.raises(ValueError) as exc:
+        dt.validate_detection_manifest_entry(dda_instance_entry(), expected='masks')
+    assert 'masks' in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
 # Per-arch sourcedir (Req 3.4)
 # ---------------------------------------------------------------------------
 
 _CODE_DIR_FILES = {
     'train.py': '# yolo entry point\n',
     'train_rfdetr.py': '# rf-detr entry point\n',
+    'train_rfdetr_seg.py': '# rf-detr-seg entry point\n',
     'requirements.txt': 'ultralytics==8.3.0\n',
     'requirements-rfdetr.txt': 'rfdetr[onnxexport]==1.3.0\nonnxruntime\nnumpy<2\n',
     '_common.py': '# shared helpers\n',
@@ -715,6 +1239,43 @@ def test_build_sourcedir_tarball_rfdetr_entry_point_bundle():
         assert all('/' not in n for n in contents)
 
 
+def test_build_sourcedir_tarball_seg_entry_point_bundle_carries_train_rfdetr():
+    """The Seg trainer imports train_rfdetr.py as a sibling (Seg spec DD1)."""
+    with tempfile.TemporaryDirectory() as td:
+        code = _write_code_dir(td)
+        out = os.path.join(td, 'sourcedir.tar.gz')
+        names = dt.build_sourcedir_tarball(code, out, entry_point='train_rfdetr_seg.py')
+        contents = _tar_contents(out)
+        expected = {'train_rfdetr_seg.py', 'train_rfdetr.py', 'requirements.txt', '_common.py',
+                    'manifest_to_detector_dataset.py', 'dedupe_frames.py'}
+        assert set(contents) == expected
+        assert names == sorted(expected)
+        assert contents['requirements.txt'] == _CODE_DIR_FILES['requirements-rfdetr.txt']
+        assert contents['train_rfdetr_seg.py'] == _CODE_DIR_FILES['train_rfdetr_seg.py']
+        assert contents['train_rfdetr.py'] == _CODE_DIR_FILES['train_rfdetr.py']
+        assert 'train.py' not in contents and 'requirements-rfdetr.txt' not in contents
+        assert all('/' not in n for n in contents)
+
+
+@pytest.mark.parametrize('entry_point', ['train.py', 'train_rfdetr.py'])
+def test_build_sourcedir_tarball_detection_bundles_unchanged(entry_point):
+    with tempfile.TemporaryDirectory() as td:
+        code = _write_code_dir(td)
+        names = dt.build_sourcedir_tarball(code, os.path.join(td, 'o.tar.gz'), entry_point=entry_point)
+        assert set(names) == {entry_point, 'requirements.txt', '_common.py',
+                              'manifest_to_detector_dataset.py', 'dedupe_frames.py'}
+        assert 'train_rfdetr_seg.py' not in names
+
+
+def test_build_sourcedir_tarball_seg_requires_its_sibling():
+    with tempfile.TemporaryDirectory() as td:
+        code = _write_code_dir(td, omit=('train_rfdetr.py',))
+        with pytest.raises(FileNotFoundError) as exc:
+            dt.build_sourcedir_tarball(code, os.path.join(td, 'o.tar.gz'),
+                                       entry_point='train_rfdetr_seg.py')
+        assert 'train_rfdetr.py' in str(exc.value)
+
+
 @pytest.mark.parametrize('entry_point', sorted(dt.ENTRY_POINT_FOR_ARCH.values()))
 def test_build_sourcedir_tarball_tolerates_missing_common(entry_point):
     with tempfile.TemporaryDirectory() as td:
@@ -723,7 +1284,8 @@ def test_build_sourcedir_tarball_tolerates_missing_common(entry_point):
         names = dt.build_sourcedir_tarball(code, out, entry_point=entry_point)
         assert '_common.py' not in names
         assert set(names) == {entry_point, 'requirements.txt',
-                              'manifest_to_detector_dataset.py', 'dedupe_frames.py'}
+                              'manifest_to_detector_dataset.py', 'dedupe_frames.py'} | \
+            set(dt._SIBLINGS_FOR_ENTRY_POINT[entry_point])
 
 
 def test_build_sourcedir_tarball_unknown_entry_point():
@@ -859,6 +1421,135 @@ def test_rfdetr_device_manifest_property(k, n, score):
     assert m['detection']['network_input'] == k * 32
     assert m['detection']['class_names'] == names
     assert 'iou_threshold' not in set(_walk_keys(m))
+
+
+# ---------------------------------------------------------------------------
+# RF-DETR-Seg device manifest (Seg spec Req 6.1; task 6.1)
+# ---------------------------------------------------------------------------
+
+SEG_NAMES = ['scratch', 'dent']
+
+
+def _seg_manifest(**overrides):
+    kwargs = dict(image_width=384, image_height=384, num_classes=2, class_names=SEG_NAMES,
+                  score_threshold=0.5, detection_arch='rf_detr_seg', top_k=100,
+                  output_names=['dets', 'labels', 'masks'])
+    kwargs.update(overrides)
+    return dt.build_detection_device_manifest(**kwargs)
+
+
+def test_seg_device_manifest_instance_mode_is_the_data_contract():
+    """design.md Data contracts 'Device manifest (Seg)', instance mode, apart
+    from the output shapes the packager writes from the real graph."""
+    m = _seg_manifest()
+    assert json.dumps(m) == json.dumps({
+        'runtime': 'onnx', 'runtime_artifact': 'model.onnx',
+        'model_graph': {
+            'model_graph_type': 'single_stage_model_graph',
+            'stages': [{'type': 'rf_detr_instance_segmentation', 'input_shape': [1, 3, 384, 384],
+                        'output_shape': [1, 6, 8400], 'image_width': 384, 'image_height': 384,
+                        'image_range_scale': True, 'normalize': True, 'threshold': 0.5,
+                        'num_classes': 2}],
+            'pixel_level_classes': {'names': ['background', 'scratch', 'dent'], 'normal_ids': [0]},
+        },
+        'input_shape': [1, 3, 384, 384],
+        'preprocessing': {'resize': [384, 384], 'channel_order': 'RGB'},
+        'task': 'object_detection',
+        'detection': {'layout': 'rf_detr', 'num_classes': 2, 'score_threshold': 0.5,
+                      'network_input': 384, 'preserve_aspect': False, 'top_k': 100,
+                      'mask_threshold': 0.5, 'output_mode': 'instance',
+                      'output_names': ['dets', 'labels', 'masks'], 'class_names': ['scratch', 'dent']},
+        'dataset': {'image_width': 384, 'image_height': 384},
+    })
+    assert 'detection' not in m['model_graph']['stages'][0]
+    assert 'iou_threshold' not in set(_walk_keys(m))
+
+
+def test_seg_device_manifest_semantic_mode_differs_in_exactly_three_places():
+    instance = _seg_manifest(output_mode='instance')
+    semantic = _seg_manifest(output_mode='semantic')
+    assert semantic['model_graph']['stages'][0]['type'] == 'rf_detr_semantic_segmentation'
+    assert 'task' not in semantic
+    assert semantic['detection']['output_mode'] == 'semantic'
+    # Everything else, including the key order, is the instance manifest.
+    assert list(semantic) == ['runtime', 'runtime_artifact', 'model_graph', 'input_shape',
+                              'preprocessing', 'detection', 'dataset']
+    instance['model_graph']['stages'][0]['type'] = 'rf_detr_semantic_segmentation'
+    del instance['task']
+    instance['detection']['output_mode'] = 'semantic'
+    assert json.dumps(instance, sort_keys=True) == json.dumps(semantic, sort_keys=True)
+    assert 'detection' not in semantic['model_graph']['stages'][0]
+
+
+def test_seg_device_manifest_defaults_mode_mask_threshold_and_preserve_aspect():
+    m = _seg_manifest(output_mode=None, mask_threshold=None, preserve_aspect=None)
+    assert m['model_graph']['stages'][0]['type'] == dt.stage_type_for('rf_detr_seg', dt.DEFAULT_OUTPUT_MODE)
+    assert m['detection']['output_mode'] == dt.DEFAULT_OUTPUT_MODE == 'instance'
+    assert m['detection']['mask_threshold'] == 0.5
+    assert m['detection']['preserve_aspect'] is False
+    assert m['task'] == 'object_detection'
+    explicit = _seg_manifest(mask_threshold=0.3, preserve_aspect=True)
+    assert explicit['detection']['mask_threshold'] == 0.3
+    assert explicit['detection']['preserve_aspect'] is True
+
+
+def test_seg_device_manifest_optional_keys_are_written_only_when_given():
+    m = _seg_manifest(output_names=None, class_names=None)
+    assert 'output_names' not in m['detection'] and 'class_names' not in m['detection']
+    assert list(m['detection']) == ['layout', 'num_classes', 'score_threshold', 'network_input',
+                                    'preserve_aspect', 'top_k', 'mask_threshold', 'output_mode']
+    # With both: output_names before class_names, class_names last.
+    full = _seg_manifest()
+    assert list(full['detection'])[-2:] == ['output_names', 'class_names']
+
+
+@pytest.mark.parametrize('mode', ['instance', 'semantic'])
+@pytest.mark.parametrize('size', sorted(dt.RFDETR_SEG_SIZES))
+@pytest.mark.parametrize('names', [None, ['a', 'b', 'c']])
+def test_seg_device_manifest_pixel_level_classes_has_num_classes_plus_one_names(mode, size, names):
+    res = dt.RFDETR_SEG_SIZES[size]
+    m = _seg_manifest(image_width=res, image_height=res, num_classes=3, class_names=names,
+                      output_mode=mode, top_k=dt.RFDETR_SEG_QUERIES_FOR_SIZE[size])
+    plc = m['model_graph']['pixel_level_classes']
+    expected = ['background'] + (names if names else ['class_0', 'class_1', 'class_2'])
+    assert plc == {'names': expected, 'normal_ids': [0]}
+    assert len(plc['names']) == 3 + 1
+    assert m['detection']['num_classes'] == 3 and m['detection']['top_k'] == dt.RFDETR_SEG_QUERIES_FOR_SIZE[size]
+    assert m['input_shape'] == [1, 3, res, res] and m['preprocessing']['resize'] == [res, res]
+    assert ('task' in m) == (mode == 'instance')
+
+
+def test_seg_device_manifest_pixel_level_classes_pads_or_truncates_to_num_classes():
+    short = _seg_manifest(num_classes=3, class_names=['only'])
+    assert short['model_graph']['pixel_level_classes']['names'] == ['background', 'only', 'class_1', 'class_2']
+    assert short['detection']['class_names'] == ['only']   # the detection block keeps what was given
+    long = _seg_manifest(num_classes=1, class_names=['a', 'b'])
+    assert long['model_graph']['pixel_level_classes']['names'] == ['background', 'a']
+
+
+def test_seg_device_manifest_rejects_an_unknown_output_mode():
+    with pytest.raises(ValueError) as exc:
+        _seg_manifest(output_mode='panoptic')
+    assert 'output_mode' in str(exc.value)
+
+
+def test_seg_only_arguments_are_ignored_for_yolo_and_rf_detr():
+    """Preservation: output_mode / mask_threshold / output_names never reach
+    a yolo or rf_detr manifest, which stays the pre-Seg shape byte for byte."""
+    rf = dict(image_width=512, image_height=512, num_classes=2, class_names=['a', 'b'],
+              score_threshold=0.5, detection_arch='rf_detr')
+    plain = dt.build_detection_device_manifest(**rf)
+    with_seg = dt.build_detection_device_manifest(
+        output_mode='semantic', mask_threshold=0.3, output_names=['dets', 'labels'], **rf)
+    assert json.dumps(plain) == json.dumps(with_seg)
+    assert 'pixel_level_classes' not in plain['model_graph'] and 'task' in plain
+    assert not {'mask_threshold', 'output_mode', 'output_names'} & set(_walk_keys(plain))
+    yolo = dict(image_width=640, image_height=640, num_classes=1, class_names=['x'],
+                score_threshold=0.25, iou_threshold=0.45)
+    assert json.dumps(dt.build_detection_device_manifest(**yolo)) == json.dumps(
+        dt.build_detection_device_manifest(output_mode='semantic', mask_threshold=0.3, **yolo))
+    assert list(plain) == ['runtime', 'runtime_artifact', 'model_graph', 'input_shape',
+                           'preprocessing', 'task', 'detection', 'dataset']
 
 
 # ---------------------------------------------------------------------------
@@ -1159,3 +1850,93 @@ def test_resolve_base_model_unknown_arch_rejected_before_lookup():
     with pytest.raises(ValueError):
         dt.resolve_base_model('training_job', 'tj-yolo', 'detr', UC, table)
     assert table.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Base model resolution, RF-DETR-Seg matrix (Seg spec Req 1.1, 5.4)
+# ---------------------------------------------------------------------------
+
+def _seg_job(training_id='tj-seg', **overrides):
+    record = _yolo_job(training_id=training_id, model_name='plates-seg', model_version=3)
+    record['model_type'] = 'instance_segmentation'
+    record['detection'] = {
+        'detection_arch': 'rf_detr_seg',
+        'class_names': ['scratch', 'dent'],
+        'network_input_width': 384,
+        'output_mode': 'instance',
+    }
+    record.update(overrides)
+    return record
+
+
+def test_resolve_base_model_seg_published_echoes_ref_without_lookup():
+    desc, table = _resolve('published', 'rf-detr-seg-small.pt', 'rf_detr_seg', [])
+    assert desc == {
+        'kind': 'published', 'ref': 'rf-detr-seg-small.pt', 'weights_s3': None, 'member': None,
+        'detection_arch': 'rf_detr_seg', 'class_names': None,
+    }
+    assert table.calls == []
+
+
+def test_resolve_base_model_completed_seg_job():
+    job = _seg_job()
+    desc, table = _resolve('training_job', 'tj-seg', 'rf_detr_seg', [job])
+    assert desc == {
+        'kind': 'training_job', 'ref': 'tj-seg',
+        'weights_s3': job['artifact_s3'],
+        'member': 'checkpoint_best_total.pth',
+        'detection_arch': 'rf_detr_seg',
+        'class_names': ['scratch', 'dent'],
+    }
+    assert table.calls == [{'training_id': 'tj-seg'}]
+
+
+def test_resolve_base_model_seg_arch_mismatch_both_ways():
+    with pytest.raises(ValueError) as exc:
+        _resolve('training_job', 'tj-rfdetr', 'rf_detr_seg', [_rfdetr_job()])
+    assert str(exc.value) == \
+        "Base model plates-detr v1 is a rf_detr detector; cannot start an rf_detr_seg run from it"
+    with pytest.raises(ValueError) as exc:
+        _resolve('training_job', 'tj-seg', 'rf_detr', [_seg_job()])
+    assert str(exc.value) == \
+        "Base model plates-seg v3 is a rf_detr_seg detector; cannot start an rf_detr run from it"
+    with pytest.raises(ValueError) as exc:
+        _resolve('training_job', 'tj-seg', 'yolo', [_seg_job()])
+    assert str(exc.value) == \
+        "Base model plates-seg v3 is a rf_detr_seg detector; cannot start a yolo run from it"
+
+
+def test_resolve_base_model_seg_job_must_be_a_completed_trained_detector():
+    with pytest.raises(ValueError) as exc:
+        _resolve('training_job', 'tj-seg', 'rf_detr_seg', [_seg_job(status='InProgress')])
+    assert str(exc.value).startswith("Base model plates-seg v3 is not Completed")
+    with pytest.raises(ValueError) as exc:
+        _resolve('training_job', 'tj-seg', 'rf_detr_seg', [_seg_job(runtime='dlr')])
+    assert str(exc.value) == "Base model plates-seg v3 is not a portal-trained object detector"
+    with pytest.raises(ValueError) as exc:
+        _resolve('training_job', 'tj-seg', 'rf_detr_seg', [_seg_job(artifact_s3='')])
+    assert str(exc.value) == \
+        "Base model plates-seg v3 has no training artifact containing checkpoint_best_total.pth"
+
+
+def test_resolve_base_model_imported_seg_checkpoint_and_mismatch_both_ways():
+    rec = _imported(fine_tunable={
+        'arch': 'rf_detr_seg', 'kind': 'rfdetr_checkpoint',
+        'checkpoint_s3': 's3://uc-1-bucket/converted-models/imp/checkpoint.pth',
+        'class_names': ['scratch']})
+    desc, _ = _resolve('imported', 'imp-1', 'rf_detr_seg', [rec])
+    assert desc == {
+        'kind': 'imported', 'ref': 'imp-1',
+        'weights_s3': 's3://uc-1-bucket/converted-models/imp/checkpoint.pth',
+        'member': None, 'detection_arch': 'rf_detr_seg', 'class_names': ['scratch'],
+    }
+    with pytest.raises(ValueError) as exc:
+        _resolve('imported', 'imp-1', 'rf_detr', [rec])
+    assert str(exc.value) == (
+        "Base model yolo-world-blue-plate is a rf_detr_seg model; "
+        "cannot start an rf_detr run from it")
+    with pytest.raises(ValueError) as exc:
+        _resolve('imported', 'imp-1', 'rf_detr_seg', [_imported()])
+    assert str(exc.value) == (
+        "Base model yolo-world-blue-plate is a yolo model; "
+        "cannot start an rf_detr_seg run from it")

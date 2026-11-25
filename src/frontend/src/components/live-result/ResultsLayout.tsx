@@ -16,6 +16,7 @@
  *
  */
 
+import { Container, Header, SpaceBetween } from "@cloudscape-design/components";
 import LiveResultCard from "./LiveResultCard";
 import { RunWorkflowResponse } from "api/WorkflowAPI";
 import { Workflow } from "components/workflow/types";
@@ -24,6 +25,8 @@ import { captureImageType } from "./types";
 import { PredictionType } from "components/image-source/types";
 import { LiveResultContext } from "components/live-result/LiveResults";
 import InteractableImage from "components/live-result/InteractableImage";
+import InstanceMaskLayer, { INSTANCE_MASKS_HEADER } from "components/deployed-workflow/results/InstanceMaskLayer";
+import { hasMask, normalizeDetectionEntries } from "components/deployed-workflow/instanceDetections";
 import LiveResultActions from "components/live-result/LiveResultActions";
 import {
   checkAnomalyLabel,
@@ -86,15 +89,26 @@ export default function ResultsLayout({
   // (the server-rendered overlay). Reuse the same toggle the segmentation flow
   // uses for the mask: when on (default) show the overlay with boxes, when off
   // show the raw input image with no boxes.
-  const getImageSrc = (): string => {
-    const imageType =
+  const captureImageSrc = (imageType: captureImageType): string =>
+    `${getCaptureAPI}/${imageType}${authEnabled ? `?token=${encodeURIComponent(token)}` : ""}`;
+  const getImageSrc = (): string =>
+    captureImageSrc(
       isDetection && showMask
         ? captureImageType.OUTPUT_IMAGE
-        : captureImageType.INPUT_IMAGE;
-    return `${getCaptureAPI}/${imageType}${authEnabled ? `?token=${encodeURIComponent(token)}` : ""}`;
-  };
+        : captureImageType.INPUT_IMAGE,
+    );
 
   const imageSrc = getImageSrc();
+
+  // The live instance masks (rfdetr-seg-support Requirement 10.6, DD14): the
+  // inference-result JSON's `detections` map carries each instance's
+  // `mask_rle`, decoded client-side over the raw input image with its own
+  // masks + boxes | boxes toggle. Rendered only when some entry still carries
+  // a mask, so a detection or anomaly result's surface is unchanged.
+  const instances = normalizeDetectionEntries(
+    workflowRun.inferenceResult.detections ?? null,
+  );
+  const showInstanceLayer = isDetection && instances.some(hasMask);
 
   const backgroundColorProp = workflowRun.inferenceResult.mask_background
     ? {
@@ -147,7 +161,7 @@ export default function ResultsLayout({
     />
   ) : undefined;
 
-  return (
+  const resultLayout = (
     <div className={resultLayoutStyle}>
       <div className={resultCardStyle}>
         <LiveResultCard workflow={workflow} workflowRun={workflowRun} />
@@ -164,5 +178,23 @@ export default function ResultsLayout({
         )}
       </LiveResultContext.Consumer>
     </div>
+  );
+
+  if (!showInstanceLayer) {
+    return resultLayout;
+  }
+  return (
+    <SpaceBetween size="l">
+      {resultLayout}
+      <Container
+        header={<Header variant="h2">{INSTANCE_MASKS_HEADER}</Header>}
+        data-testid="instance-masks-container"
+      >
+        <InstanceMaskLayer
+          imageSrc={captureImageSrc(captureImageType.INPUT_IMAGE)}
+          instances={instances}
+        />
+      </Container>
+    </SpaceBetween>
   );
 }

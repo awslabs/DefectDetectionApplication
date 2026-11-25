@@ -286,6 +286,14 @@ ENV VLLM_USE_V1=0
 RUN apt-get update && \
     apt-get install -y --no-install-recommends libopenblas0 && \
     rm -rf /var/lib/apt/lists/*
+# "sentry-sdk<3" rides the same resolution as the numpy / transformers /
+# protobuf co-constraints: vllm requires fastapi[standard], whose
+# fastapi-cloud-cli extra depends on an unbounded sentry-sdk. sentry-sdk 3.0
+# removed `configure_scope`, which the app's pinned asgi-correlation-id 4.2.0
+# imports from its Sentry extension on every request (the extension activates
+# on the mere presence of sentry_sdk), so a build that resolved sentry-sdk 3.x
+# answered every request with HTTP 500. The cap keeps the 2.x line the image
+# has always shipped; nothing in the app uses sentry-sdk directly.
 RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
         if [ -n "$VLLM_INDEX_URL" ]; then \
             pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} --no-deps "torch==2.8.0"; \
@@ -293,7 +301,7 @@ RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
         pip install --no-cache-dir \
             ${VLLM_INDEX_URL:+--extra-index-url ${VLLM_INDEX_URL}} \
             ${VLLM_SPEC} "torch==2.8.0" "numpy>=1.26,<2" "transformers>=4.51.1,<5" \
-            "protobuf>=5.26.1,<6" && \
+            "protobuf>=5.26.1,<6" "sentry-sdk<3" && \
         if [ -n "$VLLM_INDEX_URL" ]; then \
             pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} "triton==3.6.0"; \
             # torchvision is required by transformers' AutoVideoProcessor for

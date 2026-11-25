@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Badge,
@@ -15,11 +15,22 @@ import {
   Table,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
-import ResultsViewer, { type Capture } from './ResultsViewer';
+import ResultsViewer, {
+  type Capture,
+  type Detection,
+  type InstanceDetailState,
+} from './ResultsViewer';
 
 interface Props {
   deviceId: string;
   usecaseId: string;
+}
+
+/** The per-capture detail (rfdetr-seg-support Req 11.1) as the tab holds it. */
+interface InstanceDetail {
+  state: InstanceDetailState;
+  /** The detail's entries, carrying `mask_rle`, once `'ready'`. */
+  detections: Detection[] | null;
 }
 
 /**
@@ -37,6 +48,18 @@ interface Props {
  * inference-results bucket). It defaults to the device id and can be edited so
  * an operator can point at a specific capture folder; `device_id` is also sent
  * so the backend can scope the search prefix.
+ *
+ * Instance captures (rfdetr-seg-support Requirement 11.1, design §11 "Two
+ * requests from the Portal"): the page is always the light form (boxes,
+ * `has_masks`, `jsonl_key`, no RLE). When the selected capture is a
+ * `'Detection'` with `has_masks` and a `jsonl_key`, the tab issues ONE detail
+ * request for that capture (`key` + `include_masks`) with the `prefix` and
+ * `device_id` the page was loaded with — the backend's `response.prefix`, not
+ * the editable input, so an edited prefix cannot send a key outside the
+ * scoped prefix — and hands the entries (with `mask_rle`) to the viewer.
+ * Details are memoised per capture for the life of the loaded page; a
+ * rejected or degraded (empty) detail marks that capture `'unavailable'`
+ * and never touches the page-level error.
  */
 export default function ResultsTab({ deviceId, usecaseId }: Props) {
   const [prefix, setPrefix] = useState(deviceId);
@@ -45,6 +68,23 @@ export default function ResultsTab({ deviceId, usecaseId }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  /** The scoped prefix the loaded page came back with (`response.prefix`). */
+  const [pagePrefix, setPagePrefix] = useState<string | null>(null);
+  /** Bumped per page load: a new page forgets the previous page's details. */
+  const [pageVersion, setPageVersion] = useState(0);
+  const [instanceDetails, setInstanceDetails] = useState<Map<string, InstanceDetail>>(
+    () => new Map()
+  );
+  /** Captures whose detail was requested on this page (one request each). */
+  const requestedDetails = useRef<Set<string>>(new Set());
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const loadCaptures = async () => {
     if (!usecaseId || !prefix) {
@@ -60,6 +100,11 @@ export default function ResultsTab({ deviceId, usecaseId }: Props) {
         device_id: deviceId,
         limit: 50,
       });
+      // A new page: forget the previous page's details.
+      requestedDetails.current = new Set();
+      setInstanceDetails(new Map());
+      setPagePrefix(response.prefix);
+      setPageVersion((version) => version + 1);
       setCaptures(response.captures);
       setSelected(response.captures[0] ?? null);
       setLoaded(true);
@@ -69,6 +114,56 @@ export default function ResultsTab({ deviceId, usecaseId }: Props) {
       setLoading(false);
     }
   };
+
+  // One detail request per selected instance capture, keyed on the selection.
+  useEffect(() => {
+    if (!selected || pagePrefix === null) {
+      return;
+    }
+    if (
+      selected.inference_result_type !== 'Detection' ||
+      !selected.has_masks ||
+      !selected.jsonl_key
+    ) {
+      return;
+    }
+    const captureId = selected.capture_id;
+    if (requestedDetails.current.has(captureId)) {
+      return;
+    }
+    requestedDetails.current.add(captureId);
+    const key = selected.jsonl_key;
+    setInstanceDetails((prev) =>
+      new Map(prev).set(captureId, { state: 'loading', detections: null })
+    );
+    const fetchDetail = async () => {
+      let detail: InstanceDetail;
+      try {
+        const response = await apiService.getCaptures({
+          usecase_id: usecaseId,
+          prefix: pagePrefix,
+          device_id: deviceId,
+          key,
+          include_masks: true,
+        });
+        const detections = response.captures[0]?.detections ?? [];
+        detail =
+          detections.length > 0
+            ? { state: 'ready', detections }
+            : { state: 'unavailable', detections: null };
+      } catch {
+        // A 400 (stale key), 5xx or network failure: masks unavailable for
+        // this capture only; the page and its boxes stay.
+        detail = { state: 'unavailable', detections: null };
+      }
+      if (mounted.current) {
+        setInstanceDetails((prev) => new Map(prev).set(captureId, detail));
+      }
+    };
+    void fetchDetail();
+  }, [selected, pagePrefix, pageVersion, usecaseId, deviceId]);
+
+  const selectedDetail = selected ? instanceDetails.get(selected.capture_id) : undefined;
 
   const renderResultBadge = (capture: Capture) => {
     switch (capture.inference_result_type) {
@@ -184,7 +279,11 @@ export default function ResultsTab({ deviceId, usecaseId }: Props) {
               }
             />
           </Container>
-          <ResultsViewer capture={selected} />
+          <ResultsViewer
+            capture={selected}
+            instanceDetections={selectedDetail?.detections ?? null}
+            instanceDetailState={selectedDetail?.state}
+          />
         </ColumnLayout>
       ) : (
         <Container>

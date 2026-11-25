@@ -38,6 +38,22 @@ import hashlib
 import re
 import time
 import detector_conversion as dconv
+# The RF-DETR-Seg configuration-only off switch (rfdetr-seg-support DD7) and,
+# for an RF-DETR-Seg ONNX import, the shared device-manifest builder packaging
+# uses for a portal-trained Seg model (DD6, Req 6.2): one builder, one manifest.
+from detection_training import (
+    DEFAULT_OUTPUT_MODE,
+    MODEL_TYPE_INSTANCE_SEGMENTATION,
+    OUTPUT_MODE_SEMANTIC,
+    OUTPUT_MODES,
+    RFDETR_SEG_MASK_DOWNSAMPLE,
+    RFDETR_SEG_QUERIES_FOR_SIZE,
+    RFDETR_SEG_SIZES,
+    RFDETR_TOP_K,
+    build_detection_device_manifest,
+    rfdetr_seg_enabled,
+    stage_type_for,
+)
 from s3_cors import ensure_bucket_cors
 from botocore.config import Config
 
@@ -141,8 +157,41 @@ MODEL_TYPES = {
     'anomaly_detection': {
         'description': 'Anomaly detection (normal vs anomaly)',
         'output_format': '[batch, 2]'
+    },
+    # RF-DETR-Seg ONNX import (rfdetr-seg-support Req 8.1): the
+    # Seg_Output_Contract -- boxes, logits with a trailing background slot and
+    # the per-query mask grid. Hidden from GET /models/types when the
+    # Seg_Switch is off (supported_model_types below).
+    MODEL_TYPE_INSTANCE_SEGMENTATION: {
+        'description': 'RF-DETR-Seg instance segmentation',
+        'output_format': '[1,Q,4] + [1,Q,C+1] + [1,Q,H,W]'
     }
 }
+
+# The six native RF-DETR-Seg resolutions, the backend mirror of the frontend's
+# COMMON_DIMENSIONS.instance_segmentation (Req 8.1, 15.2).
+SEG_COMMON_DIMENSIONS = sorted(set(RFDETR_SEG_SIZES.values()))
+SEG_DISABLED_REASON = 'RF-DETR-Seg is disabled on this portal'
+# The legacy Smart Import pair for a three-output graph (Req 8.5): accepted as
+# a deprecated alias of instance_segmentation with the semantic Output_Mode.
+SEG_ALIAS_DEPRECATION = ('model_type=segmentation+detection_arch=rf_detr is an alias of '
+                         'instance_segmentation; send instance_segmentation with output_mode')
+
+
+def _is_class_name_list(class_names: Any, num_classes: int) -> bool:
+    """Exactly `num_classes` non-empty strings (the Seg import's class_names
+    rule, Req 8.2 -- the mirror of validate_conversion_request's)."""
+    return (isinstance(class_names, list) and len(class_names) == num_classes
+            and all(isinstance(n, str) and n.strip() for n in class_names))
+
+
+def supported_model_types() -> Dict:
+    """MODEL_TYPES as the Portal advertises them: without instance_segmentation
+    while the Seg_Switch is off, so GET /models/types agrees with the hidden
+    Smart Import tile (Req 15.2)."""
+    if rfdetr_seg_enabled():
+        return MODEL_TYPES
+    return {k: v for k, v in MODEL_TYPES.items() if k != MODEL_TYPE_INSTANCE_SEGMENTATION}
 
 
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
@@ -259,6 +308,13 @@ def inspect_checkpoint_file(local_path: str, usecase: Dict) -> Dict:
     input_width/height, architecture_hints) pre-filled from it."""
     probe = classify_checkpoint(local_path)
     unavailable = dconv.conversion_unavailable_reason(DETECTOR_EXPORT_IMAGE, _usecase_region(usecase))
+    evidence = probe.get('evidence') if isinstance(probe.get('evidence'), dict) else {}
+    if unavailable is None and evidence.get('rfdetr_task') == 'segmentation' and not rfdetr_seg_enabled():
+        # Seg_Switch OFF (rfdetr-seg-support DD7, Req 15.2): the Seg checkpoint
+        # is assessed as not convertible with this reason, so the Smart Import
+        # form keeps the PyTorch / Neo path exactly as for any non-convertible
+        # checkpoint. Detection checkpoints are unaffected.
+        unavailable = 'RF-DETR-Seg is disabled on this portal'
     assessment = dconv.assess_checkpoint(probe, conversion_available=unavailable is None,
                                          unavailable_reason=unavailable)
     info = dconv.assessment_prefill(assessment)
@@ -597,6 +653,121 @@ def _onnx_value_info_shape(vi_bytes: bytes):
     return name, dims
 
 
+SEG_CONTRACT_TEXT = '[1,Q,4] + [1,Q,C+1] + [1,Q,H,W]'
+SEG_CONTRACT_HINT = 'RF-DETR-Seg instance segmentation: boxes + logits + masks'
+SEG_SYMBOLIC_MASK_HINT = ('mask dims declared symbolically by the exporter; '
+                          'grid inferred as network_input / 4')
+
+
+def _seg_contract_from_outputs(outputs: List[Tuple[Optional[str], List[Optional[int]]]],
+                               network_input: Optional[int]) -> Tuple[Optional[Dict], str]:
+    """Match a graph's outputs against the Seg_Output_Contract (rfdetr-seg-
+    support Req 8.1): exactly three outputs -- a rank-3 tensor ending in 4
+    (boxes), a rank-3 tensor ending in S (logits, S = num_classes + 1) and a
+    rank-4 [1, Q, H, W] mask tensor -- sharing a static Q.
+
+    `outputs` are the graph's (name, dims) pairs in graph order. Returns
+    `(facts, hint)`: `facts` = {num_queries, num_classes, mask_grid,
+    output_names, symbolic_masks} when the contract matches, else None with the
+    hint that says why (`suggested_type` 'unknown'). Boxes and logits are told
+    apart by shape; when both rank-3 tensors end in 4 (a three-class model) the
+    output names decide (dets / labels) and a nameless graph is ambiguous.
+
+    Foreign unstamped export (M-1, task 0.3): a raw rfdetr 1.10.1 export never
+    went through DDA's stamp_static_output_dims, so its mask tensor declares its
+    non-batch dims symbolically (None here). It is accepted as `masks` when the
+    two rank-3 tensors match the contract and share Q, with the grid inferred as
+    network_input // 4 (the mask_downsample_ratio of every Seg size); a static
+    rank-4 shape that contradicts Q or that grid is still unknown."""
+    shapes = [dims for _n, dims in outputs]
+    if len(outputs) != 3:
+        return None, (f'{len(outputs)} output tensors {shapes}: not the RF-DETR-Seg contract '
+                      f'{SEG_CONTRACT_TEXT}; set the model type manually.')
+    rank3 = [(n, d) for n, d in outputs if len(d) == 3]
+    rank4 = [(n, d) for n, d in outputs if len(d) == 4]
+    if len(rank3) != 2 or len(rank4) != 1:
+        return None, (f'3 output tensors {shapes}: expected two rank-3 tensors (boxes, logits) '
+                      f'and one rank-4 mask tensor {SEG_CONTRACT_TEXT}; set the model type manually.')
+    ends_in_4 = [i for i, (_n, d) in enumerate(rank3) if d[-1] == 4]
+    names = [n for n, _d in rank3]
+    if len(ends_in_4) == 1:
+        box_index = ends_in_4[0]
+    elif len(ends_in_4) == 2:
+        # S == 4 (a three-class model): the names decide, as the Conversion_Job
+        # and the device decoder do (C30).
+        if 'dets' in names:
+            box_index = names.index('dets')
+        elif 'labels' in names:
+            box_index = 1 - names.index('labels')
+        else:
+            return None, (f'two [1, Q, 4] outputs {shapes}: boxes and logits cannot be told apart '
+                          'without output names (dets / labels); set the model type and classes '
+                          'manually.')
+    else:
+        return None, (f'3 output tensors {shapes}: no [1, Q, 4] boxes tensor '
+                      f'{SEG_CONTRACT_TEXT}; set the model type manually.')
+    boxes = rank3[box_index]
+    logits = rank3[1 - box_index]
+    queries = boxes[1][1]
+    slots = logits[1][-1]
+    if not isinstance(queries, int) or logits[1][1] != queries or not isinstance(slots, int) or slots < 2:
+        return None, (f'3 output tensors {shapes}: boxes and logits must be [1, Q, 4] and [1, Q, C+1] '
+                      f'sharing a static Q; set the model type manually.')
+    _batch, mask_q, mask_h, mask_w = rank4[0][1]
+    if mask_q is not None and mask_q != queries:
+        return None, (f'3 output tensors {shapes}: the mask tensor does not share Q={queries} with '
+                      f'boxes and logits; set the model type manually.')
+    inferred = (int(network_input) // RFDETR_SEG_MASK_DOWNSAMPLE) if network_input else None
+    symbolic = mask_h is None or mask_w is None
+    if symbolic:
+        if inferred is None:
+            return None, (f'3 output tensors {shapes}: the mask grid is symbolic and the graph input is '
+                          'dynamic, so it cannot be inferred; set the model type manually.')
+        mask_grid = [inferred, inferred]
+    else:
+        if inferred is not None and (mask_h, mask_w) != (inferred, inferred):
+            return None, (f'3 output tensors {shapes}: the mask grid [{mask_h}, {mask_w}] contradicts '
+                          f'network_input // {RFDETR_SEG_MASK_DOWNSAMPLE} = {inferred}; set the model type '
+                          'manually.')
+        mask_grid = [int(mask_h), int(mask_w)]
+    names = [n for n, _d in outputs]
+    hint = SEG_CONTRACT_HINT + (f' ({SEG_SYMBOLIC_MASK_HINT})' if symbolic else '')
+    return {
+        'num_queries': int(queries),
+        'num_classes': int(slots) - 1,
+        'mask_grid': mask_grid,
+        'output_names': names if all(isinstance(n, str) and n for n in names) else None,
+        'symbolic_masks': symbolic,
+    }, hint
+
+
+def _seg_geometry_problem(model_info: Dict, image_width: int, image_height: int) -> Optional[str]:
+    """The request's image_width / image_height against the inspected Seg
+    graph (rfdetr-seg-support design, "Validation of external inputs": for Seg
+    the dims must equal the graph input -> 400). The package writes the
+    request's dims as the stage input and derives the mask grid from them, so
+    a mismatch would ship a component the device cannot run (onnxruntime
+    refuses the tensor for a static graph) or whose manifest grid contradicts
+    the real mask tensor. Returns the error text, or None when the request
+    agrees with every static dim the graph declares: a static input dim must
+    equal the request's, and a mask grid read from static dims (not inferred
+    from the input, M-1) must equal the request // RFDETR_SEG_MASK_DOWNSAMPLE
+    -- the one check a dynamic-input graph still gets."""
+    graph_w = model_info.get('input_width')
+    graph_h = model_info.get('input_height')
+    if ((isinstance(graph_w, int) and graph_w != image_width)
+            or (isinstance(graph_h, int) and graph_h != image_height)):
+        return (f'image_width/image_height {image_width}x{image_height} must equal the graph input '
+                f'{graph_w}x{graph_h}')
+    mask_dims = next((s for s in model_info.get('output_shapes') or [] if len(s) == 4), None)
+    if mask_dims is not None and isinstance(mask_dims[2], int) and isinstance(mask_dims[3], int):
+        expected = [image_width // RFDETR_SEG_MASK_DOWNSAMPLE, image_height // RFDETR_SEG_MASK_DOWNSAMPLE]
+        if expected != list(model_info['mask_grid']):
+            return (f'image_width/image_height {image_width}x{image_height} imply a mask grid {expected}; '
+                    f'the graph declares {model_info["mask_grid"]}')
+    return None
+
+
 def inspect_onnx_model(model_path: str) -> Dict:
     """Parse an ONNX model's input/output tensor shapes and infer model
     attributes (input size, task/architecture, num_classes) for UI pre-fill.
@@ -605,7 +776,12 @@ def inspect_onnx_model(model_path: str) -> Dict:
       * 1 output  -> YOLO detection ([1, 4+C, N] or [1, N, 4+C]); C = the
         non-anchor dim minus 4.
       * 2 outputs -> RF-DETR detection (boxes [1,Q,4] + logits [1,Q,C]).
-      * 3 outputs -> RF-DETR instance segmentation (adds a 4-D mask tensor).
+      * 3 outputs -> RF-DETR-Seg instance segmentation when they match the
+        Seg_Output_Contract (_seg_contract_from_outputs): suggested_type
+        'instance_segmentation', detection_arch 'rf_detr_seg', num_classes =
+        the logits slot count minus the background slot, num_queries,
+        mask_grid, network_input and the output names in graph order;
+        otherwise 'unknown' with a hint naming the shapes (Req 8.1).
       * 2-D single output [1, C] -> classification (C classes).
     """
     info: Dict[str, Any] = {'type': 'onnx', 'architecture_hints': []}
@@ -650,15 +826,24 @@ def inspect_onnx_model(model_path: str) -> Dict:
             info['architecture_hints'].append(
                 'RF-DETR-style detection: 2 output tensors (boxes + logits), NMS-free.')
         elif n_out >= 3:
-            # RF-DETR instance segmentation: boxes + logits + mask tensor(s).
-            logits = next((s for s in out_shapes if s and len(s) == 3 and last_dim(s) != 4), None)
-            info['suggested_type'] = 'segmentation'
-            info['detection_arch'] = 'rf_detr'
-            if logits is not None and last_dim(logits):
-                info['num_classes'] = int(last_dim(logits))
-            info['architecture_hints'].append(
-                'RF-DETR-style instance segmentation: 3 output tensors '
-                '(boxes + logits + masks).')
+            # RF-DETR-Seg (rfdetr-seg-support Req 8.1): exactly three outputs
+            # matching the Seg_Output_Contract, or 'unknown' -- never Seg on a
+            # guess. The (name, dims) pairs are kept: the names settle a
+            # three-class graph and are written into the manifest.
+            network_input = info.get('input_width')
+            facts, hint = _seg_contract_from_outputs(
+                [(n, dims) for n, dims in outputs if dims], network_input)
+            if facts is None:
+                info['suggested_type'] = 'unknown'
+            else:
+                info['suggested_type'] = MODEL_TYPE_INSTANCE_SEGMENTATION
+                info['detection_arch'] = 'rf_detr_seg'
+                info['num_classes'] = facts['num_classes']
+                info['num_queries'] = facts['num_queries']
+                info['mask_grid'] = facts['mask_grid']
+                info['network_input'] = network_input
+                info['output_names'] = facts['output_names']
+            info['architecture_hints'].append(hint)
         elif n_out == 1:
             s = out_shapes[0]
             if s and len(s) == 3:
@@ -844,6 +1029,10 @@ def generate_dda_package(
     iou_threshold: float = 0.45,
     detection_arch: str = 'yolo',
     preserve_aspect: bool = False,
+    output_mode: Optional[str] = None,
+    mask_threshold: Optional[float] = None,
+    num_queries: Optional[int] = None,
+    output_names: Optional[List[str]] = None,
 ) -> str:
     """
     Generate a DDA-compatible package from a raw model file.
@@ -868,19 +1057,48 @@ def generate_dda_package(
         lfv_model_template.__load_model_graph_config merges into every stage so
         BasicPreProcessor._preserve_aspect finds it. Defaults to False to keep
         existing squash-trained imports byte-identical.
+    :param output_mode/mask_threshold/num_queries/output_names: RF-DETR-Seg
+        ONNX only (model_type 'instance_segmentation'; rfdetr-seg-support
+        Req 6.2 / 8.2): the Output_Mode ('instance' default, or 'semantic'),
+        the mask binarisation threshold (default 0.5), the graph's query
+        count Q (default: the Seg size whose native resolution is the input,
+        else RFDETR_TOP_K) and the graph's output names in order. The
+        manifest is built by detection_training.build_detection_device_manifest
+        -- the builder packaging uses for a portal-trained Seg model -- with
+        the three real output shapes [1, Q, 4] / [1, Q, C + 1] /
+        [1, Q, R/4, R/4] on the stage, so the two manifests are byte-identical
+        (pinned by tests/test_detection_manifest_parity.py). Ignored for every
+        other model type.
     """
     temp_dir = None
     is_onnx = str(export_format).lower() == 'onnx'
     is_detection = model_type == 'object_detection'
     detection_arch = str(detection_arch or 'yolo').lower()
-    # RF-DETR instance-segmentation ONNX -> rendered as a semantic mask through
-    # the existing anomaly-localization path (colored mask + overlay + color map).
-    is_rf_detr_seg = is_onnx and model_type == 'segmentation' and detection_arch == 'rf_detr'
+    # RF-DETR-Seg ONNX (rfdetr-seg-support Req 6.2): the shared builder writes
+    # the manifest. convert_model rewrites the legacy alias (model_type
+    # 'segmentation' + detection_arch 'rf_detr') to this type before the call.
+    is_rf_detr_seg = is_onnx and model_type == MODEL_TYPE_INSTANCE_SEGMENTATION
     # Map the detection architecture to the on-device stage type / decoder.
     detection_stage_type = (
         'rf_detr_object_detection' if detection_arch == 'rf_detr'
         else 'yolo_object_detection'
     )
+    seg_shapes = None
+    if is_rf_detr_seg:
+        # The Seg_Output_Contract's three shapes from what the caller knows
+        # about the graph (inspect_onnx_model: Q, C = S - 1, the input R).
+        seg_num_classes = int(num_classes) if num_classes else len(class_names or [])
+        if seg_num_classes < 1:
+            raise ValueError("instance_segmentation needs num_classes or class_names")
+        num_classes = seg_num_classes
+        if num_queries:
+            queries = int(num_queries)
+        else:
+            queries = next((RFDETR_SEG_QUERIES_FOR_SIZE[size] for size, native in RFDETR_SEG_SIZES.items()
+                            if native == int(image_width)), RFDETR_TOP_K)
+        grid = int(image_width) // RFDETR_SEG_MASK_DOWNSAMPLE
+        seg_shapes = ([1, queries, 4], [1, queries, seg_num_classes + 1], [1, queries, grid, grid])
+        seg_stage_type = stage_type_for('rf_detr_seg', output_mode)
 
     try:
         # Create temp directory
@@ -892,7 +1110,9 @@ def generate_dda_package(
         input_shape = [1, 3, image_height, image_width]
         
         # Determine output shape based on model type
-        if model_type == 'classification':
+        if is_rf_detr_seg:
+            output_shape = list(seg_shapes[1])  # the logits tensor, as packaging writes it
+        elif model_type == 'classification':
             output_shape = [1, num_classes or 2]
         elif model_type == 'object_detection':
             # YOLO-style output
@@ -921,7 +1141,10 @@ def generate_dda_package(
             yaml.dump(config, f, default_flow_style=False)
         
         # 2. Create mochi.json
-        mochi_stage_type = detection_stage_type if (is_onnx and is_detection) else model_type
+        if is_rf_detr_seg:
+            mochi_stage_type = seg_stage_type
+        else:
+            mochi_stage_type = detection_stage_type if (is_onnx and is_detection) else model_type
         mochi = {
             'stages': [
                 {
@@ -945,26 +1168,48 @@ def generate_dda_package(
             json.dump(mochi, f, indent=2)
         
         # 3. Create manifest.json
-        if is_onnx:
+        if is_rf_detr_seg:
+            # RF-DETR-Seg ONNX (rfdetr-seg-support DD6, Req 6.2): the manifest
+            # the shared builder writes for a portal-trained Seg model -- the
+            # stage type per Output_Mode, normalize: True, the top-level
+            # detection block (layout rf_detr, top_k, mask_threshold,
+            # output_mode, output_names, class_names), pixel_level_classes
+            # with exactly num_classes + 1 names -- minus the `dataset` block
+            # (kept in config.yaml; package_onnx_component merges it later),
+            # plus the three real output shapes packaging writes on the stage.
+            artifact_filename = "model.onnx"
+            manifest = build_detection_device_manifest(
+                image_width=image_width,
+                image_height=image_height,
+                num_classes=num_classes,
+                class_names=list(class_names) if class_names else None,
+                score_threshold=score_threshold,
+                preserve_aspect=bool(preserve_aspect),
+                detection_arch='rf_detr_seg',
+                top_k=seg_shapes[0][1],
+                output_mode=output_mode,
+                mask_threshold=mask_threshold,
+                output_names=list(output_names) if output_names else None,
+            )
+            manifest.pop('dataset')
+            stage = manifest["model_graph"]["stages"][0]
+            stage["output_shape"] = list(seg_shapes[1])
+            stage["output_shapes"] = [list(s) for s in seg_shapes]
+        elif is_onnx:
             # ONNX package for the pluggable ONNX Runtime engine. For detection
             # models, wire the object-detection task path the device serving
             # code (Phases B/C) reads.
             artifact_filename = "model.onnx"
             # Map the user-facing model_type to the device stage type and graph.
-            if is_detection:
-                stage_type = detection_stage_type
-            elif is_rf_detr_seg:
-                stage_type = 'rf_detr_semantic_segmentation'
-            else:
-                stage_type = model_type
+            stage_type = detection_stage_type if is_detection else model_type
             # Preprocessing differs by architecture:
             #  - YOLO: 0..1 scaling only (image_range_scale), NO ImageNet
             #    mean/std normalization.
-            #  - RF-DETR (DETR-family, detection AND segmentation): 0..1 scaling
-            #    THEN ImageNet mean/std normalization, i.e. (pixel/255 - mean)/std.
-            #    BasicPreProcessor applies the ImageNet MEAN/STD when
-            #    normalize=True; omitting it yields garbage output.
-            detection_normalize = (is_detection and detection_arch == 'rf_detr') or is_rf_detr_seg
+            #  - RF-DETR (DETR-family): 0..1 scaling THEN ImageNet mean/std
+            #    normalization, i.e. (pixel/255 - mean)/std. BasicPreProcessor
+            #    applies the ImageNet MEAN/STD when normalize=True; omitting it
+            #    yields garbage output.
+            detection_normalize = is_detection and detection_arch == 'rf_detr'
             stage = {
                 "type": stage_type,
                 "input_shape": input_shape,
@@ -990,30 +1235,7 @@ def generate_dda_package(
                     "channel_order": "RGB",
                 },
             }
-            if is_rf_detr_seg:
-                # Semantic segmentation via the anomaly-localization path: the
-                # task stays "anomaly" (default) so the base model emits the
-                # colored mask + overlay + per-class color map. pixel_level_classes
-                # (index 0 = background) enables localization and provides the
-                # class name / color-map labels.
-                seg_num_classes = int(num_classes or 91)  # RF-DETR-seg-nano COCO default
-                if class_names and len(class_names) >= seg_num_classes:
-                    class_labels = list(class_names[:seg_num_classes])
-                else:
-                    class_labels = [f"class_{i}" for i in range(seg_num_classes)]
-                manifest["model_graph"]["pixel_level_classes"] = {
-                    "names": ["background"] + class_labels,
-                    "normal_ids": [0],
-                }
-                # Seg decoder config (read from the stage by the post-processor).
-                stage["detection"] = {
-                    "layout": "rf_detr",
-                    "num_classes": seg_num_classes,
-                    "score_threshold": score_threshold,
-                    "mask_threshold": 0.5,
-                    "network_input": image_width,
-                }
-            elif is_detection:
+            if is_detection:
                 manifest["task"] = "object_detection"
                 manifest["detection"] = {
                     "layout": detection_arch,  # 'yolo' | 'rf_detr' (decoder family)
@@ -1109,14 +1331,29 @@ def convert_model(event: Dict, context: Any) -> Dict:
         "usecase_id": "string",
         "model_s3_uri": "s3://bucket/path/model.pt",  // Raw .pt file
         "model_name": "string",
-        "model_type": "classification" | "object_detection" | "segmentation" | "anomaly_detection",
+        "model_type": "classification" | "object_detection" | "segmentation" | "anomaly_detection"
+                      | "instance_segmentation",  // RF-DETR-Seg ONNX (rfdetr-seg-support Req 8)
         "image_width": 224,
         "image_height": 224,
         "num_classes": 10,  // optional
-        "class_names": ["class1", "class2"],  // optional
+        "class_names": ["class1", "class2"],  // optional; required for instance_segmentation
         "preserve_aspect": true,  // optional, detection: letterbox instead of squash
+        "output_mode": "instance" | "semantic",  // optional, instance_segmentation only
+        "mask_threshold": 0.5,  // optional, instance_segmentation only
         "auto_import": true  // optional, auto-import after conversion
     }
+
+    RF-DETR-Seg (model_type instance_segmentation, ONNX source): the graph is
+    inspected after download and must match the Seg_Output_Contract, and
+    image_width / image_height must equal its input (a static mask grid must
+    equal them // 4); class names are required (len == num_classes);
+    score_threshold defaults to 0.5;
+    iou_threshold is refused; the manifest is built per output_mode through the
+    shared builder; the response carries output_mode and the auto-import body
+    the record's detection block. The legacy alias model_type 'segmentation' +
+    detection_arch 'rf_detr' (ONNX) is rewritten to instance_segmentation /
+    rf_detr_seg / semantic and answered with a `deprecation` note (Req 8.5).
+    Every other model type is byte-identical to before (Req 8.8).
     """
     try:
         # Extract user info
@@ -1157,6 +1394,41 @@ def convert_model(event: Dict, context: Any) -> Dict:
             return create_response(400, {
                 'error': f"Invalid model_type. Must be one of: {', '.join(MODEL_TYPES.keys())}"
             })
+
+        # RF-DETR-Seg request gates (rfdetr-seg-support Req 8.2, 8.3, 8.5,
+        # 15.2; design s8 Convert), in this order: the legacy alias
+        # 'segmentation' + 'rf_detr' + ONNX is rewritten to the new
+        # identifiers with the semantic Output_Mode (the package those callers
+        # got before) and a deprecation note; then the Seg_Switch; then the
+        # fields RF-DETR-Seg refuses or implies. Nothing here runs for any
+        # other model type, whose path stays byte-identical (Req 8.8).
+        deprecation = None
+        output_mode = None
+        if model_type == 'segmentation' and detection_arch == 'rf_detr' and export_format == 'onnx':
+            model_type = MODEL_TYPE_INSTANCE_SEGMENTATION
+            detection_arch = 'rf_detr_seg'
+            output_mode = OUTPUT_MODE_SEMANTIC
+            deprecation = SEG_ALIAS_DEPRECATION
+        is_seg = model_type == MODEL_TYPE_INSTANCE_SEGMENTATION
+        if is_seg and not rfdetr_seg_enabled():
+            return create_response(403, {'error': SEG_DISABLED_REASON})
+        if is_seg and body.get('iou_threshold') is not None:
+            # One rule for the DETR family (Req 7.3 / 8.3): set-based decoding,
+            # no NMS -- refused, never ignored. The RF-DETR detection import
+            # keeps ignoring the field exactly as today.
+            return create_response(400, {'error': "'iou_threshold' does not apply to RF-DETR-Seg"})
+        if is_seg and body.get('detection_arch') in (None, ''):
+            # The Seg tile sends no arch; the 'yolo' default above is for the
+            # other types only (vocabulary gate, C27).
+            detection_arch = 'rf_detr_seg'
+        if is_seg and detection_arch != 'rf_detr_seg':
+            return create_response(400, {
+                'error': f"model_type instance_segmentation requires detection_arch rf_detr_seg; "
+                         f"got {body.get('detection_arch')!r}"})
+        if detection_arch == 'rf_detr_seg' and not is_seg:
+            return create_response(400, {
+                'error': f"detection_arch rf_detr_seg requires model_type instance_segmentation; "
+                         f"got {model_type!r}"})
         
         # Validate dimensions
         if image_width <= 0 or image_height <= 0:
@@ -1207,13 +1479,47 @@ def convert_model(event: Dict, context: Any) -> Dict:
             return convert_checkpoint(body, user, usecase, credentials, s3_client,
                                       source_bucket, source_key, model_s3_uri)
 
+        # RF-DETR-Seg ONNX fields (Req 8.2, 8.3), parsed after the .pth
+        # dispatch above (validate_conversion_request owns that path's
+        # vocabulary): the Output_Mode (the alias already fixed 'semantic'),
+        # the mask threshold and the Seg score default of 0.5 -- the generic
+        # 0.25 above stays for every other type -- and the record's fixed
+        # square-resize geometry. mask_threshold / num_queries / output_names
+        # stay None for every other model type (generate_dda_package ignores
+        # them there).
+        is_onnx = export_format == 'onnx'
+        seg_onnx = is_seg and is_onnx
+        mask_threshold = None
+        num_queries = None
+        output_names = None
+        if seg_onnx:
+            if output_mode is None:
+                output_mode = str(body.get('output_mode') or DEFAULT_OUTPUT_MODE).strip().lower()
+                if output_mode not in OUTPUT_MODES:
+                    return create_response(400, {
+                        'error': f"Invalid output_mode '{body.get('output_mode')}': "
+                                 f"expected one of {', '.join(OUTPUT_MODES)}"})
+            raw_mask = body.get('mask_threshold')
+            mask_threshold = dconv.DEFAULT_MASK_THRESHOLD if raw_mask is None else float(raw_mask)
+            if not 0.0 < mask_threshold < 1.0:
+                return create_response(400, {'error': "'mask_threshold' must be strictly between 0 and 1"})
+            if body.get('score_threshold') is None:
+                score_threshold = dconv.DEFAULT_SCORE_THRESHOLD['rf_detr_seg']
+            if not 0.0 < score_threshold < 1.0:
+                return create_response(400, {'error': "'score_threshold' must be strictly between 0 and 1"})
+            if body.get('preserve_aspect') is not None and bool(body.get('preserve_aspect')):
+                # The record and manifest carry preserve_aspect: false (square
+                # resize + ImageNet normalisation, as every RF-DETR export).
+                return create_response(400, {
+                    'error': "'preserve_aspect' must be false for RF-DETR-Seg (square resize, as trained)"})
+            preserve_aspect = False
+
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_convert_")
         
         try:
             # Download the model file. Use an extension matching the source so
             # ONNX packages carry model.onnx and the torch inspector is skipped.
-            is_onnx = export_format == 'onnx'
             local_name = 'model.onnx' if is_onnx else 'model.pt'
             local_model = os.path.join(temp_dir, local_name)
             logger.info(f"Downloading model from {model_s3_uri}")
@@ -1225,9 +1531,50 @@ def convert_model(event: Dict, context: Any) -> Dict:
             hex8 = uuid.uuid4().hex[:8]
 
             # Inspect the model (PyTorch only; ONNX is opaque to the torch
-            # inspector and doesn't need it).
+            # inspector and doesn't need it -- except the two segmentation
+            # types, whose graph decides the path, DD15).
             fine_tunable = None
-            if is_onnx:
+            if is_onnx and (is_seg or model_type == 'segmentation'):
+                model_info = inspect_onnx_model(local_model)
+                graph_is_seg = model_info.get('suggested_type') == MODEL_TYPE_INSTANCE_SEGMENTATION
+                if is_seg and not graph_is_seg:
+                    return create_response(400, {
+                        'error': f"instance_segmentation needs an RF-DETR-Seg graph {SEG_CONTRACT_TEXT}; "
+                                 f"got output shapes {model_info.get('output_shapes')}"})
+                if graph_is_seg and not is_seg:
+                    # A generic 'segmentation' request over a Seg graph would
+                    # produce the semantic package that cannot decode on the
+                    # device (Req 8.5): refused, not silently packaged.
+                    return create_response(400, {
+                        'error': 'this is an RF-DETR-Seg graph; import it as model_type '
+                                 'instance_segmentation'})
+                if is_seg:
+                    # The request's dims must equal the graph input (design
+                    # "Validation of external inputs"): the package takes them
+                    # as the stage input and derives the mask grid from them.
+                    geometry_error = _seg_geometry_problem(model_info, image_width, image_height)
+                    if geometry_error:
+                        return create_response(400, {'error': geometry_error})
+                    # num_classes defaults to the graph's S - 1 (the user may
+                    # override to S for a foreign graph without a background
+                    # slot); class_names are required with exactly that many
+                    # entries -- no class_{i} placeholders (Req 8.2). Written
+                    # as compound conditions: tests/mcp/_handler_ast.py reads
+                    # a bare `if not class_names: return 400` as a required
+                    # body key, which the detection callers cannot satisfy.
+                    if num_classes is None:
+                        num_classes = model_info['num_classes']
+                    num_classes = int(num_classes)
+                    if is_seg and not class_names:
+                        return create_response(400, {
+                            'error': f'class_names must list {num_classes} names'})
+                    if not _is_class_name_list(class_names, num_classes):
+                        return create_response(400, {
+                            'error': f'class_names must list {num_classes} names; got {class_names!r}'})
+                    class_names = [str(n).strip() for n in class_names]
+                    num_queries = model_info['num_queries']
+                    output_names = model_info['output_names']
+            elif is_onnx:
                 model_info = {'type': 'onnx', 'architecture_hints': ['ONNX model']}
             else:
                 # Requirement 7: a .pt/.pth Smart Import is packaged verbatim
@@ -1274,6 +1621,12 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 iou_threshold=iou_threshold,
                 detection_arch=detection_arch,
                 preserve_aspect=preserve_aspect,
+                # RF-DETR-Seg ONNX only (None otherwise): the manifest comes
+                # from the shared builder per Output_Mode (DD6, task 6.3).
+                output_mode=output_mode,
+                mask_threshold=mask_threshold,
+                num_queries=num_queries,
+                output_names=output_names,
             )
             
             # Upload converted package to S3
@@ -1310,6 +1663,36 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 'fine_tunable': fine_tunable,
                 'message': 'Model converted successfully'
             }
+            import_body = {
+                'usecase_id': usecase_id,
+                'model_name': model_name,
+                'model_version': '1.0.0',
+                'model_s3_uri': output_s3_uri,
+                'description': f'Auto-converted from {model_s3_uri}',
+                'fine_tunable': fine_tunable,
+            }
+            if seg_onnx:
+                # RF-DETR-Seg only (Req 8.3, 8.5; C33): the response names the
+                # Output_Mode (and the alias its deprecation), and the import
+                # body carries the record's model_type and detection block so
+                # Model Detail and the Base model control read the import like
+                # a Seg training. Every other payload is byte-identical.
+                result['output_mode'] = output_mode
+                if deprecation:
+                    result['deprecation'] = deprecation
+                import_body['model_type'] = model_type
+                import_body['detection'] = {
+                    'detection_arch': detection_arch,
+                    'num_classes': num_classes,
+                    'class_names': class_names,
+                    'score_threshold': score_threshold,
+                    'mask_threshold': mask_threshold,
+                    'top_k': num_queries,
+                    'network_input_width': image_width,
+                    'network_input_height': image_height,
+                    'preserve_aspect': False,
+                    'output_mode': output_mode,
+                }
             
             # Auto-import if requested
             if auto_import:
@@ -1321,14 +1704,7 @@ def convert_model(event: Dict, context: Any) -> Dict:
                     import_event = {
                         'httpMethod': 'POST',
                         'path': '/api/v1/models/import',
-                        'body': json.dumps({
-                            'usecase_id': usecase_id,
-                            'model_name': model_name,
-                            'model_version': '1.0.0',
-                            'model_s3_uri': output_s3_uri,
-                            'description': f'Auto-converted from {model_s3_uri}',
-                            'fine_tunable': fine_tunable,
-                        }),
+                        'body': json.dumps(import_body),
                         'requestContext': {
                             'authorizer': {
                                 'claims': {
@@ -1458,6 +1834,13 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
             # Inspect the model
             if is_onnx:
                 model_info = inspect_onnx_model(local_model)
+                if model_info.get('suggested_type') == MODEL_TYPE_INSTANCE_SEGMENTATION \
+                        and not rfdetr_seg_enabled():
+                    # Seg_Switch OFF (rfdetr-seg-support DD7, C4): the graph
+                    # is still reported as RF-DETR-Seg, with the reason the
+                    # Smart Import page cannot offer that type.
+                    model_info['disabled_reason'] = SEG_DISABLED_REASON
+                    model_info['architecture_hints'].append(SEG_DISABLED_REASON)
             elif is_checkpoint:
                 # Envelope-only classification + conversion assessment
                 # (Requirement 2): never torch, never an unpickle.
@@ -1489,14 +1872,19 @@ def get_supported_types(event: Dict, context: Any) -> Dict:
     """
     Get supported model types for conversion.
     GET /api/v1/models/types
+
+    The one Portal surface that enumerates the convertible types, so it lists
+    instance_segmentation only while the Seg_Switch is on (rfdetr-seg-support
+    Req 8.1, 15.2) and carries the six native Seg resolutions.
     """
     return create_response(200, {
-        'model_types': MODEL_TYPES,
+        'model_types': supported_model_types(),
         'common_dimensions': {
             'classification': [224, 256, 299, 384, 512],
             'object_detection': [320, 416, 512, 640, 1280],
             'segmentation': [256, 512, 768, 1024],
-            'anomaly_detection': [224, 256, 512]
+            'anomaly_detection': [224, 256, 512],
+            MODEL_TYPE_INSTANCE_SEGMENTATION: list(SEG_COMMON_DIMENSIONS),
         },
         'supported_frameworks': ['PYTORCH'],
         'framework_versions': ['1.8', '1.9', '1.10', '1.11', '1.12', '1.13', '2.0']

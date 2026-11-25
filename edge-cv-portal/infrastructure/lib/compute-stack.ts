@@ -36,6 +36,7 @@ import {
   detectorExportImage as resolveDetectorExportImage,
   groundedSamWorkerEnabled,
   portalRegistryEnforced,
+  rfDetrSegEnabled,
 } from './context-helpers';
 import { PYTHON_CONTAINER_ASSET_EXCLUDES } from './container-asset-excludes';
 
@@ -803,6 +804,66 @@ export class ComputeStack extends cdk.Stack {
         x86_64_nvidia: '1.0.47',
       }),
     };
+    // The RF-DETR-Seg Seg_Switch (rfdetr-seg-support Requirement 15.1,
+    // design DD7, owner decision O12 b): the feature's ONE configuration-only
+    // off switch, default ON. `-c enableRfDetrSeg=false` is the only value
+    // that turns it off (context-helpers rfDetrSegEnabled, the
+    // groundedSamWorkerEnabled rule). Spread into exactly the three handlers
+    // that read it at request time — TrainingHandler (POST /training with
+    // model_type instance_segmentation), ModelConverterHandler (inspect /
+    // convert) and PackagingHandler (the output_mode override) — never into
+    // the shared lambdaEnvironment, and never into the MCP Lambda: the MCP
+    // tools invoke those handlers and relay their 403 (Requirement 15.2). The
+    // same value is published as the RfDetrSegEnabled stack output, which
+    // deploy-frontend.sh copies into config.json rfDetrSegEnabled so the
+    // frontend hides the Seg pickers and tiles when the backend refuses them.
+    const rfDetrSegEnvironment = {
+      PORTAL_RFDETR_SEG_ENABLED: rfDetrSegEnabled(
+        this.node.tryGetContext('enableRfDetrSeg'),
+      )
+        ? 'true'
+        : 'false',
+    };
+    // The RF-DETR-Seg FEATURE floor (rfdetr-seg-support Requirement 14.8,
+    // design DD8): per arch, the first LocalServer build carrying the Seg
+    // device contract (the rf_detr_instance_segmentation stage type, mask_rle
+    // in the Detection_List, the detections column, the mask-forwarding
+    // marshal). An older LocalServer fails a Seg workflow at model load in
+    // instance mode and runs the pre-Seg decoder in semantic mode. The
+    // Component_Packager (WorkflowPackagingHandler) and the pre-submit
+    // deployment gate (DeploymentsHandler) read this one literal, so they
+    // cannot disagree; the packager resolves a Seg workflow's floors as the
+    // maximum of the lineage, stream and Seg floors. Absent / empty FAILS
+    // CLOSED: a workflow referencing a Seg model is rejected for every arch
+    // with RFDETR_SEG_UNSUPPORTED_ARCH until the entries exist. Owner-filled
+    // from tasks.md (group 20) in ONE change after the six Requirement 14.5
+    // builds exist, keyed by workflow_core arch id: arm64_cpu, arm64_jp5,
+    // arm64_jp6, arm64_jp7, x86_64 and x86_64_nvidia (both of the last two
+    // run aws.edgeml.dda.LocalServer.amd64, so both take the .amd64 build's
+    // version; the .amd64Nvidia component is outside the arch map). An arch
+    // whose build or hardware verification is late is listed in
+    // tests/test_rfdetr_seg_feature_floor_coverage.py's unverified set
+    // instead of here. WORKFLOW_MIN_LOCAL_SERVER_VERSIONS above and the
+    // stream literal are not raised for Seg.
+    // Filled by spec group 20 (task 20.1) from the Requirement 14.5 builds of
+    // the Seg-capable LocalServer: arm64_jp5 / arm64_jp6 are the first
+    // arm64JP5 / arm64JP6 builds carrying the Seg contract, x86_64 and
+    // x86_64_nvidia the first .amd64 build (both arch ids run that
+    // component). arm64_jp6 was raised to the rebuilt image verified on a
+    // JP6 device (spec group 22; Requirement 14.8 d ii: a failed build stays
+    // below the floor). arm64_jp7 has no entry: no JP7 device was available
+    // for the Requirement 18 run (14.8 d iii), so its candidate build stays
+    // unverified and Seg workflows are refused for that architecture until a
+    // device verifies it. arm64_cpu has no Portal build target. Both are
+    // listed as unverified in tests/test_rfdetr_seg_feature_floor_coverage.py.
+    const rfDetrSegFeatureFloorEnvironment = {
+      WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
+        arm64_jp5: '1.0.62',
+        arm64_jp6: '1.0.85',
+        x86_64: '1.0.56',
+        x86_64_nvidia: '1.0.56',
+      }),
+    };
 
     // Per-model Model_Image_Limit overrides for `llm:` auto-label requests
     // (llm-autolabel-prompt-tuning Req 7.1): a JSON object keyed by model
@@ -1300,6 +1361,7 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         ...streamCameraFeatureFloorEnvironment,
+        ...rfDetrSegFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-04-deployments',
       },
       // workflow_core: the manual-override path of validate_camera_bindings
@@ -1414,6 +1476,11 @@ export class ComputeStack extends cdk.Stack {
       environment: lambdaEnvironment,
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
+      // A captures page parses up to `limit` Detection_Lists (an instance
+      // capture's list may reach the device's 4 MiB ceiling) on a bounded
+      // thread pool: 1024 MB over the 128 MB default (rfdetr-seg-support
+      // Req 11.1 / 14.3, design "Page cost"). No IAM or environment change.
+      memorySize: 1024,
     });
     // captures.py lists and reads the default inference-results bucket
     // (list_objects_v2, get_object and a presigned get_object URL signed with
@@ -1483,15 +1550,21 @@ export class ComputeStack extends cdk.Stack {
     // SageMaker extracts the archive flat), so the Lambda asset must carry all
     // of them. They live in datasets/ (outside backend/), so the
     // TrainingHandler asset is bundled: functions/ plus a detection_training/
-    // subdir holding exactly these seven files. The bundler runs locally
+    // subdir holding exactly these eight files. The bundler runs locally
     // (plain file copies); the Docker image is only the fallback CDK requires
     // when no local shell is available. Both paths copy this one list.
+    // build_sourcedir_tarball picks the chosen arch's entry point out of the
+    // bundle (train.py, train_rfdetr.py, or train_rfdetr_seg.py plus its
+    // train_rfdetr.py sibling for RF-DETR-Seg, rfdetr-seg-support Req 14.1),
+    // so the YOLO and RF-DETR sourcedir tarballs are unchanged by the Seg
+    // entry point joining the bundle.
     // ---------------------------------------------------------------------
     const functionsDir = path.join(__dirname, '../../backend/functions');
     const datasetsDir = path.join(__dirname, '../../../datasets');
     const detectionTrainingFiles = [
       'detection_training/train.py',
       'detection_training/train_rfdetr.py',
+      'detection_training/train_rfdetr_seg.py',
       'detection_training/_common.py',
       'detection_training/requirements.txt',
       'detection_training/requirements-rfdetr.txt',
@@ -1552,6 +1625,7 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('Training'),
       environment: {
         ...lambdaEnvironment,
+        ...rfDetrSegEnvironment,
         CODE_VERSION: '2026-09-13-v1', // Force update - object detection (YOLO) training path
         DETECTION_TRAINING_IMAGE: detectionTrainingImage,
       },
@@ -1583,6 +1657,7 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('Packaging'),
       environment: {
         ...lambdaEnvironment,
+        ...rfDetrSegEnvironment,
         STORAGE_WARNING_THRESHOLD: '6442450944', // 6GB in bytes
         STORAGE_CRITICAL_THRESHOLD: '7516192768', // 7GB in bytes
         ENABLE_STREAMING_PROCESSING: 'true',
@@ -1804,6 +1879,7 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         ...uploadCorsEnvironment,
+        ...rfDetrSegEnvironment,
         MODEL_IMPORT_FUNCTION_NAME: modelImportHandler.functionName,
         CODE_VERSION: '2025-01-10-converter',
         // detector-checkpoint-import: the pinned Export_Image; '' disables
@@ -3295,6 +3371,7 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         ...streamCameraFeatureFloorEnvironment,
+        ...rfDetrSegFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-25-workflow-packaging',
       },
       layers: [sharedLayer, workflowCoreLayer],
@@ -4204,6 +4281,16 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     new cdk.CfnOutput(this, 'ApiId', {
       value: apiGatewayStack.api.restApiId,
       description: 'API Gateway ID',
+    });
+    // The Seg_Switch as deployed (rfdetr-seg-support Requirement 15.1):
+    // deploy-frontend.sh reads it with describe-stacks on this stack and
+    // writes config.json rfDetrSegEnabled from it. Deliberately no
+    // exportName — no other stack imports it (mcp-stack.test.ts counts the
+    // exported-and-imported ComputeStack outputs).
+    new cdk.CfnOutput(this, 'RfDetrSegEnabled', {
+      value: rfDetrSegEnvironment.PORTAL_RFDETR_SEG_ENABLED,
+      description:
+        'RF-DETR-Seg Seg_Switch (enableRfDetrSeg context): true unless an explicit false',
     });
 
     new cdk.CfnOutput(this, 'TrainingAlertTopicArn', {

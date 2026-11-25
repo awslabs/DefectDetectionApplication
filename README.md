@@ -647,6 +647,15 @@ To move a device to the new version, revise its deployment and click **Update to
 - Dedicated JP7 builds need an **ARM64** server launched with **Ubuntu 24.04**. The portal rejects a JP7 request for a server on another Ubuntu release.
 - No prebuilt GPU ONNX Runtime or vLLM wheels exist for Jetson Thor, so the JP7 image compiles both from source (vLLM `v0.11.2`). If JP7 builds fail on the runtime limit, a PortalAdmin can raise **Max runtime (hours)** or add a JP7 entry under **Runtime budgets (per target and mode)** in **Settings** → **Build Infrastructure**, then submit the build again.
 
+#### 4.6 ONNX Runtime wheels for the Jetson images
+
+The JP5, JP6 and JP7 images carry a GPU `onnxruntime` built from source (a 1-2 hour compile) by `src/backend/edge_ml1_p_camera_management/install_onnxruntime_gpu.sh`. The file `onnxruntime-wheels.manifest` beside that script records, per JetPack line, the ONNX Runtime version, the upstream release commit the source build checks out, and the sha256 of the wheel that build produces. A build uses it in two ways:
+
+- **Staged wheel.** When the portal account's component bucket (`dda-component-<region>-<account>`) holds the listed wheel under `onnxruntime-wheels/<file>`, `build-custom.sh` downloads it next to the script (reading as the bucket owner), checks its sha256 against the manifest, and the image build installs it instead of compiling. A digest that differs stops the build; a missing object only means the build compiles from source.
+- **Source build.** With no staged wheel, the script clones the ONNX Runtime repository (`ORT_SOURCE_REPO_URL`, a complete mirror by default) and checks out the manifest's release commit by id, so the checkout does not depend on which tags the mirror carries. The build stops unless the checked-out tree's `VERSION_NUMBER` equals the manifest's version.
+
+To stage a wheel, take it from a published image of that JetPack line (`install_onnxruntime_gpu.sh` keeps a copy of every wheel it installs under `/opt/onnxruntime-wheels/` in the image), check that its sha256 equals the manifest row, and upload it with `aws s3api put-object --expected-bucket-owner <account>` to `onnxruntime-wheels/<file>` in the component bucket of every account that builds. A new ONNX Runtime version needs a new manifest row: the version, the wheel name a source build of it produces, that wheel's sha256, and the 40-character release commit. The commit recorded for each wheel is the one the wheel's own build info reports (`python3 -c 'import onnxruntime as o; print(o.get_build_info())'`); compare it against the upstream release tag when you update a row. `ORT_STAGED_WHEEL=0` skips the staging step for one build.
+
 ### Step 5: Set Up Accounts
 
 #### 5.1 UseCase Account (Required)
@@ -1051,29 +1060,44 @@ cxcywh→xyxy, and scales normalized boxes back to the source image. It returns
 the same detection result contract as YOLO, so overlay rendering and metadata
 are unchanged.
 
+The manifest below is what the Portal writes for a trained or imported RF-DETR
+`small` (native 512) model with two classes. It is generated from the shared
+manifest builder and checked against it by
+`edge-cv-portal/backend/tests/test_docs_manifest_examples.py` (the comment
+above it names the arguments); RF-DETR needs `normalize: true` (ImageNet
+mean/std after 0..1 scaling) and `preserve_aspect: false` (square resize, no
+letterbox), the geometry it trains with.
+
+<!-- manifest: rf_detr small -->
 ```json
 {
   "runtime": "onnx",
   "runtime_artifact": "model.onnx",
-  "task": "object_detection",
-  "detection": {
-    "layout": "rf_detr",
-    "num_classes": 90,
-    "score_threshold": 0.5,
-    "top_k": 300,
-    "network_input": 560,
-    "class_names": ["person", "bicycle", "..."]
-  },
   "model_graph": {
     "model_graph_type": "single_stage_model_graph",
     "stages": [{
       "type": "rf_detr_object_detection",
-      "threshold": 0.5,
-      "image_width": 560,
-      "image_height": 560,
+      "input_shape": [1, 3, 512, 512],
+      "output_shape": [1, 6, 8400],
+      "image_width": 512,
+      "image_height": 512,
       "image_range_scale": true,
-      "normalize": false
+      "normalize": true,
+      "threshold": 0.5,
+      "num_classes": 2
     }]
+  },
+  "input_shape": [1, 3, 512, 512],
+  "preprocessing": {"resize": [512, 512], "channel_order": "RGB"},
+  "task": "object_detection",
+  "detection": {
+    "layout": "rf_detr",
+    "num_classes": 2,
+    "score_threshold": 0.5,
+    "network_input": 512,
+    "preserve_aspect": false,
+    "top_k": 300,
+    "class_names": ["plate", "scratch"]
   }
 }
 ```
@@ -1081,21 +1105,162 @@ are unchanged.
 Additional `detection` keys for RF-DETR: `layout: "rf_detr"`, `top_k` (default
 300), `use_softmax` (default false → sigmoid), and `background_class` (optional
 index to drop when using softmax). NMS-only keys (`iou_threshold`) are ignored.
+`output_shape` is the builder's nominal value; the packager replaces it with
+the exported graph's real shape (and adds `output_shapes` for the two RF-DETR
+tensors). The device reads neither.
 
-> Note: the RF-DETR decoder is validated against synthetic two-tensor outputs.
-> A real RF-DETR ONNX export/device run is still pending; exact output tensor
-> names and `network_input` vary by exporter (order is handled by shape-based
-> tensor ID).
+> Verified end to end on 2026-09-22 on a JetPack 7 Jetson AGX Thor devkit
+> (LocalServer `arm64JP7`): a Portal-trained RF-DETR `small` `blue_plate`
+> detector, packaged and deployed through the Portal, returned exactly three
+> `blue_plate` boxes at 0.951 / 0.940 / 0.939 on every successful workflow
+> run, within tens of pixels of the labeled ground truth in the original
+> 2001×2352 frame (`docs/detection-training-gap.md`, "On-device verification
+> (2026-09-22)").
+
+### Instance segmentation (RF-DETR-Seg)
+
+RF-DETR-Seg adds a mask head to RF-DETR: the ONNX export has three outputs —
+`dets [1, Q, 4]`, `labels [1, Q, C+1]` and `masks [1, Q, R/4, R/4]` (mask
+logits on a quarter-resolution grid) — and the device decoder
+(`RfDetrSegPostProcessor`) upsamples each kept query's mask to the source
+frame and thresholds it. Six sizes ship (nano 312, small 384, medium 432,
+large 504, xlarge 624, 2xlarge 768 native resolution); all six are **Apache
+2.0** in rfdetr 1.10.1, so unlike RF-DETR detection — whose XL / 2XL
+checkpoints are PML-licensed and excluded — every RF-DETR-Seg size is
+available for training and import (spec `rfdetr-seg-support`, owner decision
+D4). Models come from the Portal's **Instance Segmentation** training
+(an instance-segmentation labeling job's manifest), from a `.pth` checkpoint
+converted on import, or from an RF-DETR-Seg ONNX graph through Smart Import.
+
+Every Seg model is packaged in one of two **Output modes**, chosen when it is
+trained or imported and changeable when it is packaged:
+
+- **instance** — stage type `rf_detr_instance_segmentation`: the detection
+  result contract with one mask per object. Each entry of the `detections`
+  block carries `mask_rle` (the mask as run-length counts at source
+  resolution), `mask_area` (pixels) and `class_index`; a `mask.png` composite
+  and the overlay with filled masks are written beside the capture; the HMI
+  draws the masks, the result history and the Portal's Results viewer show
+  them, and the device's results export can write an instance-segmentation
+  manifest (`manifest_format=instance`) for re-labeling or re-training.
+- **semantic** — stage type `rf_detr_semantic_segmentation`: all instances
+  merged into one class-coloured mask, exactly the record a segmentation
+  (anomaly-mask) model produces, for workflows and consumers that expect that
+  shape.
+
+Both modes use the top-level `detection` block (`layout: "rf_detr"` plus
+`mask_threshold`, `output_mode`, `output_names`) and a `pixel_level_classes`
+list of `background` + the class names, from which the mask colours come.
+Instance mode keeps `task: "object_detection"`; semantic mode omits `task`.
+The two examples are a `small` two-class model in each mode, generated from
+and checked against the shared builder like the RF-DETR example above:
+
+<!-- manifest: rf_detr_seg instance small -->
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "model_graph": {
+    "model_graph_type": "single_stage_model_graph",
+    "stages": [{
+      "type": "rf_detr_instance_segmentation",
+      "input_shape": [1, 3, 384, 384],
+      "output_shape": [1, 6, 8400],
+      "image_width": 384,
+      "image_height": 384,
+      "image_range_scale": true,
+      "normalize": true,
+      "threshold": 0.5,
+      "num_classes": 2
+    }],
+    "pixel_level_classes": {
+      "names": ["background", "plate", "scratch"],
+      "normal_ids": [0]
+    }
+  },
+  "input_shape": [1, 3, 384, 384],
+  "preprocessing": {"resize": [384, 384], "channel_order": "RGB"},
+  "task": "object_detection",
+  "detection": {
+    "layout": "rf_detr",
+    "num_classes": 2,
+    "score_threshold": 0.5,
+    "network_input": 384,
+    "preserve_aspect": false,
+    "top_k": 100,
+    "mask_threshold": 0.5,
+    "output_mode": "instance",
+    "output_names": ["dets", "labels", "masks"],
+    "class_names": ["plate", "scratch"]
+  }
+}
+```
+
+<!-- manifest: rf_detr_seg semantic small -->
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "model_graph": {
+    "model_graph_type": "single_stage_model_graph",
+    "stages": [{
+      "type": "rf_detr_semantic_segmentation",
+      "input_shape": [1, 3, 384, 384],
+      "output_shape": [1, 6, 8400],
+      "image_width": 384,
+      "image_height": 384,
+      "image_range_scale": true,
+      "normalize": true,
+      "threshold": 0.5,
+      "num_classes": 2
+    }],
+    "pixel_level_classes": {
+      "names": ["background", "plate", "scratch"],
+      "normal_ids": [0]
+    }
+  },
+  "input_shape": [1, 3, 384, 384],
+  "preprocessing": {"resize": [384, 384], "channel_order": "RGB"},
+  "detection": {
+    "layout": "rf_detr",
+    "num_classes": 2,
+    "score_threshold": 0.5,
+    "network_input": 384,
+    "preserve_aspect": false,
+    "top_k": 100,
+    "mask_threshold": 0.5,
+    "output_mode": "semantic",
+    "output_names": ["dets", "labels", "masks"],
+    "class_names": ["plate", "scratch"]
+  }
+}
+```
+
+`top_k` is the size's query count (nano / small 100, medium / large 200,
+xlarge / 2xlarge 300); `mask_threshold` binarises each upsampled mask;
+`output_names` records the graph order so a three-class model (whose `labels`
+tensor is `[1, Q, 4]`, the same shape as `dets`) decodes unambiguously. The
+full device contract — decode rules, the instance record, the 4 MiB
+Detection_List ceiling, the composite mask, the DB column, the run preview,
+the export and the feature floor — is
+[`docs/multi-runtime-inference.md` §24](docs/multi-runtime-inference.md#24-rf-detr-seg-instance-and-semantic-modes).
+RF-DETR-Seg needs a LocalServer at or above the per-architecture Seg feature
+floor; the Portal refuses to package or deploy a Seg workflow for an
+architecture without one.
 
 ### Import via the portal (Smart Import)
 
 1. Put your `model.onnx` in the UseCase account S3 — or use the **ONNX** compile
    target (Compilation page) to export a trained model to `model.onnx`.
 2. Portal → **Smart Import (BYOM)**:
-   - **Model Type**: Object Detection (or Classification)
+   - **Model Type**: Object Detection, **Instance Segmentation (RF-DETR-Seg)**
+     or Classification
    - **Runtime / export format**: **ONNX Runtime**
    - **Detection architecture** (object detection only): **YOLO** or **RF-DETR**
-   - Input image size (e.g. `640`), number of classes, optional class names
+   - Input image size (e.g. `640`; a Seg graph only at its size's native
+     resolution), number of classes, class names (required for Instance
+     Segmentation), and for Instance Segmentation the **Mask threshold** and
+     **Output** (instance | semantic overlay)
    - **Convert & Import** — this writes a device-correct manifest
      (`runtime: onnx`, and for detection the `task`/`detection` fields including
      `layout`) and packages `model.onnx`.

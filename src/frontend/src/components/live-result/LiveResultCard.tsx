@@ -45,6 +45,9 @@ interface LiveResultCardProps {
   workflow: Workflow;
 }
 
+/** Label of the instance result's per-class mask coverage list. */
+export const MASK_COVERAGE_LABEL = "Mask coverage";
+
 export default function LiveResultCard({
   workflowRun,
   workflow,
@@ -82,17 +85,29 @@ export default function LiveResultCard({
         {getFeedbackRequiredValue(humanReviewRequired)}
       </ValueWithLabel>
       {isDetection ? (
-        <ValueWithLabel label="Objects detected">
-          {detectionList.length > 0
-            ? detectionList.map((det, index) => (
-              <div key={`${det.class_label ?? det.class_index ?? "object"}-${index}`}>
-                {(det.class_label || det.class_index || "object")}
-                {" — "}
-                {formatPercent(det.confidence)}
-              </div>
-            ))
-            : "None"}
-        </ValueWithLabel>
+        <>
+          <ValueWithLabel label="Objects detected">
+            {detectionList.length > 0
+              ? detectionList.map((det, index) => (
+                <div key={`${det.class_label ?? det.class_index ?? "object"}-${index}`}>
+                  {(det.class_label || det.class_index || "object")}
+                  {" — "}
+                  {formatPercent(det.confidence)}
+                </div>
+              ))
+              : "None"}
+          </ValueWithLabel>
+          {/* An instance-segmentation result also carries the per-class mask
+              coverage (rfdetr-seg-support Requirement 10.6); a plain detection
+              result has no `anomalies`, so nothing is added for it. */}
+          {labelInfoList.length > 0 && (
+            <ValueWithLabel label={MASK_COVERAGE_LABEL}>
+              {labelInfoList.map((label: AnomalyLabel) => (
+                <AnomalyLabels key={label["hex-color"]} labelInfo={label} />
+              ))}
+            </ValueWithLabel>
+          )}
+        </>
       ) : (
         <ValueWithLabel label="Anomaly labels">
           {labelInfoList?.length > 0

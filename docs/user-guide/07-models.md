@@ -36,24 +36,24 @@ Each row shows:
 | **Model source** | **S3 URI** of a file already in an allowed bucket, or **Upload a file** from your computer (it is uploaded to the use case's own bucket first). |
 | **Model File (S3 URI)** | A PyTorch `.pt` / `.pth` checkpoint or an `.onnx` graph, for example `s3://<bucket>/models/blue-plates-yolo11s.pt`. Just the raw file, no packaging. |
 
-Click **Inspect Model**. The Portal analyzes the file and shows **Model Analysis** with what it detected. Detector checkpoints (Ultralytics YOLO `.pt`, RF-DETR `.pth`) are converted to ONNX in a conversion job; ONNX graphs are used as they are.
+Click **Inspect Model**. The Portal analyzes the file and shows **Model Analysis** with what it detected. Detector checkpoints (Ultralytics YOLO `.pt`, RF-DETR `.pth`, RF-DETR-Seg `.pth`) are converted to ONNX in a conversion job; ONNX graphs are used as they are. An RF-DETR-Seg checkpoint is recognised by its mask head: the form locks **Model Type** to **Instance Segmentation (RF-DETR-Seg)**, reads the size and class count from the checkpoint, and the conversion job exports the three-output graph (boxes, class logits, mask logits), checks it against the checkpoint's own output on the Portal's export runtime and the oldest runtime in the device fleet (box and class parity as for RF-DETR, plus a mask-overlap check), and records the result on the model's page like a detection conversion. An ONNX graph with those three outputs is imported directly as **Instance Segmentation (RF-DETR-Seg)**.
 
 **Step 2 – Configure** (the fields shown depend on the file)
 
 | Field | What to enter |
 |-------|---------------|
 | **Model Name** | A descriptive name; alphanumerics and hyphens. |
-| **Model Type** | **Classification**, **Object Detection**, **Segmentation** or **Anomaly Detection**. |
+| **Model Type** | **Classification**, **Object Detection**, **Segmentation**, **Instance Segmentation (RF-DETR-Seg)** or **Anomaly Detection**. The instance-segmentation tile is hidden when the Portal is deployed with RF-DETR-Seg switched off ([19. Settings](19-settings.md), Deployment switches). |
 | **Runtime / export format** | **ONNX Runtime** for ONNX models (the pluggable engine that runs on Jetson and x86 without compilation) or **PyTorch / Neo (DLR)** for models that will be compiled with SageMaker Neo. |
 | **Detection architecture** | **YOLO** or **RF-DETR**, for object detection. |
 | **Input Image Size** / **Width** and **Height** | The dimensions the model expects, for example `640x640 (YOLOv5/v8/v10)`, `1280x1280`, `224x224 (ResNet, VGG)`. |
 | **Network input** and **Input resize geometry** | For detectors: the network input and whether frames are **letterboxed** (scaled by one ratio and centre-padded) or **squashed** (stretched). This must match how the model was trained; a mismatch does not fail but silently loses detections. |
 | **Number of Classes** and **Class names** | How many classes the model outputs and their names, comma-separated in class-id order (`plate, scratch, chip`). Without names the device labels detections with the numeric class id, so anything matching on a label string will not match. For a detector checkpoint the classes are read from the detection head and can be renamed but not added or removed. |
-| **Score threshold** / **IoU threshold** | Minimum confidence to keep a detection, and the NMS overlap (YOLO only; RF-DETR is NMS-free). |
-| **Segmentation architecture** | The on-device decoder for an ONNX segmentation model. |
+| **Score threshold** / **IoU threshold** | Minimum confidence to keep a detection, and the NMS overlap (YOLO only; RF-DETR and RF-DETR-Seg are NMS-free). |
+| **Instance Segmentation (RF-DETR-Seg) controls** | For an RF-DETR-Seg checkpoint or ONNX graph: **Class names** are required (one per class, in class-id order — the masks are coloured and labelled by them); **Score threshold** and **Mask threshold** (the cut-off that binarises each kept detection's mask on the device, default 0.5); **Output**: **instance** (one mask per object beside its box and class) or **semantic overlay** (all instances merged into one class-coloured mask). A graph converts and runs only at its size's native resolution (312, 384, 432, 504, 624 or 768), which the form fixes once the graph or checkpoint is inspected. For an ONNX import the Output mode is fixed at import; for a converted checkpoint it can be changed when packaging. The former **Segmentation** + **RF-DETR** pair for a three-output graph is still accepted as a deprecated alias of Instance Segmentation with the semantic Output mode; new imports should pick the Instance Segmentation type. |
 | **Compilation Targets** | For Neo/DLR models: the device architectures to compile for (7.4). ONNX models skip this; one package serves every target. |
 
-Click **Convert & Import** (or **Import**). The model appears in the registry as **Imported**, and the detector conversion, if any, is tracked on its page.
+Click **Convert & Import** (or **Import**). The model appears in the registry as **Imported**, and the detector conversion, if any, is tracked on its page. On the page of an RF-DETR-Seg model (trained or converted from a checkpoint) the packaging step offers **Output** — instance or semantic overlay — defaulting to the mode the model was trained or imported with, so one model can be packaged both ways; the mode last packaged is shown beside it.
 
 ## 7.3 Manual import and LLM registration
 

@@ -126,26 +126,36 @@ def test_image_field_is_extracted_and_never_counts_toward_the_bound(spec, mime, 
     assert len(images) == 1 and images[0].data == encoded and images[0].mime_type == mime
 
 
+def _step(part):
+    """`(name, wildcard)`: wildcard is `'[]'` (every list element), `'{}'`
+    (every dict value; rfdetr-seg-support 10.7) or None."""
+    for wildcard in ('[]', '{}'):
+        if part.endswith(wildcard):
+            return part[:-2], wildcard
+    return part, None
+
+
 def _resolves(body, path):
-    """True when the dotted path (`[]` = every element) names something."""
+    """True when the dotted path (`[]` = every element, `{}` = every map value)
+    names something."""
     nodes = [body]
     for part in path.split('.'):
-        each = part.endswith('[]')
-        name = part[:-2] if each else part
+        name, wildcard = _step(part)
         nxt = []
         for node in nodes:
             if isinstance(node, dict) and name in node:
                 value = node[name]
-                if each:
+                if wildcard == '[]':
                     if isinstance(value, list):
                         nxt.extend(value)
+                elif wildcard == '{}':
+                    if isinstance(value, dict):
+                        nxt.extend(value.values())
                 else:
                     nxt.append(value)
         nodes = nxt
-        if each and not nodes:
+        if wildcard and not nodes:
             return False
-    if path.endswith('[]'):
-        return bool(nodes)
     return bool(nodes)
 
 
@@ -155,13 +165,15 @@ def _fill(path, present):
     if not present:
         return {}
     def build(index):
-        part = parts[index]
-        each = part.endswith('[]')
-        name = part[:-2] if each else part
+        name, wildcard = _step(parts[index])
         leaf = index == len(parts) - 1
         # Fresh values per element: a parsed JSON body never shares objects.
         make = (lambda: 'v') if leaf else (lambda: build(index + 1))
-        return {name: [make(), make()] if each else make()}
+        if wildcard == '[]':
+            return {name: [make(), make()]}
+        if wildcard == '{}':
+            return {name: {'0': make(), '1': make()}}
+        return {name: make()}
     return build(0)
 
 

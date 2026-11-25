@@ -220,6 +220,11 @@ from dda_llm_prelabel import (
     LlmPrelabelResult,
     generate_llm_prelabel,
 )
+# The pure-Python tight-box derivation for InstanceSegmentation submissions
+# and pre-labels (rfdetr-seg-support Requirement 2.2, DD9): this Lambda
+# carries [sharedLayer, imagingLayer] only — no numpy — so the box is
+# derived from the RLE runs without decoding a bitmap.
+from dda_manifest import tight_box_from_rle
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -270,7 +275,13 @@ INSTRUCTIONS_MAX_LENGTH = 5000
 EXAMPLE_IMAGES_MAX = 10
 SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
 CLASSIFICATION_LABEL_SET = ['normal', 'anomaly']
-VALID_MODALITIES = ('Classification', 'Segmentation', 'ObjectDetection')
+# Instance_Segmentation: one Canonical_RLE mask per object instance, the
+# modality RF-DETR-Seg trains from (rfdetr-seg-support Requirement 2.1,
+# D3). DDA labeling only — the SageMaker Ground Truth path never offers
+# it (Requirement 2.6).
+MODALITY_INSTANCE_SEGMENTATION = 'InstanceSegmentation'
+VALID_MODALITIES = ('Classification', 'Segmentation', 'ObjectDetection',
+                    MODALITY_INSTANCE_SEGMENTATION)
 # Auto_Labeler model/modality compatibility matrix (Requirement 8.8):
 # SAM is geometry-only (masks/boxes); Bedrock vision models answer
 # classification and bounding-box prompts but do not paint masks.
@@ -278,13 +289,36 @@ VALID_MODALITIES = ('Classification', 'Segmentation', 'ObjectDetection')
 # (llm-auto-labeling Requirement 1.3). Grounded-SAM produces geometry
 # already classified from text prompts, so it covers the two geometry
 # modalities but — like sam — never Classification (grounded-sam-
-# autolabel Requirements 1.5, 1.6).
+# autolabel Requirements 1.5, 1.6). The mask-producing families (sam,
+# grounded-sam, llm) also pre-label InstanceSegmentation — each returned
+# region becomes one instance — while bedrock, which returns boxes only,
+# does not (rfdetr-seg-support Requirement 2.4).
 AUTO_LABEL_MODEL_MODALITIES = {
-    'sam': ('Segmentation', 'ObjectDetection'),
-    'grounded-sam': ('Segmentation', 'ObjectDetection'),
+    'sam': ('Segmentation', 'ObjectDetection',
+            MODALITY_INSTANCE_SEGMENTATION),
+    'grounded-sam': ('Segmentation', 'ObjectDetection',
+                     MODALITY_INSTANCE_SEGMENTATION),
     'bedrock': ('Classification', 'ObjectDetection'),
-    'llm': ('Classification', 'Segmentation', 'ObjectDetection'),
+    'llm': ('Classification', 'Segmentation', 'ObjectDetection',
+            MODALITY_INSTANCE_SEGMENTATION),
 }
+# Modalities whose annotation payloads (RLE JSON) are stored in S3 rather
+# than inline on the task item (DynamoDB 400 KB item limit; see
+# submit_labeler_task).
+S3_STORED_ANNOTATION_MODALITIES = ('Segmentation',
+                                   MODALITY_INSTANCE_SEGMENTATION)
+
+
+def _wire_modality(modality: Optional[str]) -> Optional[str]:
+    """The modality value sent to the pre-labelers: InstanceSegmentation
+    rides as Segmentation (the Grounded-SAM worker contract and the LLM
+    guidance converter know exactly the three original modalities and
+    already return one region per detection), every other value is
+    itself (rfdetr-seg-support Requirement 2.4; the same helper the
+    Auto_Labeler worker applies)."""
+    if modality == MODALITY_INSTANCE_SEGMENTATION:
+        return 'Segmentation'
+    return modality
 # Detection_Prompt bounds for the llm: family (llm-auto-labeling
 # Requirement 2: 1-2000 characters, length judged on the raw string).
 DETECTION_PROMPT_MAX_LENGTH = 2000
@@ -1734,6 +1768,19 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                              'authorization',
                 })
 
+            # rfdetr-seg-support Requirement 2.4/2.5 invariant: a
+            # skip-verification job is never an InstanceSegmentation
+            # job. Skip-verification reads the Bedrock pre-label as the
+            # annotation, and bedrock (boxes only) is not offered for
+            # the modality — without this check such a job would be
+            # created and fail at generation.
+            if modality == MODALITY_INSTANCE_SEGMENTATION:
+                errors.append(_validation_error(
+                    'skip_verification',
+                    'Skip-verification mode is not available for '
+                    'InstanceSegmentation (no Bedrock pre-labeler '
+                    'supports it)',
+                    task_type=modality))
             # Req 9.2/9.3: Bedrock model + non-empty Per_Label_Prompts
             # covering every label; each missing/empty item identified.
             bedrock_model_id = body.get('bedrock_model_id')
@@ -2297,6 +2344,67 @@ def _load_prelabel(task: Dict) -> Optional[Any]:
         return None
 
 
+def _instance_prelabel_from_regions(prelabel: Any) -> Any:
+    """Map a stored Segmentation-shaped Pre_Label (`regions: [{class,
+    rle}]`, what the sam / grounded-sam / llm families produce with
+    `Segmentation` on the wire) to the InstanceSegmentation shape the
+    canvas edits: one instance per region, class carried (`null` kept
+    for unclassified sam proposals) and the tight box derived from the
+    RLE (rfdetr-seg-support Requirement 2.4, DD9).
+
+    A payload that already carries `instances` (or no `regions` list) is
+    returned unchanged. The box needs the image dimensions the worker
+    recorded (`image_width` / `image_height`, or `image_size`); without
+    them the instance is kept without a box and the canvas derives it
+    from the loaded image. A region whose RLE does not match those
+    dimensions or paints no pixel cannot become a submittable instance
+    and is dropped with a warning.
+    """
+    if not isinstance(prelabel, dict) or 'instances' in prelabel:
+        return prelabel
+    regions = prelabel.get('regions')
+    if not isinstance(regions, list):
+        return prelabel
+    image_size = prelabel.get('image_size')
+    image_size = image_size if isinstance(image_size, dict) else {}
+    width = image_size.get('width', prelabel.get('image_width'))
+    height = image_size.get('height', prelabel.get('image_height'))
+    bounds_known = (_is_pixel_int(width) and width > 0
+                    and _is_pixel_int(height) and height > 0)
+
+    instances: List[Dict[str, Any]] = []
+    for index, region in enumerate(regions):
+        if not isinstance(region, dict) or not region.get('rle'):
+            logger.warning(f"Pre-label region {index} has no RLE geometry; "
+                           f"dropped from the instance pre-label")
+            continue
+        instance: Dict[str, Any] = {
+            'class': region.get('class'),
+            'rle': region['rle'],
+        }
+        if bounds_known:
+            try:
+                left, top, box_w, box_h = tight_box_from_rle(
+                    region['rle'], width, height)
+            except ValueError as e:
+                logger.warning(f"Pre-label region {index} cannot become an "
+                               f"instance ({e}); dropped")
+                continue
+            instance['box'] = {'left': left, 'top': top,
+                               'width': box_w, 'height': box_h}
+        instances.append(instance)
+
+    mapped: Dict[str, Any] = {
+        'modality': MODALITY_INSTANCE_SEGMENTATION,
+        'instances': instances,
+    }
+    if bounds_known:
+        mapped['image_size'] = {'width': width, 'height': height}
+        mapped['image_width'] = width
+        mapped['image_height'] = height
+    return mapped
+
+
 def _example_image_urls(job: Dict, usecase: Dict) -> Dict[str, List[str]]:
     """Presigned GET URLs for the job's stored good/bad example images
     (Req 7.2). Kinds with no stored references are omitted, so a job
@@ -2496,6 +2604,11 @@ def get_next_labeler_task(event, context):
         if task.get('prelabel_status') == 'Available':
             prelabel = _load_prelabel(task)
             if prelabel is not None:
+                if job.get('task_type') == MODALITY_INSTANCE_SEGMENTATION:
+                    # The stored pre-label is Segmentation-shaped
+                    # (`Segmentation` on the wire, rfdetr-seg-support
+                    # Req 2.4): one region becomes one instance.
+                    prelabel = _instance_prelabel_from_regions(prelabel)
                 payload['prelabel'] = prelabel
 
         # Failure visibility (Req 7.5, 10.4): a Failed task is
@@ -2632,6 +2745,15 @@ def _validate_annotation(annotation: Any, job: Dict) -> List[Dict]:
     - ObjectDetection: every box must carry a Label_Set class and
       integer pixel coordinates lying within the image bounds declared
       by annotation.image_size.
+    - InstanceSegmentation (rfdetr-seg-support Req 2.2, DD9): a positive
+      integer image_size; `instances` a list whose entries carry a
+      Label_Set class (null — an unclassified proposal — is rejected)
+      and a Canonical_RLE string matching image_size with at least one
+      foreground pixel. The server recomputes each instance's tight box
+      from its RLE and writes it back into the annotation (the client's
+      box is advisory only), and derives `classification` as 'anomaly'
+      iff `instances` is non-empty — so this branch mutates a valid
+      `annotation` in place.
     """
     modality = job.get('task_type')
     label_set = [str(name) for name in (job.get('label_set') or [])]
@@ -2729,6 +2851,62 @@ def _validate_annotation(annotation: Any, job: Dict) -> List[Dict]:
                     f'{width}x{height} image bounds',
                     box_index=index))
 
+    elif modality == MODALITY_INSTANCE_SEGMENTATION:
+        image_size = annotation.get('image_size')
+        image_size = image_size if isinstance(image_size, dict) else {}
+        width = image_size.get('width')
+        height = image_size.get('height')
+        bounds_known = (_is_pixel_int(width) and width > 0
+                        and _is_pixel_int(height) and height > 0)
+        if not bounds_known:
+            errors.append(_validation_error(
+                'image_size',
+                'image_size with positive integer width and height '
+                'is required'))
+        instances = annotation.get('instances')
+        if not isinstance(instances, list):
+            errors.append(_validation_error(
+                'instances', 'instances must be a list of mask instances'))
+            instances = []
+        for index, instance in enumerate(instances):
+            if not isinstance(instance, dict):
+                errors.append(_validation_error(
+                    'instances', f'Instance {index} must be an object'))
+                continue
+            instance_class = instance.get('class')
+            if instance_class not in label_set:
+                errors.append(_validation_error(
+                    'instances',
+                    f'Instance {index} lacks a class from the label set',
+                    instance_index=index, instance_class=instance_class))
+            rle = instance.get('rle')
+            if not isinstance(rle, str) or not rle:
+                errors.append(_validation_error(
+                    'instances',
+                    f'Instance {index} lacks RLE mask data',
+                    instance_index=index))
+                continue
+            if not bounds_known:
+                continue
+            # The box is derived from the RLE runs, never typed (DD9):
+            # the same call rejects counts that do not match image_size
+            # and an all-background mask, each naming the instance.
+            try:
+                left, top, box_width, box_height = tight_box_from_rle(
+                    rle, width, height)
+            except ValueError as e:
+                if str(e) == 'no foreground pixels':
+                    message = f'Instance {index} has no foreground pixels'
+                else:
+                    message = f'Instance {index}: rle does not match image_size'
+                errors.append(_validation_error(
+                    'instances', message, instance_index=index))
+                continue
+            instance['box'] = {'left': left, 'top': top,
+                               'width': box_width, 'height': box_height}
+        if not errors:
+            annotation['classification'] = 'anomaly' if instances else 'normal'
+
     return errors
 
 
@@ -2824,10 +3002,13 @@ def submit_labeler_task(event, context):
             ':human': True,
         }
 
-        if job.get('task_type') == 'Segmentation':
-            # Segmentation region bitmaps (RLE JSON) go to S3; the item
-            # carries annotation_s3_key. Written before the conditional
-            # write so an S3 failure leaves the task Assigned (Req 7.9).
+        if job.get('task_type') in S3_STORED_ANNOTATION_MODALITIES:
+            # Segmentation region bitmaps and InstanceSegmentation
+            # instance masks (RLE JSON) go to S3; the item carries
+            # annotation_s3_key. Written before the conditional write so
+            # an S3 failure leaves the task Assigned (Req 7.9;
+            # rfdetr-seg-support Req 2.2 — up to 500 Canonical_RLE
+            # strings at source resolution can exceed the 400 KB item).
             if not PORTAL_ARTIFACTS_BUCKET:
                 logger.error('PORTAL_ARTIFACTS_BUCKET is not configured; '
                              'segmentation annotation cannot be stored')
@@ -5236,8 +5417,8 @@ def _validate_preview_run_request(body: Dict) -> tuple:
                 PREVIEW_GROUNDED_SAM_MODEL]:
             errors.append(_validation_error(
                 'task_type',
-                'The grounded-sam family supports Segmentation and '
-                'ObjectDetection',
+                'The grounded-sam family supports Segmentation, '
+                'InstanceSegmentation and ObjectDetection',
                 task_type=modality))
         label_set, label_errors = _validate_label_set(body.get('label_set'))
         errors.extend(label_errors)
@@ -6154,9 +6335,14 @@ def _run_preview_sample(run: Dict, clients: Dict[str, Any], usecase: Dict,
     label_set = [str(label) for label in (run.get('label_set') or [])]
     dda_llm_prelabel.get_bedrock_client = get_bedrock_client
     try:
+        # An InstanceSegmentation run goes to the model as Segmentation
+        # (rfdetr-seg-support Req 2.4): `guidance_to_prelabel` knows the
+        # three original modalities and raises for any other value, and
+        # the Segmentation-shaped `regions` result is what the panel and
+        # the task-fetch mapping expect.
         result = generate_llm_prelabel(
             model_identifier=model_identifier,
-            modality=run.get('task_type'),
+            modality=_wire_modality(run.get('task_type')),
             label_set=label_set,
             detection_prompt=run.get('detection_prompt') or '',
             # Per_Label_Prompts are a skip-verification job setting; a
@@ -6295,7 +6481,12 @@ def _run_grounded_sam_preview_sample(run: Dict, clients: Dict[str, Any],
         (Req 4.4).
     """
     label_set = [str(label) for label in (run.get('label_set') or [])]
-    modality = run.get('task_type')
+    # An InstanceSegmentation run rides the worker contract as
+    # Segmentation (rfdetr-seg-support Req 2.4): the payload's modality
+    # and the region check below both see the wire value, so the stored
+    # preview result is Segmentation-shaped (`regions`) exactly as the
+    # Auto_Labeler stores it for the job.
+    modality = _wire_modality(run.get('task_type'))
 
     # Guarded at start-time validation (Req 6.1); re-checked here with
     # the consumer's wording so a deployment flip between the start

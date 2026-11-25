@@ -1543,13 +1543,19 @@ MODELS: Tuple[ToolSpec, ...] = (
         input_schema=uc_schema({
             'model_s3_uri': s3_uri(), 'model_name': text(256),
             'model_type': enum('classification', 'object_detection',
-                               'segmentation', 'anomaly_detection'),
+                               'segmentation', 'anomaly_detection',
+                               'instance_segmentation'),
             'image_width': integer(minimum=1), 'image_height': integer(minimum=1),
             'num_classes': integer(minimum=1),
             'class_names': array(text(256)),
             'export_format': enum('pytorch', 'onnx'),
-            'detection_arch': enum('yolo', 'rf_detr'),
+            'detection_arch': enum('yolo', 'rf_detr', 'rf_detr_seg'),
             'score_threshold': number(0, 1), 'iou_threshold': number(0, 1),
+            # RF-DETR-Seg (model_type instance_segmentation) only: the mask
+            # binarisation threshold and the packaged Output_Mode; the route
+            # refuses iou_threshold for that type (rfdetr-seg-support Req 13.1).
+            'mask_threshold': number(0, 1),
+            'output_mode': enum('instance', 'semantic'),
             'preserve_aspect': boolean(), 'auto_import': boolean(),
             'model_version': text(64),
         }, required=['model_s3_uri', 'model_name', 'model_type', 'image_width',
@@ -1605,14 +1611,19 @@ MODELS: Tuple[ToolSpec, ...] = (
             'model_name': text(256), 'model_version': text(64),
             'model_type': enum('classification', 'segmentation',
                                'classification-robust', 'segmentation-robust',
-                               'object_detection'),
+                               'object_detection', 'instance_segmentation'),
             'dataset_manifest_s3': s3_uri('An s3:// manifest in an allowed bucket.'),
+            # The RF-DETR-Seg size and mask threshold travel inside this
+            # object (the route reads them from `hyperparameters` only).
             'hyperparameters': json_object(),
             'instance_type': identifier(),
             'max_runtime_seconds': integer(minimum=1),
             'auto_compile': boolean(),
             'compilation_targets': array(enum(*COMPILATION_TARGETS)),
-            'detection_arch': enum('yolo', 'rf_detr'),
+            'detection_arch': enum('yolo', 'rf_detr', 'rf_detr_seg'),
+            # RF-DETR-Seg only: the packaged Output_Mode, a top-level field of
+            # the route's request (rfdetr-seg-support Req 13.1).
+            'output_mode': enum('instance', 'semantic'),
             'base_model': {'type': 'object',
                            'properties': {'kind': identifier(), 'ref': text(1024)},
                            'additionalProperties': False},

@@ -30,26 +30,36 @@ from manifest_transformer import (
     transform_manifest_entry,
     transform_manifest_lines
 )
-# Object Detection (YOLO / RF-DETR) training: shared vocabulary + pure helpers
-# (.kiro/specs/portal-detection-training/,
-# .kiro/specs/rfdetr-training-and-transfer-learning/). Same layer as
-# manifest_transformer.
+# Object Detection (YOLO / RF-DETR) and RF-DETR-Seg training: shared
+# vocabulary + pure helpers (.kiro/specs/portal-detection-training/,
+# .kiro/specs/rfdetr-training-and-transfer-learning/,
+# .kiro/specs/rfdetr-seg-support/). Same layer as manifest_transformer.
+# DETECTION_METRIC_DEFINITIONS stays importable from this module: the YOLO
+# preservation pin in tests/test_detection_training_create.py reads it here.
 from detection_training import (
     MODEL_TYPE_OBJECT_DETECTION,
+    MODEL_TYPE_INSTANCE_SEGMENTATION,
+    DETECTION_MODEL_TYPES,
+    DEFAULT_OUTPUT_MODE,
+    OUTPUT_MODES,
     DETECTION_DEFAULT_INSTANCE_TYPE,
     DETECTION_DEFAULT_MAX_RUNTIME_SECONDS,
-    DETECTION_METRIC_DEFINITIONS,
+    DETECTION_METRIC_DEFINITIONS,  # noqa: F401 (test pin, see above)
     DETECTION_VOLUME_SIZE_GB,
     ENTRY_POINT_FOR_ARCH,
+    METRIC_DEFINITIONS_FOR_ARCH,
+    RFDETR_SEG_QUERIES_FOR_SIZE,
     RFDETR_TOP_K,
     build_sourcedir_tarball,
     decode_final_metrics,
     detection_job_environment,
+    is_detr_family,
     is_trained_detection_record,
     normalize_detection_arch,
     parse_detection_hyperparameters,
     resolve_base_model,
     resolve_detection_training_image,
+    rfdetr_seg_enabled,
     validate_detection_manifest_entry,
 )
 # Imported-detector conversions (detector-checkpoint-import Requirement 7):
@@ -220,6 +230,28 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
         
         logger.info(f"First manifest entry keys: {list(first_entry.keys())}")
         
+        # Task type mismatch: an instance-segmentation manifest trains
+        # RF-DETR-Seg (model_type instance_segmentation), never the
+        # Marketplace classification/segmentation model (rfdetr-seg-support
+        # Requirements 3.2, 3.5; design section 5). Refused here, before the
+        # required-attribute scan, in the shape of the segmentation/
+        # classification mismatch check below: otherwise the entry's
+        # `instance-segmentation-metadata` key would read as a Ground Truth
+        # manifest "requiring transformation" -- a dead end that names no
+        # modality. No classification or segmentation manifest carries
+        # either key, so those paths are unchanged.
+        if 'instance-segmentation' in first_entry or 'instance-segmentation-metadata' in first_entry:
+            return {
+                'valid': False,
+                'errors': [
+                    'Manifest is an instance-segmentation manifest; it trains '
+                    'RF-DETR-Seg (model_type instance_segmentation), not the '
+                    'Marketplace classification/segmentation model.'
+                ],
+                'message': 'Task type mismatch: manifest is instance segmentation',
+                'detected_attributes': list(first_entry.keys())
+            }
+        
         # Required attributes for all models
         required_attrs = ['source-ref', 'anomaly-label', 'anomaly-label-metadata']
         
@@ -348,27 +380,33 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
         }
 
 
-# ── Object Detection (YOLO) training ───────────────────────────────────────
+# ── Object Detection (YOLO / RF-DETR) and RF-DETR-Seg training ─────────────
 # Detection jobs do not use the AWS Marketplace algorithm. They run the repo's
-# datasets/detection_training/train.py on a SageMaker PyTorch GPU DLC in
+# datasets/detection_training/train*.py on a SageMaker PyTorch GPU DLC in
 # script mode (the same mechanism compilation._start_onnx_export_job uses),
 # and the finished model.onnx is packaged directly — no Neo. Everything below
-# is reached only for model_type == 'object_detection'; the LFV code path in
-# create_training_job is untouched.
+# is reached only for model_type in DETECTION_MODEL_TYPES ('object_detection',
+# 'instance_segmentation'); the LFV code path in create_training_job is
+# untouched.
 
-def validate_detection_manifest(manifest_uri: str, usecase: Dict) -> Dict:
-    """Validate the first line of a manifest as an Object Detection entry.
+def validate_detection_manifest(manifest_uri: str, usecase: Dict,
+                                expected: str = 'bbox') -> Dict:
+    """Validate the first line of a manifest as an Object Detection entry
+    (`expected='bbox'`) or as an Instance_Manifest entry for RF-DETR-Seg
+    (`expected='instance'`; rfdetr-seg-support Req 3.5, 5.1).
 
     Mirrors validate_marketplace_manifest's S3 access pattern but delegates
     the shape check to detection_training.validate_detection_manifest_entry,
-    which accepts the DDA literal `bounding-box` attribute and a Ground Truth
-    job-named attribute. Never suggests the Manifest Transformer (it has no
-    ObjectDetection handling).
+    which accepts the DDA literal `bounding-box` / `instance-segmentation`
+    attribute and a Ground Truth job-named attribute. Never suggests the
+    Manifest Transformer (it has no ObjectDetection / instance handling).
 
     Returns {'valid', 'errors', 'message', 'class_names', 'detected_attributes',
     'warnings'}.
     """
     warnings: list = []
+    instance = expected == 'instance'
+    model_type = MODEL_TYPE_INSTANCE_SEGMENTATION if instance else MODEL_TYPE_OBJECT_DETECTION
     try:
         # InvalidS3Uri -> the refusal result below
         bucket, key = parse_s3_uri(manifest_uri)
@@ -396,10 +434,12 @@ def validate_detection_manifest(manifest_uri: str, usecase: Dict) -> Dict:
                     'errors': [f'First manifest line is not valid JSON: {e}'],
                     'class_names': [], 'detected_attributes': []}
 
-        result = validate_detection_manifest_entry(first_entry)
+        result = validate_detection_manifest_entry(first_entry, expected=expected)
         logger.info(f"Detection manifest attributes: {result['detected_attributes']}")
         if not result['valid']:
-            return {'valid': False, 'message': 'Manifest is not an Object Detection manifest',
+            return {'valid': False,
+                    'message': ('Manifest is not an instance-segmentation manifest' if instance
+                                else 'Manifest is not an Object Detection manifest'),
                     'errors': result['errors'], 'class_names': [],
                     'detected_attributes': result['detected_attributes']}
 
@@ -417,7 +457,7 @@ def validate_detection_manifest(manifest_uri: str, usecase: Dict) -> Dict:
                         'class_names': [], 'detected_attributes': result['detected_attributes'],
                         'warnings': warnings}
 
-        return {'valid': True, 'message': 'Manifest is valid for object_detection training',
+        return {'valid': True, 'message': f'Manifest is valid for {model_type} training',
                 'errors': [], 'class_names': result['class_names'],
                 'attribute': result['attribute'],
                 'detected_attributes': result['detected_attributes'],
@@ -460,12 +500,15 @@ def _create_detection_training_job(
     auto_compile: bool,
     compilation_targets: list,
     generation_session_id: Optional[str],
+    model_type: str = MODEL_TYPE_OBJECT_DETECTION,
 ) -> Dict:
     """Launch the arch's entry point (datasets/detection_training/train.py for
-    YOLO, train_rfdetr.py for RF-DETR) as a SageMaker script-mode job and
-    persist the Detection_Record_Fields. Called from create_training_job
-    after the shared validation/access checks; raises ClientError into the
-    caller's shared error mapping.
+    YOLO, train_rfdetr.py for RF-DETR, train_rfdetr_seg.py for RF-DETR-Seg)
+    as a SageMaker script-mode job and persist the Detection_Record_Fields.
+    Called from create_training_job after the shared validation/access checks
+    with the request's `model_type` (one of DETECTION_MODEL_TYPES; it is
+    written to the record and the audit entry as given); raises ClientError
+    into the caller's shared error mapping.
 
     Every 400 below (arch, hyperparameters, base model, manifest) returns
     BEFORE the sourcedir upload and the SageMaker call, so a rejected request
@@ -473,22 +516,58 @@ def _create_detection_training_job(
     """
     user_id = user['user_id']
 
-    # 1. Arch (default yolo so existing callers are unchanged; Req 3.2) and
-    #    its hyperparameter schema (validated at the boundary; 400 names the
-    #    field).
+    # 1. Arch (default yolo so existing callers are unchanged, Req 3.2; the
+    #    instance_segmentation model type defaults to rf_detr_seg and the pair
+    #    must agree both ways — Seg spec Req 5.1) and its hyperparameter
+    #    schema (validated at the boundary; 400 names the field).
+    is_seg_type = model_type == MODEL_TYPE_INSTANCE_SEGMENTATION
+    requested_arch = body.get('detection_arch')
+    if is_seg_type and (requested_arch is None or
+                        (isinstance(requested_arch, str) and not requested_arch.strip())):
+        # Absent (the same rule normalize_detection_arch applies for yolo).
+        requested_arch = 'rf_detr_seg'
     try:
-        detection_arch = normalize_detection_arch(body.get('detection_arch'))
+        detection_arch = normalize_detection_arch(requested_arch)
+    except ValueError as e:
+        return create_response(400, {'error': str(e)})
+    if is_seg_type and detection_arch != 'rf_detr_seg':
+        return create_response(400, {
+            'error': 'instance_segmentation requires detection_arch rf_detr_seg'})
+    if detection_arch == 'rf_detr_seg' and not is_seg_type:
+        return create_response(400, {
+            'error': 'detection_arch rf_detr_seg requires model_type instance_segmentation'})
+    is_seg = detection_arch == 'rf_detr_seg'
+    # Output_Mode (Seg spec Req 5.5): a TOP-LEVEL request field of the Seg
+    # request only (not a hyperparameter), defaulting to 'instance'. A YOLO /
+    # RF-DETR request that carries one is refused rather than ignored, so a
+    # client cannot send a silent no-op key.
+    output_mode = None
+    if is_seg:
+        output_mode = str(body.get('output_mode') or DEFAULT_OUTPUT_MODE).strip().lower()
+        if output_mode not in OUTPUT_MODES:
+            return create_response(400, {
+                'error': f"Invalid output_mode '{body.get('output_mode')}': "
+                         f"expected one of {', '.join(OUTPUT_MODES)}"})
+    elif body.get('output_mode') is not None:
+        return create_response(400, {
+            'error': 'output_mode applies to instance_segmentation only'})
+    try:
         params = parse_detection_hyperparameters(
             body.get('hyperparameters') or {}, detection_arch)
     except ValueError as e:
         return create_response(400, {'error': str(e)})
     entry_point = ENTRY_POINT_FOR_ARCH[detection_arch]
-    # Square network input the ONNX is exported at (YOLO: imgsz; RF-DETR:
+    # Square network input the ONNX is exported at (YOLO: imgsz; DETR family:
     # resolution) — what packaging reads back as network_input_width.
-    network_input = params['resolution'] if detection_arch == 'rf_detr' else params['imgsz']
+    network_input = params['resolution'] if is_detr_family(detection_arch) else params['imgsz']
     # The arch's published checkpoint name; the base model the run starts
     # from when the request names none.
-    published_ref = params['rfdetr_size'] if detection_arch == 'rf_detr' else params['base_weights']
+    if is_seg:
+        published_ref = params['rfdetr_seg_size']
+    elif detection_arch == 'rf_detr':
+        published_ref = params['rfdetr_size']
+    else:
+        published_ref = params['base_weights']
 
     instance_type = body.get('instance_type') or DETECTION_DEFAULT_INSTANCE_TYPE
     max_runtime = int(body.get('max_runtime_seconds') or DETECTION_DEFAULT_MAX_RUNTIME_SECONDS)
@@ -515,16 +594,22 @@ def _create_detection_training_job(
     except ValueError as e:
         return create_response(400, {'error': str(e)})
 
-    # 2. Manifest must be a bounding-box manifest.
-    logger.info("Validating manifest as an Object Detection manifest")
-    validation = validate_detection_manifest(dataset_manifest_s3, usecase)
+    # 2. Manifest must be a bounding-box manifest (Object Detection) or an
+    #    Instance_Manifest (RF-DETR-Seg; Seg spec Req 3.5 / 5.1).
+    if is_seg:
+        logger.info("Validating manifest as an instance-segmentation manifest")
+    else:
+        logger.info("Validating manifest as an Object Detection manifest")
+    validation = validate_detection_manifest(
+        dataset_manifest_s3, usecase, expected='instance' if is_seg else 'bbox')
     if not validation['valid']:
         logger.error(f"Detection manifest validation failed: {validation['errors']}")
         if validation.get('error_code'):
             # A refused bucket answers the use-case bucket configuration body.
             return create_response(400, _bucket_config_body(validation))
         return create_response(400, {
-            'error': 'Object Detection requires a bounding-box manifest',
+            'error': ('RF-DETR-Seg requires an instance-segmentation manifest' if is_seg
+                      else 'Object Detection requires a bounding-box manifest'),
             'details': validation['errors'],
             'detected_attributes': validation.get('detected_attributes', []),
             'message': validation.get('message'),
@@ -599,7 +684,10 @@ def _create_detection_training_job(
         AlgorithmSpecification={
             'TrainingImage': training_image,
             'TrainingInputMode': 'File',
-            'MetricDefinitions': DETECTION_METRIC_DEFINITIONS,
+            # Per arch (Seg spec DD19): yolo / rf_detr map to the
+            # DETECTION_METRIC_DEFINITIONS object itself, rf_detr_seg adds
+            # the two mask-mAP regexes.
+            'MetricDefinitions': METRIC_DEFINITIONS_FOR_ARCH[detection_arch],
         },
         RoleArn=sagemaker_role_arn,
         # No InputDataConfig at all: the entry point pulls the whole manifest
@@ -627,7 +715,38 @@ def _create_detection_training_job(
     training_job_arn = training_response['TrainingJobArn']
 
     # 6. Record — LFV base fields + Detection_Record_Fields (per arch).
-    if detection_arch == 'rf_detr':
+    if is_seg:
+        # The RF-DETR block with the Seg size table, the mask threshold and
+        # the Output_Mode; top_k is the size's decoder query count (Seg spec
+        # Req 5.5). No iou_threshold (set-based decoding, as RF-DETR).
+        detection_record = {
+            'detection_arch': detection_arch,
+            'network_input_width': params['resolution'],
+            'network_input_height': params['resolution'],
+            'class_names': class_names,
+            'num_classes': len(class_names),
+            'score_threshold': _to_dynamo_number(params['score_threshold']),
+            # Mask binarisation threshold: shapes the record -> packaging ->
+            # device manifest path only, never the training run's env.
+            'mask_threshold': _to_dynamo_number(params['mask_threshold']),
+            'top_k': RFDETR_SEG_QUERIES_FOR_SIZE[params['rfdetr_seg_size']],
+            # Same aspect-destroying square resize + ImageNet normalisation
+            # as train_rfdetr.py (the Seg trainer reuses its helpers).
+            'preserve_aspect': False,
+            'rfdetr_seg_size': params['rfdetr_seg_size'],
+            'resolution': params['resolution'],
+            'epochs': params['epochs'],
+            'batch': params['batch'],
+            'grad_accum': params['grad_accum'],
+            'lr': _to_dynamo_number(params['lr']),
+            'patience': params['patience'],
+            'onnx_opset': params['onnx_opset'],
+            'sourcedir_s3': code_s3,
+            # The Output_Mode the device manifest is packaged in; the
+            # Package action may override it per package (Seg spec Req 6.4).
+            'output_mode': output_mode,
+        }
+    elif detection_arch == 'rf_detr':
         detection_record = {
             'detection_arch': detection_arch,
             'network_input_width': params['resolution'],
@@ -685,7 +804,10 @@ def _create_detection_training_job(
         'usecase_id': usecase_id,
         'model_name': model_name,
         'model_version': model_version,
-        'model_type': MODEL_TYPE_OBJECT_DETECTION,
+        # The request's model type as validated by the caller: still
+        # 'object_detection' for yolo / rf_detr, 'instance_segmentation' for
+        # rf_detr_seg (Seg spec Req 5.5).
+        'model_type': model_type,
         'dataset_manifest_s3': dataset_manifest_s3,
         'algorithm_uri': training_image,
         'hyperparameters': training_hyperparameters,
@@ -718,7 +840,7 @@ def _create_detection_training_job(
         details={
             'model_name': model_name,
             'model_version': model_version,
-            'model_type': MODEL_TYPE_OBJECT_DETECTION,
+            'model_type': model_type,
             'training_job_name': training_job_name,
             'training_image': training_image,
             'detection_arch': detection_arch,
@@ -747,16 +869,20 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         "usecase_id": "string",
         "model_name": "string",
         "model_version": "string",
-        "model_type": "classification" | "segmentation" | "classification-robust" | "segmentation-robust",
+        "model_type": "classification" | "segmentation" | "classification-robust" | "segmentation-robust"
+                      | "object_detection" | "instance_segmentation",
         "dataset_manifest_s3": "s3://bucket/path/manifest.json",
         "instance_type": "ml.g4dn.2xlarge",
         "max_runtime_seconds": 7200,
         "hyperparameters": {},  // optional
         "auto_compile": true,  // optional, default false
         "compilation_targets": ["x86_64", "aarch64", "jetson"],  // optional, required if auto_compile is true
-        // object_detection only:
-        "detection_arch": "yolo" | "rf_detr",  // optional, default "yolo"
-        "base_model": {"kind": "published" | "training_job" | "imported", "ref": "..."}  // optional
+        // object_detection / instance_segmentation only:
+        "detection_arch": "yolo" | "rf_detr" | "rf_detr_seg",  // optional, default "yolo"
+                                                              // ("rf_detr_seg" for instance_segmentation)
+        "base_model": {"kind": "published" | "training_job" | "imported", "ref": "..."},  // optional
+        // instance_segmentation only:
+        "output_mode": "instance" | "semantic"  // optional, default "instance"
     }
     """
     try:
@@ -799,11 +925,18 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         
         # Validate model type
         valid_model_types = ['classification', 'segmentation', 'classification-robust', 'segmentation-robust',
-                             MODEL_TYPE_OBJECT_DETECTION]
+                             MODEL_TYPE_OBJECT_DETECTION, MODEL_TYPE_INSTANCE_SEGMENTATION]
         if model_type not in valid_model_types:
             return create_response(400, {
                 'error': f"Invalid model_type. Must be one of: {', '.join(valid_model_types)}"
             })
+
+        # RF-DETR-Seg off switch (rfdetr-seg-support Req 15.2, DD7): a Seg
+        # request is refused here, before the access check and before any
+        # validation of its body. The model-type check above is the dispatch,
+        # not Seg validation.
+        if model_type == MODEL_TYPE_INSTANCE_SEGMENTATION and not rfdetr_seg_enabled():
+            return create_response(403, {'error': 'RF-DETR-Seg is disabled on this portal'})
         
         # Check user access (DataScientist role required)
         if not check_user_access(user_id, usecase_id, 'DataScientist'):
@@ -819,10 +952,11 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         assert_bucket_allowed(usecase, manifest_bucket, 'training-manifest',
                               actor=user, event=event)
 
-        # Object Detection (YOLO): script-mode training job, not the
-        # marketplace algorithm. Branches here so everything below stays the
-        # untouched LFV path (portal-detection-training Req 1.2).
-        if model_type == MODEL_TYPE_OBJECT_DETECTION:
+        # Object Detection (YOLO / RF-DETR) and RF-DETR-Seg: script-mode
+        # training job, not the marketplace algorithm. Branches here so
+        # everything below stays the untouched LFV path
+        # (portal-detection-training Req 1.2; rfdetr-seg-support Req 5.1).
+        if model_type in DETECTION_MODEL_TYPES:
             return _create_detection_training_job(
                 user=user,
                 body=body,
@@ -834,6 +968,7 @@ def create_training_job(event: Dict, context: Any) -> Dict:
                 auto_compile=auto_compile,
                 compilation_targets=compilation_targets,
                 generation_session_id=generation_session_id,
+                model_type=model_type,
             )
         
         # Validate manifest format for marketplace model

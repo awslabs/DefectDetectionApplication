@@ -26,13 +26,15 @@ import {
   ProgressBar,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
-import type { CheckpointAssessment } from '../services/api';
+import type { CheckpointAssessment, OutputMode } from '../services/api';
+import { getConfig, isRfDetrSegEnabled } from '../config';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import {
   CHECKPOINT_SIZE_CAP_BYTES,
   CONVERTIBLE_VERDICT,
   DEFAULT_IOU_THRESHOLD,
+  DEFAULT_MASK_THRESHOLD,
   NOT_CONVERTIBLE_VERDICT,
   UPLOAD_EXTENSIONS,
   checkpointFamilyLabel,
@@ -47,6 +49,16 @@ import {
 } from '../utils/detectorConversion';
 import type { ConversionLocks } from '../utils/detectorConversion';
 import { COMPILATION_TARGET_OPTIONS } from '../utils/compilationTargets';
+
+/** The Smart Import model_type of an RF-DETR-Seg ONNX graph (rfdetr-seg-support Req 8.4). */
+const INSTANCE_SEGMENTATION = 'instance_segmentation';
+
+// How a Seg model's masks are packaged for the device (rfdetr-seg-support D1);
+// sent as the request's `output_mode`.
+const OUTPUT_MODE_OPTIONS: SelectProps.Option[] = [
+  { label: 'instance', value: 'instance', description: 'One mask per detected object, beside its box and class.' },
+  { label: 'semantic overlay', value: 'semantic', description: 'All instances merged into one class-coloured mask over the frame.' },
+];
 
 const FILE_UPLOAD_I18N = {
   uploadButtonText: () => 'Choose file',
@@ -153,7 +165,11 @@ interface ModelInspectionResult {
   suggested_type?: string;
   error?: string;
   // ONNX auto-detected attributes (from graph input/output shapes).
-  detection_arch?: string;      // 'yolo' | 'rf_detr'
+  detection_arch?: string;      // 'yolo' | 'rf_detr' | 'rf_detr_seg'
+  // RF-DETR-Seg ONNX graphs (rfdetr-seg-support Req 8.1): the query count and
+  // why the Seg tile is unavailable when the portal's switch is off.
+  num_queries?: number;
+  disabled_reason?: string;
   input_width?: number | null;
   input_height?: number | null;
   num_outputs?: number;
@@ -185,6 +201,16 @@ const COMMON_DIMENSIONS: Record<string, { label: string; value: string }[]> = {
     { label: '512x512', value: '512' },
     { label: '768x768', value: '768' },
     { label: '1024x1024', value: '1024' },
+  ],
+  // RF-DETR-Seg converts and runs only at a size's native resolution
+  // (rfdetr-seg-support Req 1.5): the six natives, nano .. 2xlarge.
+  instance_segmentation: [
+    { label: '312x312 (RF-DETR-Seg nano)', value: '312' },
+    { label: '384x384 (RF-DETR-Seg small)', value: '384' },
+    { label: '432x432 (RF-DETR-Seg medium)', value: '432' },
+    { label: '504x504 (RF-DETR-Seg large)', value: '504' },
+    { label: '624x624 (RF-DETR-Seg xlarge)', value: '624' },
+    { label: '768x768 (RF-DETR-Seg 2xlarge)', value: '768' },
   ],
   anomaly_detection: [
     { label: '224x224', value: '224' },
@@ -228,6 +254,10 @@ export default function SmartImport() {
   const [classNames, setClassNames] = useState('');
   const [scoreThreshold, setScoreThreshold] = useState('0.25');
   const [iouThreshold, setIouThreshold] = useState('0.45');
+  // RF-DETR-Seg only (rfdetr-seg-support Req 8.4): the mask binarisation
+  // threshold and how the masks are packaged.
+  const [maskThreshold, setMaskThreshold] = useState(String(DEFAULT_MASK_THRESHOLD));
+  const [outputMode, setOutputMode] = useState<OutputMode>('instance');
   const [autoCompile, setAutoCompile] = useState(true);
   const [compilationTargets, setCompilationTargets] = useState<MultiselectProps.Option[]>([
     { label: 'x86_64 CPU', value: 'x86_64-cpu' }
@@ -262,13 +292,17 @@ export default function SmartImport() {
   const locks: ConversionLocks | null = conversionLocksFor(checkpoint);
   const onnxBlocked = !!checkpoint && !locks;
 
-  // Segmentation is supported on-device only via the RF-DETR ONNX decoder
-  // (instance masks -> semantic overlay). Lock the architecture to RF-DETR and
-  // the runtime to ONNX when the user selects Segmentation -- unless the
+  // The RF-DETR-Seg switch (rfdetr-seg-support DD7): off hides the Instance
+  // Segmentation tile; the server stays authoritative.
+  const segEnabled = isRfDetrSegEnabled(getConfig());
+  const isInstanceSeg = modelType === INSTANCE_SEGMENTATION;
+  // Instance Segmentation (RF-DETR-Seg) runs on-device only through the ONNX
+  // decoder: lock the runtime to ONNX when that tile is selected -- unless the
   // source is a checkpoint that cannot produce ONNX, which keeps PyTorch/Neo.
+  // The "Segmentation" tile keeps serving the PyTorch/Neo and generic-ONNX
+  // semantic paths and locks nothing (Req 8.4, 12.5).
   useEffect(() => {
-    if (modelType === 'segmentation' && !onnxBlocked) {
-      setDetectionArch('rf_detr');
+    if (modelType === INSTANCE_SEGMENTATION && !onnxBlocked) {
       setExportFormat('onnx');
     }
   }, [modelType, onnxBlocked]);
@@ -366,6 +400,8 @@ export default function SmartImport() {
           setNetworkInput(ckptLocks.networkInput !== null ? String(ckptLocks.networkInput) : '');
           setScoreThreshold(String(ckptLocks.scoreThreshold));
           setIouThreshold(String(ckptLocks.iouThreshold ?? DEFAULT_IOU_THRESHOLD));
+          setMaskThreshold(String(ckptLocks.maskThreshold ?? DEFAULT_MASK_THRESHOLD));
+          setOutputMode('instance');
           setPreserveAspect(ckptLocks.preserveAspect);
         } else {
           // Not convertible: ONNX output is disabled (Requirement 10.4).
@@ -384,12 +420,16 @@ export default function SmartImport() {
       }
 
       // Auto-select suggested type if available
-      if (ir.suggested_type) {
+      // (A Seg graph suggests instance_segmentation; while the switch is off
+      // that tile is hidden, so the suggestion is not applied.)
+      if (ir.suggested_type && (ir.suggested_type !== INSTANCE_SEGMENTATION || segEnabled)) {
         setModelType(ir.suggested_type);
       }
 
       // Auto-select the detection architecture (YOLO / RF-DETR) when detected.
-      if (ir.detection_arch) {
+      // rf_detr_seg is implied by the Instance Segmentation tile and is never
+      // a Detection architecture pick.
+      if (ir.detection_arch === 'yolo' || ir.detection_arch === 'rf_detr') {
         setDetectionArch(ir.detection_arch);
       }
 
@@ -429,6 +469,7 @@ export default function SmartImport() {
       networkInputProblem(conv, networkInput),
       thresholdProblem('Score threshold', scoreThreshold),
       conv.arch === 'yolo' ? thresholdProblem('IoU threshold', iouThreshold) : null,
+      conv.arch === 'rf_detr_seg' ? thresholdProblem('Mask threshold', maskThreshold) : null,
     ].filter((p): p is string => !!p);
     if (problems.length > 0) {
       setError(problems.join('. '));
@@ -455,6 +496,9 @@ export default function SmartImport() {
         score_threshold: parseFloat(scoreThreshold),
         // RF-DETR is NMS-free: the field must be absent, not null.
         iou_threshold: conv.arch === 'yolo' ? parseFloat(iouThreshold) : undefined,
+        // RF-DETR-Seg (rfdetr-seg-support Req 7.3): the mask threshold and the Output_Mode.
+        mask_threshold: conv.arch === 'rf_detr_seg' ? parseFloat(maskThreshold) : undefined,
+        output_mode: conv.arch === 'rf_detr_seg' ? outputMode : undefined,
         auto_import: true,
       });
       if (result.training_id) {
@@ -498,7 +542,13 @@ export default function SmartImport() {
       .map(n => n.trim())
       .filter(n => n.length > 0);
     const detectionClassNames =
-      isDetection && parsedClassNames.length > 0 ? parsedClassNames : undefined;
+      (isDetection || isInstanceSeg) && parsedClassNames.length > 0 ? parsedClassNames : undefined;
+    // RF-DETR-Seg needs its class names (one per class, in class-id order; the
+    // backend answers 400 without them, rfdetr-seg-support Req 8.2).
+    if (isInstanceSeg && !detectionClassNames) {
+      setError('Class names are required for Instance Segmentation: one per class, in class-id order');
+      return;
+    }
 
     // A class-name list shorter than num_classes silently falls back to numeric
     // labels for the missing ids on device, so catch the mismatch here.
@@ -519,7 +569,8 @@ export default function SmartImport() {
     // helper returning a sentinel, so the type stays number | undefined.
     let detectionScoreThreshold: number | undefined;
     let detectionIouThreshold: number | undefined;
-    if (isDetection) {
+    let segMaskThreshold: number | undefined;
+    if (isDetection || isInstanceSeg) {
       if (scoreThreshold.trim() !== '') {
         const value = parseFloat(scoreThreshold);
         if (isNaN(value) || value < 0 || value > 1) {
@@ -528,14 +579,23 @@ export default function SmartImport() {
         }
         detectionScoreThreshold = value;
       }
-      // NMS is YOLO-only; RF-DETR is set-based top-k, so it has no IoU knob.
-      if (detectionArch === 'yolo' && iouThreshold.trim() !== '') {
+      // NMS is YOLO-only; RF-DETR and RF-DETR-Seg are set-based top-k, so
+      // they have no IoU knob (the Seg import refuses the field).
+      if (isDetection && detectionArch === 'yolo' && iouThreshold.trim() !== '') {
         const value = parseFloat(iouThreshold);
         if (isNaN(value) || value < 0 || value > 1) {
           setError('IoU threshold must be a number between 0 and 1');
           return;
         }
         detectionIouThreshold = value;
+      }
+      if (isInstanceSeg && maskThreshold.trim() !== '') {
+        const problem = thresholdProblem('Mask threshold', maskThreshold);
+        if (problem) {
+          setError(problem);
+          return;
+        }
+        segMaskThreshold = parseFloat(maskThreshold);
       }
     }
 
@@ -552,15 +612,18 @@ export default function SmartImport() {
         image_height: height,
         num_classes: numClasses ? parseInt(numClasses) : undefined,
         export_format: exportFormat,
-        detection_arch:
-          modelType === 'object_detection' || modelType === 'segmentation'
-            ? detectionArch
-            : undefined,
+        // object_detection only: the Instance Segmentation tile implies
+        // rf_detr_seg (the backend fills it in), and the Segmentation tile
+        // carries no arch (rfdetr-seg-support Req 8.4).
+        detection_arch: modelType === 'object_detection' ? detectionArch : undefined,
         preserve_aspect:
           modelType === 'object_detection' ? preserveAspect : undefined,
         class_names: detectionClassNames,
         score_threshold: detectionScoreThreshold,
         iou_threshold: detectionIouThreshold,
+        // instance_segmentation only (Req 8.4): never iou_threshold for it.
+        mask_threshold: isInstanceSeg ? segMaskThreshold : undefined,
+        output_mode: isInstanceSeg ? outputMode : undefined,
         auto_import: true,
       });
 
@@ -844,7 +907,9 @@ export default function SmartImport() {
                   label="Model Type"
                   description={
                     locks
-                      ? 'Locked to Object Detection: the checkpoint is a detector.'
+                      ? locks.modelType === INSTANCE_SEGMENTATION
+                        ? 'Locked to Instance Segmentation: the checkpoint is an RF-DETR-Seg model.'
+                        : 'Locked to Object Detection: the checkpoint is a detector.'
                       : 'What does your model do?'
                   }
                 >
@@ -867,6 +932,14 @@ export default function SmartImport() {
                         label: 'Segmentation',
                         description: 'Pixel-level classification',
                       },
+                      // Hidden while the RF-DETR-Seg switch is off (Req 15.2).
+                      ...(segEnabled
+                        ? [{
+                            value: INSTANCE_SEGMENTATION,
+                            label: 'Instance Segmentation (RF-DETR-Seg)',
+                            description: 'Per-object masks with boxes and classes (RF-DETR-Seg ONNX)',
+                          }]
+                        : []),
                       {
                         value: 'anomaly_detection',
                         label: 'Anomaly Detection',
@@ -896,14 +969,16 @@ export default function SmartImport() {
                         description: checkpoint?.kind === 'ultralytics_checkpoint' || checkpoint?.kind === 'rfdetr_checkpoint'
                           ? 'Import as a base model only (kept for fine-tuning); compiled with SageMaker Neo to DLR'
                           : 'Legacy path — compiled with SageMaker Neo to DLR',
-                        disabled: !!locks,
+                        // Locked out for a checkpoint conversion and for the Instance
+                        // Segmentation tile, whose decoder exists only for ONNX.
+                        disabled: !!locks || (isInstanceSeg && !onnxBlocked),
                       },
                       {
                         value: 'onnx',
                         label: locks ? 'ONNX Runtime (convert)' : 'ONNX Runtime',
                         description: onnxBlocked
                           ? `Unavailable: ${(checkpoint?.reasons || []).join('; ') || 'this checkpoint cannot be converted'}`
-                          : 'Portable ONNX engine; required for object detection',
+                          : 'Portable ONNX engine; required for object detection and instance segmentation',
                         disabled: onnxBlocked,
                       },
                     ]}
@@ -961,25 +1036,6 @@ export default function SmartImport() {
                   </FormField>
                 )}
 
-                {modelType === 'segmentation' && (
-                  <FormField
-                    label="Segmentation architecture"
-                    description="On-device decoder for the ONNX segmentation model. RF-DETR (ONNX Runtime) instance masks are composited into a colored, per-class semantic overlay you can toggle over the source image."
-                  >
-                    <Tiles
-                      value={detectionArch}
-                      onChange={({ detail }) => setDetectionArch(detail.value)}
-                      items={[
-                        {
-                          value: 'rf_detr',
-                          label: 'RF-DETR',
-                          description: 'DETR-family instance segmentation → semantic mask overlay',
-                        },
-                      ]}
-                    />
-                  </FormField>
-                )}
-
                 {locks ? (
                   <>
                     {/* Convertible_Checkpoint (Requirement 10.3): the network
@@ -990,7 +1046,7 @@ export default function SmartImport() {
                       label="Network input"
                       description={
                         locks.allowedInputs
-                          ? `RF-DETR converts only at its size's native resolution (${locks.allowedInputs.join(', ')} px).`
+                          ? `${locks.arch === 'rf_detr_seg' ? 'RF-DETR-Seg' : 'RF-DETR'} converts only at its size's native resolution (${locks.allowedInputs.join(', ')} px).`
                           : 'The square input the ONNX graph is exported at. Pre-filled from the training size.'
                       }
                       constraintText={
@@ -1052,6 +1108,32 @@ export default function SmartImport() {
                           />
                         </FormField>
 
+                        {locks.arch === 'rf_detr_seg' && (
+                          <>
+                            <FormField
+                              label="Mask threshold"
+                              description="Mask logit cut-off that binarises each kept detection's mask on device."
+                              errorText={thresholdProblem('Mask threshold', maskThreshold) ?? undefined}
+                            >
+                              <Input
+                                type="number"
+                                value={maskThreshold}
+                                onChange={({ detail }) => setMaskThreshold(detail.value)}
+                                placeholder={String(locks.maskThreshold ?? DEFAULT_MASK_THRESHOLD)}
+                              />
+                            </FormField>
+                            <FormField
+                              label="Output"
+                              description="How the masks are packaged for the device: one mask per object, or one semantic overlay. Can be overridden when packaging."
+                            >
+                              <Select
+                                selectedOption={OUTPUT_MODE_OPTIONS.find(o => o.value === outputMode) ?? OUTPUT_MODE_OPTIONS[0]}
+                                onChange={({ detail }) => setOutputMode((detail.selectedOption.value as OutputMode) ?? 'instance')}
+                                options={OUTPUT_MODE_OPTIONS}
+                              />
+                            </FormField>
+                          </>
+                        )}
                         {locks.arch === 'yolo' && (
                           <FormField
                             label="IoU threshold"
@@ -1125,7 +1207,7 @@ export default function SmartImport() {
                       />
                     </FormField>
 
-                    {modelType === 'object_detection' && (
+                    {(modelType === 'object_detection' || isInstanceSeg) && (
                       <ExpandableSection headerText="Detection decode settings" defaultExpanded>
                         <SpaceBetween size="s">
                           <FormField
@@ -1152,7 +1234,7 @@ export default function SmartImport() {
                             />
                           </FormField>
 
-                          {detectionArch === 'yolo' && (
+                          {modelType === 'object_detection' && detectionArch === 'yolo' && (
                             <FormField
                               label="IoU threshold"
                               description="Overlap above which NMS suppresses the weaker of two boxes. YOLO only — RF-DETR is NMS-free."
@@ -1164,6 +1246,31 @@ export default function SmartImport() {
                                 placeholder="0.45"
                               />
                             </FormField>
+                          )}
+                          {isInstanceSeg && (
+                            <>
+                              <FormField
+                                label="Mask threshold"
+                                description="Mask logit cut-off that binarises each kept detection's mask on device (0-1)."
+                              >
+                                <Input
+                                  type="number"
+                                  value={maskThreshold}
+                                  onChange={({ detail }) => setMaskThreshold(detail.value)}
+                                  placeholder={String(DEFAULT_MASK_THRESHOLD)}
+                                />
+                              </FormField>
+                              <FormField
+                                label="Output"
+                                description="How the masks are packaged for the device: one mask per object, or one semantic overlay. Fixed at import for an ONNX graph."
+                              >
+                                <Select
+                                  selectedOption={OUTPUT_MODE_OPTIONS.find(o => o.value === outputMode) ?? OUTPUT_MODE_OPTIONS[0]}
+                                  onChange={({ detail }) => setOutputMode((detail.selectedOption.value as OutputMode) ?? 'instance')}
+                                  options={OUTPUT_MODE_OPTIONS}
+                                />
+                              </FormField>
+                            </>
                           )}
                         </SpaceBetween>
                       </ExpandableSection>

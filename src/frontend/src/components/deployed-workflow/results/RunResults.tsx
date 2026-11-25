@@ -53,6 +53,8 @@ import {
 } from "components/live-result/helpers";
 import { resultLayoutStyle } from "components/live-result/styles";
 import { runDetections } from "../detections";
+import { hasMask, normalizeDetectionEntries } from "../instanceDetections";
+import InstanceMaskLayer, { INSTANCE_MASKS_HEADER } from "./InstanceMaskLayer";
 import {
   hasSceneAnalytics,
   runSceneAnalytics,
@@ -64,6 +66,7 @@ import SceneAnalyticsSections from "./SceneAnalyticsSections";
 /** Overlay toggle labels for a server-rendered overlay image (R1.3). */
 export const BOUNDING_BOXES_TOGGLE_LABEL = "Show bounding boxes";
 export const OVERLAY_TOGGLE_LABEL = "Show overlay";
+
 
 // --------------------------------------------------------------------------
 // Inference-node sections (vlm-bedrock-parity Requirement 4.3, 4.2)
@@ -343,6 +346,15 @@ export default function RunResults(): JSX.Element {
     queryFn: () => getWorkflowExecutionMetadata(executionId),
   });
   const detections = runDetections(metadataQuery.data);
+  // The run's instance masks (rfdetr-seg-support Requirement 10.6): the
+  // `/overlay` body lists the Detection_List with each mask's RLE; the layer
+  // is shown only when some entry still carries one, so a detection run's
+  // page (whose entries have no mask) is unchanged.
+  const instances = useMemo(
+    () => normalizeDetectionEntries(overlayQuery.data?.instances ?? null),
+    [overlayQuery.data],
+  );
+  const showInstanceLayer = instances.some(hasMask);
   // Detection counter, object association and event gate outputs
   // (rtsp-rtmp-stream-cameras Requirement 16.3). Their node status is read
   // only when there are any, for the detail of a failed evaluation.
@@ -488,6 +500,14 @@ export default function RunResults(): JSX.Element {
                 />
               </div>
             </SpaceBetween>
+          </Container>
+        )}
+        {hasOutputImage && showInstanceLayer && (
+          <Container
+            header={<Header variant="h2">{INSTANCE_MASKS_HEADER}</Header>}
+            data-testid="instance-masks-container"
+          >
+            <InstanceMaskLayer imageSrc={imageSrc} instances={instances} />
           </Container>
         )}
         {detectionsSection}

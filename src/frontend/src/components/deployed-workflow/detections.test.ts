@@ -209,6 +209,28 @@ describe("runDetections details", () => {
       },
     ]);
   });
+
+  // rfdetr-seg-support Requirement 10.6: `mask_area` (the instance mask's
+  // pixel count, which the run metadata carries only for an instance
+  // segmentation entry) passes through as `maskArea`, only when present.
+  it("copies a finite numeric mask_area as maskArea, and nothing otherwise", () => {
+    const base = { label: "scratch", confidence: 0.9, x_min: 1, y_min: 2, x_max: 3, y_max: 4 };
+    const result = runDetections({
+      detections: [
+        { ...base, mask_area: 1234 },
+        { ...base },
+        { ...base, mask_area: Number.NaN },
+        { ...base, mask_area: Number.POSITIVE_INFINITY },
+        { ...base, mask_area: "1234" },
+        { ...base, mask_area: null },
+      ],
+    });
+    expect(result?.[0]).toEqual({ label: "scratch", confidence: 0.9, box: [1, 2, 3, 4], maskArea: 1234 });
+    for (const detection of result?.slice(1) ?? []) {
+      expect(detection).toEqual({ label: "scratch", confidence: 0.9, box: [1, 2, 3, 4] });
+      expect("maskArea" in detection).toBe(false);
+    }
+  });
 });
 
 describe("formatters", () => {

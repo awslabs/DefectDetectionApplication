@@ -34,8 +34,25 @@ fine-tunable and Model Detail says why. All of this was deployed to the portal
 on 2026-09-18 and **verified on device on 2026-09-22** (see
 §"On-device verification (2026-09-22)" at the end of this document).
 
+**RF-DETR-Seg update (2026-11-25).** Instance segmentation with RF-DETR-Seg
+(the six Seg sizes; `instance` and `semantic` output modes) is a third
+architecture beside YOLO and RF-DETR, built under
+`.kiro/specs/rfdetr-seg-support/`: the entry point is
+`datasets/detection_training/train_rfdetr_seg.py`, the labeling modality is
+`InstanceSegmentation`, and the device contract is documented in
+`docs/multi-runtime-inference.md` §24. Deployed to both Portals and verified on
+device (the lab JP6 Orin devkit; JP5 exercised on the demo-account JP5 rig;
+JP7 deferred, no device) — the record, the published LocalServer versions, the
+feature-floor state per architecture and the open items are in
+`.kiro/specs/rfdetr-seg-support/verification-notes.md`. The RF-DETR detection
+oracle of §"On-device verification (2026-09-22)" was re-run on the rebuilt
+JP6 LocalServer there (0.950 / 0.947 / 0.942; JP7 reference 0.951 / 0.940 /
+0.939). One side effect for RF-DETR detection training: the trainer
+requirements now pin `transformers==5.17.0` (rfdetr 1.10.1 leaves it unpinned
+and the trainer image's resolution had started to break `import rfdetr`).
+
 Written 2026-09-12 from a working session on the `blue_plate` use case;
-status updated 2026-09-13, 2026-09-14 and 2026-09-22.
+status updated 2026-09-13, 2026-09-14, 2026-09-22 and 2026-11-25.
 
 ---
 

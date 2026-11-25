@@ -45,8 +45,8 @@ from lyra_science_processing_utils.model_processors.yolo_detection_postprocessor
     YoloDetectionPostProcessor
 from lyra_science_processing_utils.model_processors.rf_detr_detection_postprocessor import \
     RfDetrDetectionPostProcessor
-from lyra_science_processing_utils.model_processors.rf_detr_semantic_segmentation_postprocessor import \
-    RfDetrSemanticSegmentationPostProcessor
+from lyra_science_processing_utils.model_processors.rf_detr_seg_postprocessor import \
+    RfDetrSegPostProcessor
 
 
 MODEL_NAME_MAP: Dict[str, Tuple[str, Type[InferencePostProcessor]]] = {
@@ -61,7 +61,10 @@ MODEL_NAME_MAP: Dict[str, Tuple[str, Type[InferencePostProcessor]]] = {
     "dango": ("supervised_multi_head_model_bbox", SupervisedBBoxMultiHeadPostProcessor),
     "taiyaki": ("yolo_object_detection", YoloDetectionPostProcessor),
     "canele": ("rf_detr_object_detection", RfDetrDetectionPostProcessor),
-    "financier": ("rf_detr_semantic_segmentation", RfDetrSemanticSegmentationPostProcessor)
+    # One RF-DETR-Seg decoder under both Seg stage types; the stage type is the
+    # mode (rfdetr-seg-support DD2, Requirement 9.1).
+    "financier": ("rf_detr_semantic_segmentation", RfDetrSegPostProcessor),
+    "macaron": ("rf_detr_instance_segmentation", RfDetrSegPostProcessor)
 }
 
 

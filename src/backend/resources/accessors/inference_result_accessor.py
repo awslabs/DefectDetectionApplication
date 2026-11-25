@@ -103,15 +103,19 @@ class InferenceResultAccessor:
         return inference_result_dao.list_inference_results_by_capture_task_id(db=db, capture_task_id=capture_task_id)
 
     def list_inference_result_data_from_capture_id_list(self, db: Session, capture_id_list: List[str]):
-        # Convert the list of tuples to a list of dicts for JSON compatibility
+        # Convert the list of tuples to a list of dicts for JSON compatibility.
+        # `detections` is the stored Detection_List (list form, None for a
+        # classification / anomaly / pre-Seg row) the instance-manifest export
+        # reads (rfdetr-seg-support Requirement 11.4).
         inference_result_list_tuples = inference_result_dao.list_inference_result_data_by_capture_id_list(db=db, capture_id_list=capture_id_list)
         return [{"inputImageFilePath": inputImageFilePath,
                  "prediction": prediction,
                  "confidence": confidence,
                  "inferenceCreationTime": inferenceCreationTime,
                  "humanClassification": humanClassification,
-                 "textNote": textNote
-                 } for inputImageFilePath, prediction, confidence, inferenceCreationTime, humanClassification, textNote in inference_result_list_tuples]
+                 "textNote": textNote,
+                 "detections": detections
+                 } for inputImageFilePath, prediction, confidence, inferenceCreationTime, humanClassification, textNote, detections in inference_result_list_tuples]
     
     def list_inference_result_data_for_retraining(self, db: Session, workflow_id: str, data: dict):
         start_time_range = data.get("startTime", 0)
@@ -127,13 +131,15 @@ class InferenceResultAccessor:
             db, workflow_id, start_time_range, end_time_range, model_id, input_image_limit, prediction_res)
     
         # Convert the list of tuples to a list of dicts for JSON compatibility
+        # (same seven keys as list_inference_result_data_from_capture_id_list).
         return [{"inputImageFilePath": inputImageFilePath,
                  "prediction": prediction,
                  "confidence": confidence,
                  "inferenceCreationTime": inferenceCreationTime,
                  "humanClassification": humanClassification,
-                 "textNote": textNote
-                 } for inputImageFilePath, prediction, confidence, inferenceCreationTime, humanClassification, textNote in inference_result_list_tuples]
+                 "textNote": textNote,
+                 "detections": detections
+                 } for inputImageFilePath, prediction, confidence, inferenceCreationTime, humanClassification, textNote, detections in inference_result_list_tuples]
 
 
     def get_inference_result(self, db: Session, capture_id: str):

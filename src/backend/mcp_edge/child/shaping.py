@@ -17,7 +17,8 @@ D34; Properties 9 and 19; Requirements 8.5, 8.6).
 A 2xx JSON body passes, in this one order:
 
 (a) ``drop_fields`` (root-relative dotted paths, ``[]`` = every array
-    element) removed, ``dropped_fields`` recorded;
+    element, ``{}`` = every value of a map) removed, ``dropped_fields``
+    recorded;
 (b) ``extract_image(spec.image_field)``: a non-empty base64 string decoded
     and sniffed; <= 2 MiB -> one ``ImageContent`` (the original string, the
     sniffed MIME type, default ``image/jpeg``) and the field deleted; larger
@@ -61,7 +62,10 @@ RESOURCE_ID_KEYS = ('captureId', 'captureTaskId', 'executionId')
 
 DEVICE_ROOT_RE = re.compile(r'^(file://)?/(aws_dda|tmp|opt|home|root|var|etc|usr|snapshot)/\S*$')
 URL_SCHEME_RE = re.compile(r'^(?!file:)[a-z][a-z0-9+.-]*://')
-_PATH_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\[\])?(\.[A-Za-z_][A-Za-z0-9_]*(\[\])?)*$')
+# Dotted paths: `name` (one key), `name[]` (every element of a list) and
+# `name{}` (every value of a dict; rfdetr-seg-support Requirement 13.3 - the
+# live `inferenceResult.detections` is a map keyed "0", "1", ...).
+_PATH_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\[\]|\{\})?(\.[A-Za-z_][A-Za-z0-9_]*(\[\]|\{\})?)*$')
 _MISSING = object()
 
 _MAGIC = (
@@ -126,34 +130,54 @@ def encoded_size(value) -> int:
 
 # ------------------------------------------------------------------ paths
 
-def _parse_path(path: str) -> List[Tuple[str, bool]]:
+def _parse_path(path: str) -> List[Tuple[str, Optional[str]]]:
+    """``(name, mode)`` per segment; ``mode`` is ``None`` (one key), ``'list'``
+    (``name[]``) or ``'dict'`` (``name{}``)."""
     if not _PATH_RE.match(path):
         raise ValueError(f'not a dotted path: {path!r}')
-    return [(part[:-2], True) if part.endswith('[]') else (part, False)
-            for part in path.split('.')]
+    steps = []
+    for part in path.split('.'):
+        if part.endswith('[]'):
+            steps.append((part[:-2], 'list'))
+        elif part.endswith('{}'):
+            steps.append((part[:-2], 'dict'))
+        else:
+            steps.append((part, None))
+    return steps
+
+
+def _fan_out(value, mode):
+    """The ``(container, key)`` pairs a wildcard step names in ``value``:
+    every index of a list for ``'list'``, every key of a dict for ``'dict'``;
+    nothing when the value is not that kind of collection."""
+    if mode == 'list' and isinstance(value, list):
+        return [(value, i) for i in range(len(value))]
+    if mode == 'dict' and isinstance(value, dict):
+        return [(value, key) for key in list(value)]
+    return []
 
 
 def resolve_path(body, path: str) -> list:
-    """Every ``(container, key)`` the path names (``[]`` fans out)."""
+    """Every ``(container, key)`` the path names (``[]`` fans out over a
+    list's elements, ``{}`` over a dict's values)."""
     found = []
 
     def walk(node, steps):
-        name, each = steps[0]
+        name, mode = steps[0]
         if not isinstance(node, dict) or name not in node:
             return
         if len(steps) == 1:
-            if each:
-                if isinstance(node[name], list):
-                    found.extend((node[name], i) for i in range(len(node[name])))
-            else:
+            if mode is None:
                 found.append((node, name))
+            else:
+                found.extend(_fan_out(node[name], mode))
             return
         child = node[name]
-        if each:
-            for item in child if isinstance(child, list) else ():
-                walk(item, steps[1:])
-        else:
+        if mode is None:
             walk(child, steps[1:])
+        else:
+            for container, key in _fan_out(child, mode):
+                walk(container[key], steps[1:])
 
     walk(body, _parse_path(path))
     return found

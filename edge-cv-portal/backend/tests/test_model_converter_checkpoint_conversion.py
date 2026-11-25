@@ -200,6 +200,44 @@ def test_inspect_without_an_export_image_reports_not_configured(h, monkeypatch):
         "Checkpoint conversion is not configured on this portal (no detector export image)"]
 
 
+def test_inspect_of_a_seg_checkpoint_follows_the_seg_switch(h, monkeypatch):
+    """rfdetr-seg-support task 7.6 (Req 7.2, 15.2; DD7): a Seg .pth is assessed
+    as an instance_segmentation / rf_detr_seg checkpoint with its native
+    pre-fill when the Seg_Switch is ON (absent), and as not convertible with
+    exactly the OFF reason when PORTAL_RFDETR_SEG_ENABLED=false; a detection
+    checkpoint is unaffected by the switch."""
+    put_source(h, lambda p: fx.rfdetr_seg_checkpoint(p, envelope="training"), "uploads/seg.pth")
+    monkeypatch.delenv("PORTAL_RFDETR_SEG_ENABLED", raising=False)
+    status, body = call(mc.inspect_model_endpoint, inspect_body(h, "uploads/seg.pth"))
+    assert status == 200, body
+    info = body["inspection_result"]
+    ckpt = info["checkpoint"]
+    assert ckpt["convertible"] is True and ckpt["reasons"] == []
+    assert (ckpt["arch"], ckpt["model_type"], ckpt["task"]) == ("rf_detr_seg", "instance_segmentation",
+                                                                 "segmentation")
+    assert (ckpt["rfdetr_seg_size"], ckpt["num_queries"], ckpt["train_input_size"]) == ("nano", 100, 312)
+    assert ckpt["class_names"] == ["disc", "block"] and ckpt["num_classes"] == 2
+    assert info["suggested_type"] == "instance_segmentation" and info["detection_arch"] == "rf_detr_seg"
+    assert info["input_width"] == info["input_height"] == 312
+    assert info["architecture_hints"] == ["RF-DETR-Seg checkpoint"] and info["fine_tunable"] is True
+
+    monkeypatch.setenv("PORTAL_RFDETR_SEG_ENABLED", "false")
+    status, body = call(mc.inspect_model_endpoint, inspect_body(h, "uploads/seg.pth"))
+    assert status == 200, body
+    info = body["inspection_result"]
+    assert info["checkpoint"]["convertible"] is False
+    assert info["checkpoint"]["reasons"] == ["RF-DETR-Seg is disabled on this portal"]
+    assert "suggested_type" not in info and "detection_arch" not in info
+    assert info["architecture_hints"] == ["RF-DETR-Seg checkpoint",
+                                          "Not convertible: RF-DETR-Seg is disabled on this portal"]
+    assert info["input_width"] is None
+    # Detection checkpoints never see the switch.
+    put_source(h, ppe_like, "uploads/best.pt")
+    status, body = call(mc.inspect_model_endpoint, inspect_body(h, "uploads/best.pt"))
+    assert status == 200 and body["inspection_result"]["checkpoint"]["convertible"] is True
+    assert body["inspection_result"]["suggested_type"] == "object_detection"
+
+
 def test_inspect_reports_torchscript_as_not_convertible(h):
     put_source(h, fx.build_torchscript, "uploads/traced.pt")
     status, body = call(mc.inspect_model_endpoint, inspect_body(h, "uploads/traced.pt"))
@@ -484,6 +522,50 @@ def test_the_rfdetr_path_uses_native_resolution(h):
     assert job["Environment"]["DETECTION_ARCH"] == "rf_detr"
     assert records(h)[0]["detection"]["preserve_aspect"] is False
     assert records(h)[0]["detection"]["top_k"] == 300
+
+
+def test_a_seg_checkpoint_keeps_its_sidecar_descriptor_as_rf_detr_seg(h):
+    """rfdetr-seg-support task 7.5 (Req 7.7): the sidecar and its descriptor
+    are written exactly as for a detection checkpoint, with `arch` from the
+    probe (rf_detr_seg), and build_conversion_record copies the descriptor
+    straight onto metadata.fine_tunable (no validation step). convert_model's
+    MODEL_TYPES gate admits instance_segmentation in task 8.1, so this drives
+    convert_checkpoint -- the function convert_model dispatches a .pth asked
+    for as ONNX to -- directly, after the gates the caller owns."""
+    key = "model-uploads/0001/checkpoint_best_total.pth"
+    src = put_source(h, lambda p: fx.rfdetr_seg_checkpoint(p, envelope="training"), key)
+    body = convert_body(h, key, model_name="Disc Seg", model_type="instance_segmentation",
+                        image_width=312, image_height=312)
+    user = {"user_id": USER["sub"], "email": USER["email"], "username": USER["cognito:username"]}
+    resp = mc.convert_checkpoint(body, user, h.usecase, {"is_default_credentials": True}, h.recording,
+                                 h.bucket, key, body["model_s3_uri"])
+    status, result = resp["statusCode"], json.loads(resp["body"])
+    assert status == 200, result
+
+    sidecars = [k for k in keys(h, "converted-models/") if SIDECAR_RE.match(k)]
+    assert len(sidecars) == 1 and keys(h, "converted-models/") == sidecars
+    name, _hex8, ext = SIDECAR_RE.match(sidecars[0]).groups()
+    assert (name, ext) == ("disc_seg", "pth")
+    assert h.s3.get_object(Bucket=h.bucket, Key=sidecars[0])["Body"].read() == src
+    descriptor = {"arch": "rf_detr_seg", "kind": "rfdetr_checkpoint",
+                  "checkpoint_s3": f"s3://{h.bucket}/{sidecars[0]}",
+                  "class_names": ["disc", "block"], "num_classes": 2}
+    assert result["fine_tunable"] == descriptor
+
+    rec = records(h)[0]
+    assert dc.is_detector_conversion_record(rec)
+    assert rec["metadata"]["fine_tunable"] == descriptor
+    assert rec["model_type"] == rec["metadata"]["model_type"] == "instance_segmentation"
+    assert rec["detection"]["detection_arch"] == "rf_detr_seg"
+    assert rec["detection"]["rfdetr_seg_size"] == "nano" and rec["detection"]["top_k"] == 100
+    job = h.sagemaker.created[0]
+    env = job["Environment"]
+    assert (env["DETECTION_ARCH"], env["TASK"], env["MASK_THRESHOLD"], env["RFDETR_SIZE"]) == (
+        "rf_detr_seg", "segmentation", "0.5", "nano")
+    assert env["NETWORK_INPUT"] == "312" and env["EXPECTED_SHA256"] == hashlib.sha256(src).hexdigest()
+    assert job["InputDataConfig"][0]["DataSource"]["S3DataSource"]["S3Uri"] == \
+        f"s3://{h.bucket}/{sidecars[0].rsplit('/', 1)[0]}/"
+    assert h.audits[-1]["details"]["detection_arch"] == "rf_detr_seg"
 
 
 def test_new_code_never_deserializes_a_checkpoint():

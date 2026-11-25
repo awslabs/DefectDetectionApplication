@@ -18,12 +18,22 @@
 
 import { Box, Button, Checkbox, Header, Modal, SpaceBetween, TextContent } from "@cloudscape-design/components";
 import { useEffect, useState } from "react";
+import type { ExportManifestFormat } from "api/WorkflowAPI";
+
+/** The second download, offered when a selected result stores instance masks. */
+export const INSTANCE_MANIFEST_DOWNLOAD_LABEL = "Download with instance-segmentation manifest";
 
 interface DownloadModalProps {
   showModal: boolean;
   onClose: () => void;
-  onDownload: (markAsDownload: boolean) => void;
+  /**
+   * `manifestFormat` is given only by the instance-manifest download
+   * (rfdetr-seg-support Requirement 11.4); the existing download passes none.
+   */
+  onDownload: (markAsDownload: boolean, manifestFormat?: ExportManifestFormat) => void;
   isDownloading: boolean;
+  /** Whether a selected result carries an instance mask (`mask_rle`). */
+  instanceManifestAvailable?: boolean;
 }
 
 export default function DownloadModal({
@@ -31,6 +41,7 @@ export default function DownloadModal({
   onClose,
   onDownload,
   isDownloading,
+  instanceManifestAvailable = false,
 }: DownloadModalProps): JSX.Element {
   const [markAsDownloaded, setMarkAsDownloaded] = useState(true);
 
@@ -58,6 +69,18 @@ export default function DownloadModal({
             <Button variant="link" onClick={onClose}>
               Cancel
             </Button>
+            {instanceManifestAvailable && (
+              <Button
+                variant="normal"
+                loading={isDownloading}
+                data-testid="download-instance-manifest"
+                onClick={(): void => {
+                  onDownload(markAsDownloaded, "instance");
+                }}
+              >
+                {INSTANCE_MANIFEST_DOWNLOAD_LABEL}
+              </Button>
+            )}
             <Button
               variant="primary"
               loading={isDownloading}

@@ -39,6 +39,12 @@ export interface RunDetection {
   confidence: number;
   /** `[x_min, y_min, x_max, y_max]` in source-frame pixels, when complete. */
   box?: [number, number, number, number];
+  /**
+   * The instance mask's foreground pixel count (`mask_area`), when the run
+   * metadata carries it (rfdetr-seg-support Requirement 10.6). Absent for a
+   * detection without a mask, so today's entries are unchanged.
+   */
+  maskArea?: number;
 }
 
 /** How many detections the graph's model preview lists before "and N more". */
@@ -99,6 +105,12 @@ export function runDetections(
     }
     if (typeof record.id === "string" && record.id.length > 0) {
       detection.id = record.id;
+    }
+    // `mask_area` rides along only when present and a finite number
+    // (rfdetr-seg-support Requirement 10.6): an entry without it keeps
+    // today's four-key shape.
+    if (isFiniteNumber(record.mask_area)) {
+      detection.maskArea = record.mask_area;
     }
     detections.push(detection);
   }

@@ -203,6 +203,11 @@ shaped before they reach the client:
 
 - Path-like fields (local file paths) come back as file names only; the result
   names them in `scrubbed_fields`, and fields a tool drops in `dropped_fields`.
+  A dropped-field path segment may end in `[]` (every element of a list) or
+  `{}` (every value of an object, for the live result's `detections` map).
+  Instance-segmentation results (RF-DETR-Seg) return their boxes and
+  `mask_area` on every edge tool and always drop the per-instance `mask_rle`;
+  the composite mask arrives as the extracted image where a tool extracts one.
 - List tools take `limit` (50 by default, at most 200 per call) unless the
   table names a narrower bound.
 - A result is bounded at 200 000 bytes of JSON; a list is cut to the items
@@ -225,7 +230,7 @@ accepted only while `McpMutatingToolsEnabled` is true.
 | `edge_execution_node_image_get` | 1 | Read-only. | returns the image; no `api.access` record (correlate through `mcp.access`) |
 | `edge_execution_node_status_get` | 1 | Read-only. | - |
 | `edge_execution_output_image_get` | 1 | Read-only. | returns the image; no `api.access` record (correlate through `mcp.access`) |
-| `edge_execution_overlay_get` | 1 | Read-only. | returns `maskImage` as one image (`ImageContent`) |
+| `edge_execution_overlay_get` | 1 | Read-only. | returns `maskImage` as one image (`ImageContent`); drops `instances[].mask_rle` |
 | `edge_execution_overlay_image_get` | 1 | Read-only. | returns the image; no `api.access` record (correlate through `mcp.access`) |
 | `edge_execution_results_get` | 1 | Read-only. | - |
 | `edge_feature_configurations_list` | 1 | Read-only. | - |
@@ -244,8 +249,8 @@ accepted only while `McpMutatingToolsEnabled` is true.
 | `edge_registration_get` | 1 | Read-only. | drops `executions` |
 | `edge_registration_graph_get` | 1 | Read-only. | - |
 | `edge_registrations_list` | 1 | Read-only. | - |
-| `edge_result_get` | 1 | Read-only. | returns `maskImage` as one image (`ImageContent`) |
-| `edge_results_list` | 1 | Read-only. | drops `results[].maskImage`; `limit` 50 by default, at most 100 per call |
+| `edge_result_get` | 1 | Read-only. | returns `maskImage` as one image (`ImageContent`); drops `detections[].mask_rle` |
+| `edge_results_list` | 1 | Read-only. | drops `results[].maskImage`, `results[].detections[].mask_rle`; `limit` 50 by default, at most 100 per call |
 | `edge_results_summary_get` | 1 | Read-only. | - |
 | `edge_static_image_pin_get` | 1 | Read-only. | - |
 | `edge_static_video_pin_get` | 1 | Read-only. | - |
@@ -260,7 +265,7 @@ accepted only while `McpMutatingToolsEnabled` is true.
 | `edge_whoami` | 1 | Read-only. | - |
 | `edge_workflow_capture_task_get` | 1 | Read-only. | - |
 | `edge_workflow_get` | 1 | Read-only. | - |
-| `edge_workflow_images_list` | 1 | Read-only. | drops `images[].image`, `images[].inferenceResult.mask_image`; `limit` 2 by default, at most 2 per call |
+| `edge_workflow_images_list` | 1 | Read-only. | drops `images[].image`, `images[].inferenceResult.mask_image`, `images[].inferenceResult.detections{}.mask_rle`; `limit` 2 by default, at most 2 per call |
 | `edge_workflows_list` | 1 | Read-only. | - |
 | `edge_camera_connect` | 2 | MUTATING. | - |
 | `edge_cameras_rescan` | 2 | MUTATING. | - |
@@ -286,5 +291,5 @@ accepted only while `McpMutatingToolsEnabled` is true.
 | `edge_workflow_create` | 3 | MUTATING. | - |
 | `edge_workflow_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=workflow_id. | - |
 | `edge_workflow_retry` | 3 | MUTATING, DESTRUCTIVE — requires confirm=workflow_id. | - |
-| `edge_workflow_run` | 3 | MUTATING. | drops `inferenceResult.mask_image` |
+| `edge_workflow_run` | 3 | MUTATING. | drops `inferenceResult.mask_image`, `inferenceResult.detections{}.mask_rle` |
 | `edge_workflow_update` | 3 | MUTATING, DESTRUCTIVE — requires confirm=workflow_id. | - |

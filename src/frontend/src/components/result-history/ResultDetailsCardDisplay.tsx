@@ -16,10 +16,12 @@
  *
  */
 
-import { SpaceBetween, Spinner } from "@cloudscape-design/components";
+import { Container, Header, SpaceBetween, Spinner } from "@cloudscape-design/components";
 import { useQuery } from "@tanstack/react-query";
 import { getWorkflow } from "api/WorkflowAPI";
 import InteractableImage from "components/live-result/InteractableImage";
+import InstanceMaskLayer, { INSTANCE_MASKS_HEADER } from "components/deployed-workflow/results/InstanceMaskLayer";
+import { hasMask, normalizeDetectionEntries } from "components/deployed-workflow/instanceDetections";
 import {
   resultCardStyle,
   resultLayoutStyle,
@@ -93,6 +95,12 @@ export default function ResultDetailsCardDisplay({
     />
   );
 
+  // The stored instance masks (rfdetr-seg-support Requirement 10.6): drawn
+  // over the input image only when some stored entry still carries one, so
+  // a detection or anomaly result's page is unchanged.
+  const instances = normalizeDetectionEntries(inferenceResult.detections ?? null);
+  const showInstanceLayer = isInferenceResultPageType && instances.some(hasMask);
+
   return (
     <SpaceBetween size="l">
       {
@@ -124,6 +132,14 @@ export default function ResultDetailsCardDisplay({
         }
 
       </div>
+      {showInstanceLayer && (
+        <Container
+          header={<Header variant="h2">{INSTANCE_MASKS_HEADER}</Header>}
+          data-testid="instance-masks-container"
+        >
+          <InstanceMaskLayer imageSrc={imageSrc} instances={instances} />
+        </Container>
+      )}
     </SpaceBetween>
   );
 }

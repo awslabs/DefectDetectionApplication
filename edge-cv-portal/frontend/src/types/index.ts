@@ -270,13 +270,13 @@ export interface TrainingJob {
   packaged_components?: PackagedComponent[];
   greengrass_components?: GreengrassComponent[];
   published_components?: PublishedComponent[];
-  /** 'classification' | 'segmentation' | '*-robust' | 'object_detection' | 'vllm' ... */
+  /** 'classification' | 'segmentation' | '*-robust' | 'object_detection' | 'instance_segmentation' | 'vllm' ... */
   model_type?: string;
   /** Absent for SageMaker-trained records (defaults to 'trained'); 'imported' | 'vllm' otherwise. */
   source?: 'trained' | 'imported' | 'vllm' | string;
-  /** 'onnx' for portal-trained Object Detection jobs (no Neo compilation). */
+  /** 'onnx' for portal-trained Object Detection / Instance Segmentation jobs (no Neo compilation). */
   runtime?: string;
-  /** Detection_Record_Fields written by training.py for object_detection jobs. */
+  /** Detection_Record_Fields written by training.py for object_detection / instance_segmentation jobs. */
   detection?: {
     detection_arch?: string;
     network_input_width?: number;
@@ -286,6 +286,10 @@ export interface TrainingJob {
     score_threshold?: number;
     iou_threshold?: number;
     preserve_aspect?: boolean;
+    // RF-DETR-Seg (rfdetr-seg-support Req 5.5)
+    rfdetr_seg_size?: string;
+    mask_threshold?: number;
+    output_mode?: 'instance' | 'semantic' | string;
     [key: string]: unknown;
   };
   /**
@@ -301,7 +305,7 @@ export interface TrainingJob {
     model_file?: string;
     model_type?: string;
     fine_tunable?: {
-      arch: 'yolo' | 'rf_detr' | string;
+      arch: 'yolo' | 'rf_detr' | 'rf_detr_seg' | string;
       kind?: string;
       checkpoint_s3?: string;
       class_names?: string[] | null;
@@ -317,7 +321,7 @@ export interface LabelingJob {
   name: string;
   manifest_s3: string;
   output_s3: string;
-  task_type: 'ObjectDetection' | 'Classification' | 'Segmentation';
+  task_type: 'ObjectDetection' | 'Classification' | 'Segmentation' | 'InstanceSegmentation';
   images_count: number;
   labeled_count: number;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';

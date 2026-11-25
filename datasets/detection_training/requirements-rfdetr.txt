@@ -4,6 +4,12 @@
 #   onnx  -> onnx, onnxsim, onnx_graphsurgeon, onnxruntime, polygraphy (.export())
 # There is no `onnxexport` extra in this version.
 rfdetr[train,onnx]==1.10.1
+# rfdetr 1.10.1 leaves transformers unpinned (transformers<6.0.0,>=5.1.0) and
+# imports BackboneConfigMixin from its top level, which later 5.x releases no
+# longer export: on the trainer DLC pip resolved 5.24.0 and `import rfdetr`
+# failed. 5.17.0 is the version the detector-export-image lock pins, so the
+# trainer and the exporter resolve the same transformers.
+transformers==5.17.0
 onnx==1.22.0
 onnxruntime==1.19.2
 numpy<2

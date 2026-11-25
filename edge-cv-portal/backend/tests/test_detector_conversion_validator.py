@@ -391,6 +391,129 @@ def test_rfdetr_output_contract_is_enforced(tmp_path, outputs):
     assert rejected(tmp_path, artifact(tmp_path, onnx, RFDETR_RECORD), RFDETR_RECORD).rule == "output"
 
 
+# ---------------------------------------------------------------------------
+# RF-DETR-Seg (rfdetr-seg-support task 7.6; Req 7.6, C30): three outputs,
+# identified by shape, the three-class graph settled by its output names.
+# ---------------------------------------------------------------------------
+
+SEG_RECORD = {"detection": {"detection_arch": "rf_detr_seg", "network_input_width": 384,
+                            "network_input_height": 384, "num_classes": 1}}
+SEG_OUTPUTS = [("dets", [1, 100, 4], FLOAT), ("labels", [1, 100, 2], FLOAT),
+               ("masks", [1, 100, 96, 96], FLOAT)]
+
+
+def seg_onnx(outputs=SEG_OUTPUTS, size=384):
+    return model_bytes(inputs=[("input", [1, 3, size, size], FLOAT)], outputs=outputs)
+
+
+def seg_metadata(onnx, outputs=SEG_OUTPUTS, record=SEG_RECORD, **overrides):
+    """What the job's build_conversion_metadata writes for a Seg conversion
+    (the detection keys plus the Seg data-contract keys), shapes in graph order."""
+    meta = metadata_for(onnx, record)
+    meta.update(top_k=outputs[0][1][1], onnx_output_shapes=[list(s) for _n, s, _t in outputs],
+                onnx_output_names=[n for n, _s, _t in outputs], model_type="instance_segmentation",
+                rfdetr_seg_size="small", mask_downsample_ratio=4, mask_threshold=0.5)
+    meta.update(overrides)
+    return meta
+
+
+def test_accepts_the_seg_contract_in_any_output_order(tmp_path):
+    onnx = seg_onnx()
+    out = validate(tmp_path, artifact(tmp_path, onnx, SEG_RECORD, meta=seg_metadata(onnx)), SEG_RECORD)
+    assert out.summary["outputs"] == [[1, 100, 4], [1, 100, 2], [1, 100, 96, 96]]
+    assert out.summary["top_k"] == 100 and out.summary["output_names"] == ["dets", "labels", "masks"]
+    assert out.summary["input"] == [1, 3, 384, 384]
+    for order in ((2, 1, 0), (1, 2, 0), (2, 0, 1)):
+        outputs = [SEG_OUTPUTS[i] for i in order]
+        onnx = seg_onnx(outputs=outputs)
+        meta = seg_metadata(onnx, outputs=outputs)
+        out = validate(tmp_path, artifact(tmp_path, onnx, SEG_RECORD, meta=meta), SEG_RECORD)
+        assert out.summary["top_k"] == 100
+        assert out.summary["outputs"] == [list(s) for _n, s, _t in outputs]
+
+
+THREE_CLASS_SEG_RECORD = {"detection": {"detection_arch": "rf_detr_seg", "network_input_width": 384,
+                                        "network_input_height": 384, "num_classes": 3}}
+THREE_CLASS_SHAPES = {"dets": [1, 100, 4], "labels": [1, 100, 4], "masks": [1, 100, 96, 96]}
+
+
+@pytest.mark.parametrize("names", [("dets", "labels", "masks"), ("labels", "dets", "masks"),
+                                   ("masks", "labels", "dets"), ("dets", "masks", "labels")])
+def test_three_class_seg_graph_is_settled_by_its_output_names(tmp_path, names):
+    # num_classes + 1 == 4: both rank-3 outputs are [1, Q, 4]; the dets /
+    # labels names decide, in either order (tasks review pass 10, finding 1).
+    outputs = [(n, THREE_CLASS_SHAPES[n], FLOAT) for n in names]
+    onnx = seg_onnx(outputs=outputs)
+    meta = seg_metadata(onnx, outputs=outputs, record=THREE_CLASS_SEG_RECORD)
+    out = validate(tmp_path, artifact(tmp_path, onnx, THREE_CLASS_SEG_RECORD, meta=meta),
+                   THREE_CLASS_SEG_RECORD)
+    assert out.summary["top_k"] == 100 and out.summary["output_names"] == list(names)
+
+
+def test_three_class_seg_graph_without_names_is_settled_by_output_order(tmp_path):
+    outputs = [("o0", [1, 100, 4], FLOAT), ("o1", [1, 100, 4], FLOAT), ("o2", [1, 100, 96, 96], FLOAT)]
+    onnx = seg_onnx(outputs=outputs)
+    meta = seg_metadata(onnx, outputs=outputs, record=THREE_CLASS_SEG_RECORD)
+    out = validate(tmp_path, artifact(tmp_path, onnx, THREE_CLASS_SEG_RECORD, meta=meta),
+                   THREE_CLASS_SEG_RECORD)
+    assert out.summary["top_k"] == 100 and out.summary["outputs"][0] == [1, 100, 4]
+    # Only one name present: it settles the pair on its own.
+    structure = {"ir_version": 8, "opsets": {"ai.onnx": 17}, "domains": ["ai.onnx"], "functions": 0,
+                 "external_data": [],
+                 "inputs": [{"name": "input", "shape": [1, 3, 384, 384], "dtype": "FLOAT"}],
+                 "outputs": [{"name": "x", "shape": [1, 100, 4], "dtype": "FLOAT"},
+                             {"name": "labels", "shape": [1, 100, 4], "dtype": "FLOAT"},
+                             {"name": "y", "shape": [1, 100, 96, 96], "dtype": "FLOAT"}]}
+    assert dc.check_onnx_against_record(structure, "rf_detr_seg", 384, 3)["top_k"] == 100
+    structure["outputs"][0]["name"], structure["outputs"][1]["name"] = "dets", "x"
+    assert dc.check_onnx_against_record(structure, "rf_detr_seg", 384, 3)["top_k"] == 100
+
+
+def test_three_class_rfdetr_graph_passes_as_today(tmp_path):
+    record = {"detection": {"detection_arch": "rf_detr", "network_input_width": 512,
+                            "network_input_height": 512, "num_classes": 3}}
+    outputs = [("dets", [1, 300, 4], FLOAT), ("labels", [1, 300, 4], FLOAT)]
+    onnx = model_bytes(inputs=[("input", [1, 3, 512, 512], FLOAT)], outputs=outputs)
+    meta = metadata_for(onnx, record, onnx_output_shapes=[[1, 300, 4], [1, 300, 4]])
+    out = validate(tmp_path, artifact(tmp_path, onnx, record, meta=meta), record)
+    assert out.summary["top_k"] == 300 and out.summary["outputs"] == [[1, 300, 4], [1, 300, 4]]
+
+
+@pytest.mark.parametrize("outputs,fragment", [
+    (SEG_OUTPUTS[:2], "expected exactly 3 outputs [1, Q, 4] + [1, Q, 2] + [1, Q, 96, 96]"),
+    ([SEG_OUTPUTS[0], ("labels", [1, 100, 1], FLOAT), SEG_OUTPUTS[2]], "num_classes 1 + 1 background slot"),
+    ([SEG_OUTPUTS[0], SEG_OUTPUTS[1], ("masks", [1, 100, 48, 48], FLOAT)], "mask grid network input 384 // 4"),
+    ([SEG_OUTPUTS[0], SEG_OUTPUTS[1], ("masks", [1, 50, 96, 96], FLOAT)], "are not [1, Q, 4]"),
+    ([SEG_OUTPUTS[0], ("labels", [1, 200, 2], FLOAT), SEG_OUTPUTS[2]], "are not [1, Q, 4]"),
+    ([SEG_OUTPUTS[0], SEG_OUTPUTS[1], ("masks", [1, 100, 9216], FLOAT)], "two rank-3 outputs and one rank-4"),
+    ([SEG_OUTPUTS[0], ("labels", [1, 100, 2, 1], FLOAT), SEG_OUTPUTS[2]], "two rank-3 outputs and one rank-4"),
+    ([SEG_OUTPUTS[0], SEG_OUTPUTS[1], ("masks", [1, 100, 96, 96], FLOAT16)], "static FLOAT batch-1"),
+    ([SEG_OUTPUTS[0], SEG_OUTPUTS[1], ("masks", [1, 100, "H", "W"], FLOAT)], "static FLOAT batch-1"),
+    ([SEG_OUTPUTS[0], SEG_OUTPUTS[1], ("masks", [2, 100, 96, 96], FLOAT)], "static FLOAT batch-1"),
+    ([("dets", [1, 100, 6], FLOAT), SEG_OUTPUTS[1], SEG_OUTPUTS[2]], "are not [1, Q, 4]"),
+])
+def test_seg_output_contract_is_enforced(tmp_path, outputs, fragment):
+    onnx = seg_onnx(outputs=outputs)
+    meta = seg_metadata(onnx, outputs=outputs)
+    err = rejected(tmp_path, artifact(tmp_path, onnx, SEG_RECORD, meta=meta), SEG_RECORD)
+    assert err.rule == "output" and fragment in str(err), str(err)
+
+
+def test_seg_metadata_must_agree_with_the_record_and_the_three_shapes(tmp_path):
+    onnx = seg_onnx()
+    for overrides, fragment in (({"resolution": 312}, "resolution 312"),
+                                ({"top_k": 300}, "top_k 300"),
+                                ({"onnx_output_shapes": [[1, 100, 4], [1, 100, 2]]}, "onnx_output_shapes"),
+                                ({"detection_arch": "rf_detr"}, "detection_arch"),
+                                ({"num_classes": 2}, "num_classes 2")):
+        meta = seg_metadata(onnx, **overrides)
+        err = rejected(tmp_path, artifact(tmp_path, onnx, SEG_RECORD, meta=meta), SEG_RECORD)
+        assert err.rule == "metadata" and fragment in str(err), overrides
+    # the shape comparison is order-free: the metadata may list the shapes in any order
+    meta = seg_metadata(onnx, onnx_output_shapes=[[1, 100, 96, 96], [1, 100, 2], [1, 100, 4]])
+    assert validate(tmp_path, artifact(tmp_path, onnx, SEG_RECORD, meta=meta), SEG_RECORD).summary["top_k"] == 100
+
+
 @pytest.mark.parametrize("blob,fragment", [
     (b"", "empty"), (b"\x08", "not a readable ONNX ModelProto"), (b"\xff" * 64, "not a readable"),
     (_pb_vi(1, 8), "no IR version / graph"),

@@ -45,6 +45,8 @@ import logging
 import os
 from typing import Optional, Tuple
 
+from workflow_engine import detections as detections_module
+
 logger = logging.getLogger(__name__)
 
 #: Artifact filename suffixes, appended to the run's ``capture_id`` under
@@ -234,23 +236,71 @@ def node_image_path(
 def read_mask_overlay(
     output_dir: Optional[str], capture_id: Optional[str]
 ) -> dict:
-    """``{'maskImage': <base64|None>, 'maskBackground': <dict|None>}`` for
-    the run.
+    """``{'maskImage': <base64|None>, 'maskBackground': <dict|None>,
+    'instances': <list|None>, 'detectionsTruncated': <bool|None>}`` for the
+    run.
 
     Prefers the ``.jsonl``-derived mask + chroma-key background; falls back
     to the raw ``.mask.png`` bytes (base64, no background — the frontend
     treats an absent background as no chroma-key). Returns a null mask
-    (never raises) when no mask artifact is present (R5.7)."""
-    empty = {"maskImage": None, "maskBackground": None}
+    (never raises) when no mask artifact is present (R5.7).
+
+    ``instances`` (rfdetr-seg-support Requirement 10.5c, DD14) is the run's
+    Detection_List in list form exactly as the marshal wrote it -- every
+    entry verbatim, ``mask_rle`` included -- read through
+    ``detections.read_detections`` (capture record, else the marshal
+    sidecar); ``None`` when the run carries no detections block (an anomaly
+    or classification model). ``detectionsTruncated`` mirrors the marshal's
+    ``detections_truncated`` marker, written exactly when an entry lost its
+    ``mask_rle`` at the byte ceiling (that entry then carries
+    ``mask_truncated``); ``None`` whenever ``instances`` is ``None``. The
+    Composite_Mask itself reaches the preview through ``maskImage``."""
+    empty = {
+        "maskImage": None,
+        "maskBackground": None,
+        "instances": None,
+        "detectionsTruncated": None,
+    }
     if not output_dir or not capture_id:
         return empty
 
     mask_b64, background = _mask_from_jsonl(output_dir, capture_id)
     if mask_b64 is None:
         mask_b64 = _mask_from_png(output_dir, capture_id)
+    instances = _instances_from_sidecar_or_record(output_dir, capture_id)
+    truncated = None
+    if instances is not None:
+        truncated = any(
+            isinstance(entry, dict) and bool(entry.get("mask_truncated"))
+            for entry in instances
+        )
     if mask_b64 is None:
-        return empty
-    return {"maskImage": mask_b64, "maskBackground": background}
+        return dict(empty, instances=instances, detectionsTruncated=truncated)
+    return {
+        "maskImage": mask_b64,
+        "maskBackground": background,
+        "instances": instances,
+        "detectionsTruncated": truncated,
+    }
+
+
+def _instances_from_sidecar_or_record(
+    output_dir: str, capture_id: str
+) -> Optional[list]:
+    """The raw Detection_List entries (list form, ``mask_rle`` kept) from
+    the run's capture record or marshal sidecar through
+    ``detections.read_detections``, or ``None``. Best-effort and contained:
+    any failure yields ``None``, never an error."""
+    try:
+        return detections_module.read_detections(output_dir, capture_id)
+    except Exception:  # noqa: BLE001 - best-effort, never fail the request
+        logger.debug(
+            "Could not read detections for capture %s under %s",
+            capture_id,
+            output_dir,
+            exc_info=True,
+        )
+        return None
 
 
 def _mask_from_jsonl(
@@ -313,7 +363,9 @@ def _mask_background_from_outputs(outputs: list) -> Optional[dict]:
     Mirrors ``inference_results_utils``: the segmentation label block is a
     base64 ``json_with_base64_encoding`` payload whose ``anomalies['0']``
     entry carries the background color as a ``hex-color`` converted to
-    ``rgb-color``."""
+    ``rgb-color``. An instance-segmentation detections block carries the
+    same entry as ``mask_color_map['0']`` (rfdetr-seg-support Requirement
+    10.5c), tried when the block has no ``anomalies``."""
     base64_label = None
     for entry in outputs:
         if isinstance(entry, dict) and (
@@ -325,8 +377,16 @@ def _mask_background_from_outputs(outputs: list) -> Optional[dict]:
         return None
     try:
         label = json.loads(base64.b64decode(base64_label))
-        background = label["anomalies"]["0"]
     except Exception:  # noqa: BLE001 - malformed label -> no background
+        return None
+    background = None
+    for block_key in ("anomalies", "mask_color_map"):
+        try:
+            background = label[block_key]["0"]
+            break
+        except Exception:  # noqa: BLE001 - key absent / malformed -> next source
+            continue
+    if background is None:
         return None
     return _convert_hex_color_to_rgb(background)
 

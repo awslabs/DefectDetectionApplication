@@ -4,7 +4,8 @@
  *
  * An import is fine-tunable when Smart Import kept its training checkpoint
  * (`metadata.fine_tunable` set: ultralytics `.pt` -> YOLO, RF-DETR `.pth`
- * -> RF-DETR). Everything else (`metadata.fine_tunable` null or absent) is
+ * -> RF-DETR, RF-DETR-Seg `.pth` -> RF-DETR-Seg). Everything else
+ * (`metadata.fine_tunable` null or absent) is
  * explained per kind, using the texts fixed in
  * `docs/transfer-learning-spike.md` §4.5; the kind is derived from the
  * record's validator metadata (`framework` / `pt_file` / `model_file`) and
@@ -27,6 +28,7 @@ export type NotFineTunableKind = 'onnx' | 'torchscript' | 'state_dict';
 export const FINE_TUNABLE_ARCH_LABELS: Record<string, string> = {
   yolo: 'YOLO',
   rf_detr: 'RF-DETR',
+  rf_detr_seg: 'RF-DETR-Seg',
 };
 
 /** Spike §4.5 texts, verbatim (Req 7.2). */

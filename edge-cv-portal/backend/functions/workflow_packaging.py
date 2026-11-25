@@ -248,6 +248,27 @@ MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map()
 STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
     'WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS')
 
+#: The RF-DETR-Seg FEATURE floor (rfdetr-seg-support Requirement 14.8,
+#: design DD8): the minimum LocalServer version per architecture that
+#: carries the Seg device contract (the ``rf_detr_instance_segmentation``
+#: stage type, ``mask_rle`` in the Detection_List, the ``detections``
+#: column and the mask-forwarding marshal). An older LocalServer fails a
+#: Seg workflow at model load in instance mode and runs the pre-Seg
+#: decoder in semantic mode, so a workflow referencing a Seg model must
+#: never resolve a floor below this one.
+#:
+#: Third floor beside the lineage and stream floors, same ``{arch:
+#: version}`` shape and env-map discipline, set in compute-stack.ts on the
+#: same two Lambdas as the stream floor once the six Seg-capable
+#: LocalServer builds exist. Until then it is the empty map, which FAILS
+#: CLOSED: a workflow referencing a Seg model is rejected with
+#: RFDETR_SEG_UNSUPPORTED_ARCH for every architecture rather than packaged
+#: against a LocalServer that cannot run it. Its key set, once configured,
+#: must cover exactly ARCH_TO_LOCAL_SERVER_COMPONENT minus the recorded
+#: unverified set (pinned by test_rfdetr_seg_feature_floor_coverage.py).
+RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
+    'WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS')
+
 
 def _version_sort_key(version) -> tuple:
     """Comparison key for a plain ``N.N.N`` floor — the same digit-wise
@@ -263,7 +284,8 @@ def _max_version(*versions):
     return max(versions, key=_version_sort_key)
 
 
-def min_local_server_version_for(arch, stream_features: bool = False):
+def min_local_server_version_for(arch, stream_features: bool = False,
+                                 rfdetr_seg: bool = False):
     """The minimum LocalServer version for a Workflow_Component targeting
     ``arch``: the per-arch entry when mapped; for a KNOWN arch missing
     from a configured (non-empty) map, the safe per-lineage floor
@@ -284,7 +306,19 @@ def min_local_server_version_for(arch, stream_features: bool = False):
     this is the fail-closed backstop for any caller that skipped it — never
     a silently un-raised floor. ``stream_features=False`` (the default)
     resolves exactly as before, so every workflow without the new node
-    types keeps its floors unchanged (Requirement 18.1)."""
+    types keeps its floors unchanged (Requirement 18.1).
+
+    ``rfdetr_seg=True`` (the workflow references a model whose record has
+    ``detection.detection_arch == 'rf_detr_seg'``, rfdetr-seg-support
+    Requirement 14.8, design DD8) raises the result further to the Seg
+    feature floor RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS[arch] — the three
+    floors combine as ``max(lineage, stream, seg)``. An architecture absent
+    from the Seg map raises PackagingError('rfdetr-seg-feature-floor/<arch>')
+    exactly as the stream backstop does: the handler's
+    ``rfdetr_seg_arch_gate_findings`` gate rejects such a request with
+    RFDETR_SEG_UNSUPPORTED_ARCH first. ``rfdetr_seg=False`` (the default)
+    changes nothing, so a workflow without a Seg model resolves
+    byte-identically (Requirement 17.1)."""
     if arch and arch in MIN_LOCAL_SERVER_VERSIONS:
         resolved = MIN_LOCAL_SERVER_VERSIONS[arch]
     # ARCH_TO_LOCAL_SERVER_COMPONENT is defined below; module-level name
@@ -301,24 +335,37 @@ def min_local_server_version_for(arch, stream_features: bool = False):
         resolved = SAFE_LINEAGE_FLOOR
     else:
         resolved = MIN_LOCAL_SERVER_VERSION
-    if not stream_features:
-        return resolved
-    feature_floor = STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS.get(arch)
-    if feature_floor is None:
-        # PackagingError is defined below; module-level name resolution at
-        # call time makes this forward reference valid.
-        raise PackagingError(
-            f"stream-feature-floor/{arch}",
-            f"This workflow uses stream camera or scene analytics nodes, "
-            f"which require a LocalServer build that supports them, but "
-            f"architecture '{arch}' has no entry in "
-            f"WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS "
-            f"({GATE_STREAM_ARCH_UNSUPPORTED}). Supported architectures: "
-            f"{', '.join(sorted(STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS)) or 'none'}")
-    return _max_version(resolved, feature_floor)
+    if stream_features:
+        feature_floor = STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS.get(arch)
+        if feature_floor is None:
+            # PackagingError is defined below; module-level name resolution
+            # at call time makes this forward reference valid.
+            raise PackagingError(
+                f"stream-feature-floor/{arch}",
+                f"This workflow uses stream camera or scene analytics nodes, "
+                f"which require a LocalServer build that supports them, but "
+                f"architecture '{arch}' has no entry in "
+                f"WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS "
+                f"({GATE_STREAM_ARCH_UNSUPPORTED}). Supported architectures: "
+                f"{', '.join(sorted(STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS)) or 'none'}")
+        resolved = _max_version(resolved, feature_floor)
+    if rfdetr_seg:
+        seg_floor = RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS.get(arch)
+        if seg_floor is None:
+            raise PackagingError(
+                f"rfdetr-seg-feature-floor/{arch}",
+                f"This workflow uses an RF-DETR-Seg model, which requires a "
+                f"LocalServer build that supports it, but architecture "
+                f"'{arch}' has no entry in "
+                f"WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS "
+                f"({GATE_RFDETR_SEG_ARCH_UNSUPPORTED}). Supported architectures: "
+                f"{', '.join(sorted(RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS)) or 'none'}")
+        resolved = _max_version(resolved, seg_floor)
+    return resolved
 
 
-def min_local_server_versions_map(stream_features: bool = False) -> Dict[str, str]:
+def min_local_server_versions_map(stream_features: bool = False,
+                                  rfdetr_seg: bool = False) -> Dict[str, str]:
     """The full per-arch floor map stamped into manifest.json as
     ``minLocalServerVersions`` — the map a variant-aware device reads IN
     PREFERENCE to the scalar (``discovery.validate_artifact`` selects the
@@ -335,13 +382,26 @@ def min_local_server_versions_map(stream_features: bool = False) -> Dict[str, st
     scalar for the package's own ``targetArch``: leaving the map unraised
     would let an older LocalServer accept a stream workflow through the
     map branch, which is exactly the bypass the feature floor exists to
-    prevent (Requirement 9.7, design D14)."""
+    prevent (Requirement 9.7, design D14).
+
+    ``rfdetr_seg=True`` (rfdetr-seg-support Requirement 14.8, design DD8)
+    raises every Seg-floor architecture's entry the same way, to
+    ``max(lineage, stream, seg)`` — the device reads THIS map in preference
+    to the scalar, so an unraised map would re-open the gap the Seg floor
+    closes. Architectures outside the Seg map keep their value (the
+    handler's gate has already rejected the request if the package's own
+    arch is one of them). ``rfdetr_seg=False`` (the default) changes
+    nothing (Requirement 17.1)."""
     effective = dict(MIN_LOCAL_SERVER_VERSIONS)
-    if not stream_features:
-        return effective
-    for arch in STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS:
-        effective[arch] = min_local_server_version_for(
-            arch, stream_features=True)
+    if stream_features:
+        for arch in STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS:
+            effective[arch] = min_local_server_version_for(
+                arch, stream_features=True)
+    if rfdetr_seg:
+        for arch in RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS:
+            raised = min_local_server_version_for(arch, rfdetr_seg=True)
+            effective[arch] = (_max_version(effective[arch], raised)
+                               if arch in effective else raised)
     return effective
 
 # Greengrass component naming (design section 6)
@@ -912,6 +972,14 @@ STREAM_FEATURE_TYPE_IDS = frozenset(STREAM_SOURCE_PROTOCOLS) | SCENE_ANALYTICS_T
 #: Packaging gate code for a workflow that uses the new node types on an
 #: architecture the feature floor map does not cover (Requirement 9.7).
 GATE_STREAM_ARCH_UNSUPPORTED = 'STREAM_CAMERAS_UNSUPPORTED_ARCH'
+#: Packaging gate code for a workflow that references an RF-DETR-Seg model
+#: on an architecture the Seg feature floor map does not cover
+#: (rfdetr-seg-support Requirement 14.8, design DD8).
+GATE_RFDETR_SEG_ARCH_UNSUPPORTED = 'RFDETR_SEG_UNSUPPORTED_ARCH'
+#: The detection arch a model record carries under ``detection`` when it is
+#: an RF-DETR-Seg model (trained, converted or imported through the Seg
+#: paths of rfdetr-seg-support); the Seg floor's discriminator.
+RFDETR_SEG_DETECTION_ARCH = 'rf_detr_seg'
 
 
 def effective_node_type(node) -> str:
@@ -975,6 +1043,60 @@ def stream_feature_arch_gate_findings(graph, requested_archs) -> List[Dict]:
                         f"LocalServer version: {', '.join(supported) or 'none'}"),
             'arch': arch,
             'nodeIds': list(node_ids),
+        })
+    return findings
+
+
+def rfdetr_seg_model_names(records: Dict[str, Any]) -> List[str]:
+    """The names of the referenced models whose Model_Registry record is an
+    RF-DETR-Seg record — ``detection.detection_arch == 'rf_detr_seg'`` —
+    in the order ``load_model_records`` returned them (rfdetr-seg-support
+    Requirement 14.8 (b), design DD8). Empty for every workflow without a
+    Seg model, which is what keeps their floors, their version item's
+    discriminator and their packaged output unchanged (Requirement 17.1);
+    a record without a ``detection`` block (YOLO, LFV, vLLM, anomaly) is
+    never a Seg record."""
+    names: List[str] = []
+    for name, record in (records or {}).items():
+        detection = record.get('detection') if isinstance(record, dict) else None
+        if isinstance(detection, dict) and \
+                detection.get('detection_arch') == RFDETR_SEG_DETECTION_ARCH:
+            names.append(name)
+    return names
+
+
+def rfdetr_seg_arch_gate_findings(seg_models: List[str],
+                                  requested_archs) -> List[Dict]:
+    """The Seg feature-floor architecture gate (rfdetr-seg-support
+    Requirement 14.8 (b), design DD8): one finding ``{code:
+    'RFDETR_SEG_UNSUPPORTED_ARCH', arch, models}`` per requested
+    architecture missing from RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS, when
+    the workflow references at least one Seg model (``seg_models``, from
+    ``rfdetr_seg_model_names``). Empty for a workflow without a Seg model
+    (whatever the floor map holds), and empty when every requested
+    architecture is covered. Structural twin of
+    ``stream_feature_arch_gate_findings``, evaluated by the handler once the
+    model records are loaded and before any version item is written, so the
+    request is rejected with the complete finding list and no component
+    version is registered. Until the floor map is configured this rejects
+    every architecture — the deliberate fail-closed state, because no
+    LocalServer build carries the Seg device contract yet."""
+    if not seg_models:
+        return []
+    supported = sorted(RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS)
+    findings: List[Dict] = []
+    for arch in requested_archs:
+        if arch in RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS:
+            continue
+        findings.append({
+            'code': GATE_RFDETR_SEG_ARCH_UNSUPPORTED,
+            'message': (f"Architecture '{arch}' has no LocalServer version "
+                        f"known to support RF-DETR-Seg models, so model(s) "
+                        f"{', '.join(seg_models)} cannot be packaged for it. "
+                        f"Architectures with a supporting LocalServer "
+                        f"version: {', '.join(supported) or 'none'}"),
+            'arch': arch,
+            'models': list(seg_models),
         })
     return findings
 
@@ -1751,8 +1873,45 @@ def _resolve_vllm_components(record: Dict, archs, label: str) -> set:
     return resolved_names
 
 
+def load_model_records(model_names: List[str], usecase_id: str
+                       ) -> Dict[str, Dict]:
+    """The Model_Registry records of the referenced model names, keyed by
+    name in reference order — the first step of ``resolve_model_components``
+    split out so the handler can read the registry ONCE, run the
+    RF-DETR-Seg feature-floor gate on the records (``rfdetr_seg_model_names``
+    / ``rfdetr_seg_arch_gate_findings``, rfdetr-seg-support Requirement
+    14.8, design DD8) and then resolve the components from the same records.
+
+    Same snapshot (``build_model_registry_snapshot``) and the same
+    fail-closed PackagingError for a model with no registry record. Empty
+    for no references, and — with the same warning as before — when
+    TRAINING_JOBS_TABLE is not configured (pre-feature environment; model
+    dependencies are skipped)."""
+    if not model_names:
+        return {}
+    if not TRAINING_JOBS_TABLE:
+        logger.warning(
+            'TRAINING_JOBS_TABLE not configured; model component '
+            'dependencies are skipped for this packaging run')
+        return {}
+    snapshot = build_model_registry_snapshot(usecase_id, TRAINING_JOBS_TABLE,
+                                             MODELS_TABLE, dynamodb)
+    records: Dict[str, Dict] = {}
+    for name in model_names:
+        record = snapshot.get(name)
+        if not isinstance(record, dict):
+            raise PackagingError(
+                f"models/{name}",
+                f"Model '{name}' referenced by the workflow has no record "
+                f"in the Use_Case model registry; it may have been removed "
+                f"since the workflow was validated")
+        records[name] = record
+    return records
+
+
 def resolve_model_components(model_names: List[str], usecase_id: str,
-                             archs) -> Dict[str, Any]:
+                             archs, records: Optional[Dict[str, Dict]] = None
+                             ) -> Dict[str, Any]:
     """Resolve each referenced model name to its published Greengrass model
     component(s) through the Use_Case's Model_Registry — the same snapshot
     workflow_validation.py resolves ``model_ref`` parameters against
@@ -1803,26 +1962,19 @@ def resolve_model_components(model_names: List[str], usecase_id: str,
     configured the registry does not exist (pre-feature environment;
     validation skips model-reference resolution the same way) and model
     dependencies are skipped.
+
+    ``records`` (rfdetr-seg-support Requirement 14.8, design DD8): the
+    ``load_model_records`` result when the caller has already read the
+    registry — the handler does, to run the RF-DETR-Seg feature-floor gate
+    on the records first — so the snapshot is built once per packaging run.
+    ``None`` (the default, every existing caller) loads the records here,
+    exactly as before.
     """
-    if not model_names:
-        return {}
-    if not TRAINING_JOBS_TABLE:
-        logger.warning(
-            'TRAINING_JOBS_TABLE not configured; model component '
-            'dependencies are skipped for this packaging run')
-        return {}
-    snapshot = build_model_registry_snapshot(usecase_id, TRAINING_JOBS_TABLE,
-                                             MODELS_TABLE, dynamodb)
+    if records is None:
+        records = load_model_records(model_names, usecase_id)
     resolved: Dict[str, Any] = {}
-    for name in model_names:
+    for name, record in records.items():
         label = f"models/{name}"
-        record = snapshot.get(name)
-        if not isinstance(record, dict):
-            raise PackagingError(
-                label,
-                f"Model '{name}' referenced by the workflow has no record "
-                f"in the Use_Case model registry; it may have been removed "
-                f"since the workflow was validated")
         # vLLM shape: singular published_component map. The verbatim
         # short-circuit is GONE (vllm-model-reload-after-backend-restart
         # 2.6, Decision 5): a record carrying vLLM evidence — a non-empty
@@ -2052,7 +2204,8 @@ def _model_arch_contradiction_guard(greengrass, resolved: Dict[str, Any],
                 f"for the selected architecture(s)")
 
 
-def local_server_component_dependencies(archs, stream_features: bool = False) -> Dict:
+def local_server_component_dependencies(archs, stream_features: bool = False,
+                                        rfdetr_seg: bool = False) -> Dict:
     """The HARD LocalServer ComponentDependencies entry for the selected
     architectures — emitted ONLY when they collapse to exactly one distinct
     LocalServer variant (edge-deploy-reliability Defect F, 2.15/2.16/2.17).
@@ -2076,6 +2229,12 @@ def local_server_component_dependencies(archs, stream_features: bool = False) ->
     LocalServer that cannot run those nodes (rtsp-rtmp-stream-cameras
     Requirement 9.7). The default False leaves every other workflow's
     dependency entry unchanged (Requirement 18.1).
+
+    ``rfdetr_seg=True`` (the workflow references an RF-DETR-Seg model,
+    rfdetr-seg-support Requirement 14.8, design DD8) raises each arch's
+    floor to ``max(lineage, stream, seg)`` the same way, through
+    ``min_local_server_version_for``; the default False leaves every
+    workflow without a Seg model unchanged (Requirement 17.1).
 
     Multiple distinct variants: return {} and log a warning naming the
     omitted variants. Greengrass ComponentDependencies is recipe-GLOBAL,
@@ -2106,7 +2265,8 @@ def local_server_component_dependencies(archs, stream_features: bool = False) ->
                 f"architectures: "
                 f"{', '.join(sorted(ARCH_TO_LOCAL_SERVER_COMPONENT))}")
         variant_floors.setdefault(component_name, []).append(
-            min_local_server_version_for(arch, stream_features=stream_features))
+            min_local_server_version_for(arch, stream_features=stream_features,
+                                         rfdetr_seg=rfdetr_seg))
     if not variant_floors:
         return {}
     if len(variant_floors) > 1:
@@ -2242,7 +2402,7 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
                    component_version: Optional[str] = None,
                    workflow_name: Optional[str] = None,
                    subscribed_topics: Optional[List[str]] = None,
-                   stream_features: bool = False, *,
+                   stream_features: bool = False, rfdetr_seg: bool = False, *,
                    reference_files: Optional[Sequence[PackagedReference]] = None) -> Dict:
     """manifest.json content: what WorkflowWatcher needs to register the
     workflow and what the deployment compatibility check reads (8.4).
@@ -2263,6 +2423,12 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
     the arch-scoped scalar and the per-arch map the device prefers — are
     raised to the maximum of the architecture floor and the feature floor.
     False (the default) stamps both exactly as before (18.1).
+    ``rfdetr_seg`` (rfdetr-seg-support Requirement 14.8, design DD8): the
+    workflow references an RF-DETR-Seg model, so both floors are raised
+    further to the Seg feature floor — this function is the only caller of
+    ``min_local_server_versions_map``, so the flag has to travel through
+    it or the map the device prefers would never see the Seg floor.
+    False (the default) stamps both exactly as before (Requirement 17.1).
 
     ``reference_files``: the uploaded reference files the package carries,
     recorded as ``referenceFiles`` {"references/{name}": {sha256, bytes}} for
@@ -2284,7 +2450,7 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
         # Arch-scoped minimum: this package targets `arch`, so the scalar is
         # the minimum for that variant's lineage (backward-compatible field).
         'minLocalServerVersion': min_local_server_version_for(
-            arch, stream_features=stream_features),
+            arch, stream_features=stream_features, rfdetr_seg=rfdetr_seg),
         # Full per-arch map so a variant-aware device selects the floor for
         # its own arch rather than comparing across incomparable lineages.
         # Raised together with the scalar for a stream/analytics workflow:
@@ -2292,7 +2458,7 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
         # unraised map would re-open the very bypass the feature floor
         # closes (Requirement 9.7).
         'minLocalServerVersions': min_local_server_versions_map(
-            stream_features=stream_features),
+            stream_features=stream_features, rfdetr_seg=rfdetr_seg),
         'pluginDependencies': gst_plugins,
         'pythonDependencies': python_packages,
         'pluginChecksums': dict(plugin_checksums or {}),
@@ -2872,13 +3038,34 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         # build_recipe itself is unchanged.
         model_references = gather_model_references(definition_dict,
                                                    descriptors_by_id)
+        # RF-DETR-Seg feature floor (rfdetr-seg-support Requirement 14.8,
+        # design DD8): the discriminator is a property of the referenced
+        # model RECORDS, so the gate runs here, once the registry has been
+        # read — compilation above is pure and no version item is written
+        # before the success update below. A workflow referencing a Seg
+        # model needs a LocalServer build carrying the Seg device contract
+        # on every requested architecture; an uncovered one is rejected
+        # with the complete finding list (409) and no component version is
+        # registered. A workflow without a Seg model contributes zero
+        # findings and resolves its floors exactly as before (17.1).
+        records = load_model_records(model_references, usecase_id)
+        seg_models = rfdetr_seg_model_names(records)
+        seg_findings = rfdetr_seg_arch_gate_findings(seg_models, architectures)
+        if seg_findings:
+            return error_response(
+                409, GATE_RFDETR_SEG_ARCH_UNSUPPORTED, seg_findings[0]['message'],
+                {'findings': seg_findings, 'version': version,
+                 'architectures': architectures})
+        has_rfdetr_seg = bool(seg_models)
         resolved_models = resolve_model_components(model_references,
-                                                   usecase_id, architectures)
+                                                   usecase_id, architectures,
+                                                   records=records)
         component_dependencies = {
             **plugin_component_dependencies(dep_records),
             **model_component_dependencies(resolved_models),
             **local_server_component_dependencies(
-                architectures, stream_features=stream_features),
+                architectures, stream_features=stream_features,
+                rfdetr_seg=has_rfdetr_seg),
         }
 
         # Verify every custom Plugin_Artifact per selected architecture
@@ -2943,6 +3130,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 workflow_name=item.get('name'),
                 subscribed_topics=subscribed_topics,
                 stream_features=stream_features,
+                rfdetr_seg=has_rfdetr_seg,
                 reference_files=reference_files)
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
             build_arch_zip(zip_path, arch, manifest, packaged_definition_json,
@@ -3037,6 +3225,13 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # Written unconditionally (like has_llm_inference, unlike
     # subscribed_topics) so re-packaging a version that no longer uses the
     # new node types clears the flag rather than leaving a stale True.
+    # The version-item RF-DETR-Seg discriminator (rfdetr-seg-support
+    # Requirement 14.8 (b), design DD8), written the same way: has_rfdetr_
+    # seg_model activates the Deployment_Service's Seg feature-floor gate
+    # for this workflow component, so a device on a LocalServer without the
+    # Seg device contract is rejected before submission. Unconditional for
+    # the same reason as has_stream_features: re-packaging a version whose
+    # model is no longer a Seg model clears a stale True.
     update_expression = ('SET component_arn = :arn, component_version = :cv, '
                          'compiled_arch_keys = :keys, '
                          'plugin_components = :pc, '
@@ -3044,6 +3239,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                          'camera_input_nodes = :cin, '
                          'has_llm_inference = :hli, '
                          'has_stream_features = :hsf, '
+                         'has_rfdetr_seg_model = :hrs, '
                          'packaged_architectures = :pa, '
                          'packaged_at = :at, packaged_by = :by')
     update_values = {
@@ -3055,6 +3251,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         ':cin': _dynamo_safe(camera_input_nodes),
         ':hli': bool(llm_node_ids),
         ':hsf': stream_features,
+        ':hrs': has_rfdetr_seg,
         ':pa': architectures,
         ':at': now_ms(),
         ':by': user['user_id']

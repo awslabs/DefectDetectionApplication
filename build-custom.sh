@@ -211,6 +211,49 @@ echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
 resolve_onnxruntime_gpu
 echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=GPU onnxruntime: source build on JP5/JP6/JP7, prebuilt wheel on x86 NVIDIA. Set 0 for fast CPU-only build)"
 
+# ── Staged GPU onnxruntime wheel (JP5/JP6/JP7) ──────────────────────────────
+# The Jetson images' GPU onnxruntime is a 1-2 h source build. When the
+# account's component bucket (dda-component-<region>-<account>, the bucket the
+# publish step uses) holds the wheel install_onnxruntime_gpu.sh would produce
+# for this JetPack line, under onnxruntime-wheels/<file>, it is downloaded next
+# to that script (backend/edge_ml1_p_camera_management/onnxruntime-wheels/, a
+# gitignored directory the Dockerfiles already COPY) and the in-image install
+# uses it instead of compiling. The wheel's file name and sha256 come from
+# backend/edge_ml1_p_camera_management/onnxruntime-wheels.manifest: a download
+# whose digest differs stops the build; an absent object, bucket or credential
+# only means the source build runs as before. The read asserts the bucket's
+# owner like every other S3 access of the publish scripts. Skip with
+# ORT_STAGED_WHEEL=0.
+ORT_STAGED_DIR="backend/edge_ml1_p_camera_management/onnxruntime-wheels"
+rm -rf "$ORT_STAGED_DIR"
+if [ "$ONNXRUNTIME_GPU" = "1" ] && [ "$IS_JP5$IS_JP6$IS_JP7" != "000" ] && [ "${ORT_STAGED_WHEEL:-1}" != "0" ]; then
+  . backend/edge_ml1_p_camera_management/onnxruntime_wheel_manifest.sh
+  . ../scripts/s3-bucket-owner-guard.sh
+  ORT_WHEEL_NAME="$(ort_manifest_wheel_name "$JETPACK_ARG")" || { echo "ERROR: onnxruntime-wheels.manifest has no row for JetPack $JETPACK_ARG"; exit 1; }
+  ORT_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}"
+  ORT_ACCOUNT="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)"
+  if [ -z "$ORT_REGION" ] || [ -z "$ORT_ACCOUNT" ] || [ "$ORT_ACCOUNT" = "None" ]; then
+    echo "Staged onnxruntime wheel: no AWS region/account resolved; the image build compiles onnxruntime from source."
+  else
+    ORT_BUCKET="$(dda_component_bucket_name "$ORT_REGION" "$ORT_ACCOUNT")"
+    ORT_KEY="onnxruntime-wheels/$ORT_WHEEL_NAME"
+    if ! aws s3api head-bucket --bucket "$ORT_BUCKET" --region "$ORT_REGION" --expected-bucket-owner "$ORT_ACCOUNT" >/dev/null 2>&1; then
+      echo "Staged onnxruntime wheel: component bucket $ORT_BUCKET not readable as the owner; the image build compiles onnxruntime from source."
+    elif ! aws s3api head-object --bucket "$ORT_BUCKET" --key "$ORT_KEY" --region "$ORT_REGION" --expected-bucket-owner "$ORT_ACCOUNT" >/dev/null 2>&1; then
+      echo "Staged onnxruntime wheel: s3://$ORT_BUCKET/$ORT_KEY absent; the image build compiles onnxruntime from source."
+    else
+      mkdir -p "$ORT_STAGED_DIR"
+      echo "Staged onnxruntime wheel: downloading s3://$ORT_BUCKET/$ORT_KEY"
+      aws s3api get-object --bucket "$ORT_BUCKET" --key "$ORT_KEY" --region "$ORT_REGION" --expected-bucket-owner "$ORT_ACCOUNT" \
+        "$ORT_STAGED_DIR/$ORT_WHEEL_NAME" >/dev/null \
+        || { echo "ERROR: download of s3://$ORT_BUCKET/$ORT_KEY failed"; exit 1; }
+      ort_manifest_verify "$ORT_STAGED_DIR/$ORT_WHEEL_NAME" "$JETPACK_ARG" \
+        || { echo "ERROR: the downloaded onnxruntime wheel does not match onnxruntime-wheels.manifest; aborting build."; exit 1; }
+      echo "Staged onnxruntime wheel: $ORT_WHEEL_NAME verified against onnxruntime-wheels.manifest; the image build installs it instead of compiling."
+    fi
+  fi
+fi
+
 echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # Select profiles by architecture. The `tegra` service targets Jetson
 # (platform linux/arm64/v8) and must NOT be built on x86_64 hosts — doing so

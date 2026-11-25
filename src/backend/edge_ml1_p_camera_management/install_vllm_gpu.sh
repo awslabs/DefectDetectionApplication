@@ -279,9 +279,15 @@ cp "${WHL}" /opt/vllm-wheels/
 # The "numpy>=1.24,<2" co-constraint rides the same resolution so vLLM's
 # transitive deps (transformers, opencv-python-headless, numba, ...) cannot
 # bump numpy across the 2.0 ABI break the app's pinned numpy sits below
-# (the JP6 precedent).
+# (the JP6 precedent). "sentry-sdk<3" rides it for the same reason: vLLM
+# requires fastapi[standard], whose fastapi-cloud-cli extra depends on an
+# unbounded sentry-sdk, and sentry-sdk 3.0 removed `configure_scope`, which
+# the app's pinned asgi-correlation-id 4.2.0 imports on every request (an
+# image that resolved 3.x answered every request with HTTP 500). The cap keeps
+# the 2.x line the image has always shipped (the JP6 Dockerfile carries the
+# same cap in its vLLM layer).
 echo "Installing ${WHL}..."
-${PYBIN} -m pip install --no-cache-dir "numpy>=1.24,<2" "${WHL}"
+${PYBIN} -m pip install --no-cache-dir "numpy>=1.24,<2" "sentry-sdk<3" "${WHL}"
 
 # ── Post-install verification ───────────────────────────────────────────────
 # Run from a neutral directory: the vLLM source tree contains a `vllm/`

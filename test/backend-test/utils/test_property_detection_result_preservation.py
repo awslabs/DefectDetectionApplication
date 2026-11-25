@@ -54,10 +54,11 @@ Recorded baselines (observed in the flask-app x86 container on unfixed code)
   ``modelId``; everything else is optional. ``dump()`` always emits all 22
   fields, filling omitted ones from ``InferenceResult.__init__`` defaults
   (``maskImage`` ``''``, ``maskBackground`` / ``anomalyLabels`` /
-  ``humanClassification`` / ``textNote`` ``None``, ``humanReviewRequired``
-  ``False``, ``modelConfidenceThresholds`` ``{}``). Unknown keys are REJECTED
-  (``{'detections': ['Unknown field.']}``), which is why the marshal's
-  ``detections`` / ``detection_count`` are not stored columns.
+  ``humanClassification`` / ``textNote`` / ``detections`` ``None``,
+  ``humanReviewRequired`` ``False``, ``modelConfidenceThresholds`` ``{}``).
+  Unknown keys are REJECTED (``{'detection_count': ['Unknown field.']}``):
+  the Detection_List is stored in list form as the ``detections`` column
+  (rfdetr-seg-support Req 10.5b); ``detection_count`` is still not a column.
 * ``GetInferenceResults.save_image_object`` -- three branches, recorded
   key-for-key AND in key order: detection surfaces the OVERLAY as
   ``imageDataFilePath`` and carries ``detections`` + ``detection_count``;
@@ -203,6 +204,8 @@ OPTIONAL_FIELDS = (
     "anomalyLabels", "maskImage", "maskBackground", "outputImageFilePath",
     "modelName", "flagForReview", "downloaded", "humanClassification",
     "textNote", "humanReviewRequired", "modelConfidenceThresholds",
+    # rfdetr-seg-support Req 10.5b: the Detection_List column (list form).
+    "detections",
 )
 
 #: Every field ``InferenceResultSchema().dump()`` emits, observed.
@@ -222,6 +225,7 @@ LOADED_DEFAULTS = {
     "textNote": None,
     "humanReviewRequired": False,
     "modelConfidenceThresholds": {},
+    "detections": None,
 }
 
 #: Observed ``CapturedDataSchema().dump()`` fields.
@@ -239,6 +243,9 @@ LIST_ITEM_FIELDS = frozenset((
     "humanClassification", "humanReviewRequired", "inferenceCreationTime",
     "inputImageFilePath", "maskBackground", "maskImage", "modelId", "modelName",
     "outputImageFilePath", "prediction", "textNote", "workflowId",
+    # rfdetr-seg-support Req 10.5b: the Detection_List column (list form),
+    # ``null`` on every row stored without it (``from_orm``, no exclude_none).
+    "detections",
 ))
 
 #: Observed summary buckets. ``detection`` is the fix's ADDITIVE key.
@@ -542,20 +549,34 @@ def test_human_classification_stays_binary_on_both_schemas(row, classification):
             dict(row, humanClassification=accepted)).humanClassification == accepted
 
 
-# Property 4: the marshal's detections block is still not a stored column
+# Property 4: detection_count is still not a stored column; the
+# Detection_List is stored in list form (rfdetr-seg-support Req 10.5b)
 # Validates: Requirements 3.9, 3.11
 @settings(max_examples=25, deadline=None)
 @given(row=_classification_rows(),
-       extra=st.sampled_from(["detections", "detection_count", "detectionCount"]))
+       extra=st.sampled_from(["detection_count", "detectionCount"]))
 def test_unknown_field_is_still_rejected(row, extra):
-    """Unknown keys stay rejected, so the marshal's ``detections`` /
-    ``detection_count`` remain non-stored and cannot leak into a row.
+    """Unknown keys stay rejected, so the marshal's ``detection_count`` remains
+    non-stored and cannot leak into a row. The Detection_List is stored in
+    list form (rfdetr-seg-support Req 10.5b): the marshal's MAP form is still
+    not a valid value for the ``detections`` column, while a list of entry
+    dicts is accepted.
 
     Validates: Requirements 3.9, 3.11
     """
     with pytest.raises(ValidationError) as excinfo:
         InferenceResultSchema().load(dict(row, **{extra: {}}))
     assert excinfo.value.messages == {extra: ["Unknown field."]}
+    with pytest.raises(ValidationError) as excinfo:
+        InferenceResultSchema().load(dict(row, detections={}))
+    assert excinfo.value.messages == {"detections": ["Not a valid list."]}
+    entries = [{
+        "class_index": "0", "class_label": "scratch",
+        "bounding_box": [1.0, 2.0, 30.0, 40.0], "confidence": 0.9,
+        "mask_rle": "0 4 2 6", "mask_area": 10,
+    }]
+    assert InferenceResultSchema().load(
+        dict(row, detections=entries)).detections == entries
 
 
 def test_captured_data_schema_shape_is_unchanged():

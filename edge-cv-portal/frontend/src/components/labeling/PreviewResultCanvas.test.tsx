@@ -274,6 +274,56 @@ describe('PreviewResultCanvas — Segmentation masks', () => {
     expect(screen.queryByTestId('preview-region-legend')).not.toBeInTheDocument();
     expect(painted).toHaveLength(0);
   });
+
+  it('draws an InstanceSegmentation result exactly as a Segmentation one and applies the empty-result rule (rfdetr-seg-support Req 2.1)', () => {
+    // The Preview_API stores an InstanceSegmentation run's result
+    // Segmentation-shaped (`regions`, Segmentation on the wire — Req 2.4).
+    const rle = '1 1 1 1';
+    const expectedMask = decodeRleColumnMajor(parseRleCounts(rle), 2, 2);
+    const { unmount } = render(
+      <PreviewResultCanvas
+        imageUrl={IMAGE_URL}
+        taskType="InstanceSegmentation"
+        labelSet={LABEL_SET}
+        imageWidth={2}
+        imageHeight={2}
+        prelabel={{ modality: 'Segmentation', regions: [{ class: 'dent', rle }] }}
+      />
+    );
+    expect(screen.getByTestId('preview-mask-overlay')).toBeInTheDocument();
+    expect(painted).toHaveLength(1);
+    const [r, g, b] = rgbOf(CLASS_PALETTE[1]);
+    const { data } = painted[0];
+    for (let pixel = 0; pixel < expectedMask.length; pixel++) {
+      const offset = pixel * 4;
+      if (expectedMask[pixel]) {
+        expect([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+          .toEqual([r, g, b, 140]);
+      } else {
+        expect(data[offset + 3]).toBe(0);
+      }
+    }
+    expect(
+      screen.getAllByTestId('preview-region-class').map((n) => n.textContent)
+    ).toEqual(['dent']);
+    expect(screen.queryByTestId('preview-empty-result')).not.toBeInTheDocument();
+    unmount();
+
+    painted = [];
+    render(
+      <PreviewResultCanvas
+        imageUrl={IMAGE_URL}
+        taskType="InstanceSegmentation"
+        labelSet={LABEL_SET}
+        imageWidth={2}
+        imageHeight={2}
+        prelabel={{ modality: 'Segmentation', regions: [] }}
+      />
+    );
+    expect(screen.getByTestId('preview-empty-result')).toBeInTheDocument();
+    expect(screen.queryByTestId('preview-region-legend')).not.toBeInTheDocument();
+    expect(painted).toHaveLength(0);
+  });
 });
 
 /* ------------------------------------------------------------------ */

@@ -70,6 +70,23 @@ const ddaSegmentationEntry = {
   },
 };
 
+/** The Instance_Manifest line the DDA labeling worker writes (rfdetr-seg-support Req 3.1). */
+const instanceEntry = {
+  'source-ref': 's3://bucket/cookies/frame_0001.jpg',
+  'instance-segmentation': {
+    image_size: [{ width: 1920, height: 1080, depth: 3 }],
+    annotations: [{ class_id: 0, left: 10, top: 20, width: 300, height: 280, rle: '2073600' }],
+  },
+  'instance-segmentation-metadata': {
+    objects: [{ confidence: 1 }],
+    'class-map': { '0': 'crack' },
+    type: 'groundtruth/instance-segmentation',
+    'human-annotated': 'yes',
+    'creation-date': '2026-11-20T00:00:00',
+    'job-name': 'labeling-instances',
+  },
+};
+
 describe('classifyManifestFormat', () => {
   it('recognizes the DDA literal bounding-box attribute as detection', () => {
     expect(classifyManifestFormat(ddaDetectionEntry)).toBe('detection');
@@ -104,13 +121,41 @@ describe('classifyManifestFormat', () => {
     // No `plates-bbox` object → falls through to the Ground Truth heuristic.
     expect(classifyManifestFormat(orphan)).toBe('ground-truth');
   });
+
+  // rfdetr-seg-support Requirement 3.5: an Instance_Manifest is recognised
+  // before the Ground Truth rule, so it is never sent to the transformer.
+  it('recognizes an Instance_Manifest entry as instance, not ground-truth', () => {
+    expect(classifyManifestFormat(instanceEntry)).toBe('instance');
+    // The job-named attribute of a Ground Truth / DDA instance labeling job.
+    expect(classifyManifestFormat({
+      'source-ref': 's3://bucket/img.jpg',
+      'cookies-instances': { image_size: [{ width: 640, height: 480, depth: 3 }], annotations: [] },
+      'cookies-instances-metadata': { type: 'GroundTruth/Instance-Segmentation', 'class-map': { '0': 'crack' } },
+    })).toBe('instance');
+  });
+
+  it('does not treat an instance-segmentation metadata key without a sibling attribute as instance', () => {
+    const orphan = {
+      'source-ref': 's3://bucket/img.jpg',
+      'instance-segmentation-metadata': { type: 'groundtruth/instance-segmentation' },
+    };
+    expect(classifyManifestFormat(orphan)).toBe('ground-truth');
+    // A semantic-segmentation type is not the instance type (exact match).
+    expect(classifyManifestFormat({
+      'source-ref': 's3://bucket/img.jpg',
+      'masks': { x: 1 },
+      'masks-metadata': { type: 'groundtruth/semantic-segmentation' },
+    })).toBe('ground-truth');
+  });
 });
 
 describe('isDetectionModelType', () => {
-  it('matches only the backend object_detection value', () => {
+  it('matches only the backend detection-family values: object_detection and instance_segmentation', () => {
     expect(isDetectionModelType('object_detection')).toBe(true);
+    expect(isDetectionModelType('instance_segmentation')).toBe(true);
     expect(isDetectionModelType('object-detection')).toBe(false);
     expect(isDetectionModelType('segmentation')).toBe(false);
+    expect(isDetectionModelType('segmentation-robust')).toBe(false);
     expect(isDetectionModelType(undefined)).toBe(false);
   });
 });

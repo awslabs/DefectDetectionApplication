@@ -219,11 +219,17 @@ REQUIRED_MANIFEST_ATTRIBUTES = {
         'anomaly-mask-ref', 'anomaly-mask-ref-metadata'),
     'ObjectDetection': (
         'source-ref', 'bounding-box', 'bounding-box-metadata'),
+    # Instance_Manifest (rfdetr-seg-support Requirement 3.1): the
+    # bounding-box shape with one RLE per annotation; no mask PNG.
+    'InstanceSegmentation': (
+        'source-ref', 'instance-segmentation',
+        'instance-segmentation-metadata'),
 }
 GT_TASK_TYPES = {
     'Classification': 'classification',
     'Segmentation': 'segmentation',
     'ObjectDetection': 'object-detection',
+    'InstanceSegmentation': 'instance-segmentation',
 }
 # The known GT timestamp bug the manifest checks flag: colons in
 # mask object keys (Req 10.4 — DDA mask keys never contain colons).
@@ -1065,6 +1071,10 @@ def _generate_manifest(job: Dict) -> Dict[str, Any]:
                                                    True))),
             'creation_date': _annotation_creation_date(task),
         }
+        # Only Segmentation renders a mask PNG. An InstanceSegmentation
+        # record is serialized from its RLE instances alone — no PNG, no
+        # mask_s3_uri, no color map (rfdetr-seg-support Req 2.5, 3.1;
+        # dda_manifest._serialize_instance_segmentation).
         if modality == 'Segmentation':
             image_size = annotation.get('image_size') or {}
             width = int(image_size.get('width') or 0)
@@ -1374,6 +1384,17 @@ def _validate_manifest_lines(lines: List[str],
             if not isinstance(entry.get('bounding-box-metadata'), dict):
                 issues.append(f"entry {index + 1}: "
                               f"bounding-box-metadata must be an object")
+        if modality == 'InstanceSegmentation':
+            # The Instance_Manifest pair (rfdetr-seg-support Req 3.1),
+            # checked as the bounding-box pair is.
+            if not isinstance(entry.get('instance-segmentation'), dict):
+                issues.append(f"entry {index + 1}: instance-segmentation "
+                              f"must be an object")
+            if not isinstance(
+                    entry.get('instance-segmentation-metadata'), dict):
+                issues.append(f"entry {index + 1}: "
+                              f"instance-segmentation-metadata must be an "
+                              f"object")
     if issues:
         return issues
 
@@ -1395,6 +1416,17 @@ def _validate_manifest_lines(lines: List[str],
                 'manifest is in Ground Truth format and requires '
                 'transformation (detected attribute '
                 f"{detected.get('metadata_attr')!r})")
+    elif modality == 'InstanceSegmentation':
+        # Instance segmentation (rfdetr-seg-support Req 3.1): the
+        # instance-segmentation attribute pair is the consumable format
+        # and must be detected as such — `detect_ground_truth_attributes`
+        # names it from its `-metadata` key, so the pair that would trip
+        # the bounding-box gate below is exactly the one expected here.
+        if (not detected
+                or detected.get('label_attr') != 'instance-segmentation'):
+            issues.append(
+                'instance-segmentation attributes were not detected in '
+                'the manifest')
     else:
         # Object detection: the GT bounding-box attribute pair itself
         # is the consumable format; it must be detectable.

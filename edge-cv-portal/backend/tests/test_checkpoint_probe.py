@@ -41,6 +41,13 @@ CASES = [
     ("rfdetr_ptl_payload", lambda p: fx.build_rfdetr_ptl(p, class_names=["blue_plate", "blue_plate_b"]),
      dict(kind="rfdetr_checkpoint", arch="rf_detr", fine_tunable=True,
           num_classes=2, class_names=["blue_plate", "blue_plate_b"])),
+    # RF-DETR-Seg (rfdetr-seg-support task 7.1): the mask head makes the arch rf_detr_seg.
+    ("rfdetr_seg_stripped_published", lambda p: fx.rfdetr_seg_checkpoint(p, envelope="stripped"),
+     dict(kind="rfdetr_checkpoint", arch="rf_detr_seg", fine_tunable=True,
+          num_classes=90, class_names=None)),
+    ("rfdetr_seg_training_ptl", lambda p: fx.rfdetr_seg_checkpoint(p, envelope="training"),
+     dict(kind="rfdetr_checkpoint", arch="rf_detr_seg", fine_tunable=True,
+          num_classes=2, class_names=["disc", "block"])),
     ("torchscript", fx.build_torchscript, dict(kind="torchscript", **NOT_TUNABLE)),
     ("state_dict_wrapped", fx.build_state_dict, dict(kind="state_dict", **NOT_TUNABLE)),
     ("state_dict_raw", lambda p: fx.build_state_dict(p, wrapped=False), dict(kind="state_dict", **NOT_TUNABLE)),
@@ -97,7 +104,8 @@ def test_evidence_is_json_serialisable(tmp_path, name, builder, expected):
 def test_vocabulary_matches_spike_contract():
     assert cp.KINDS == ("onnx", "torchscript", "ultralytics_checkpoint", "rfdetr_checkpoint",
                         "state_dict", "legacy_torch", "unknown")
-    assert cp.ARCHES == ("yolo", "rf_detr", None)
+    # rf_detr_seg joined in rfdetr-seg-support task 7.1 (Req 7.1 / 7.7, C22).
+    assert cp.ARCHES == ("yolo", "rf_detr", "rf_detr_seg", None)
     assert cp.FINE_TUNABLE_KINDS == ("ultralytics_checkpoint", "rfdetr_checkpoint")
     assert set(cp.FINE_TUNABLE_KINDS) < set(cp.KINDS)
 
@@ -151,6 +159,134 @@ def test_rfdetr_v1101_layout_records_model_config(tmp_path):
     res = cp.classify_checkpoint(str(path))
     assert res["evidence"]["model_config.num_classes"] == 1
     assert res["evidence"]["epoch"] == 3
+
+
+def test_rfdetr_detection_checkpoints_record_the_detection_task(tmp_path):
+    """Detection fixtures: no mask head, arch stays rf_detr, task 'detection',
+    the args flag absent (None) and never a disagreement (Seg spec Req 7.1)."""
+    for name, builder in (("published", fx.build_rfdetr_published), ("v1101", fx.build_rfdetr_v1101),
+                          ("ptl", fx.build_rfdetr_ptl)):
+        path = tmp_path / f"{name}.pth"
+        builder(str(path))
+        res = cp.classify_checkpoint(str(path))
+        signals = res["evidence"]["rfdetr_signals"]
+        assert res["arch"] == "rf_detr", name
+        assert res["evidence"]["rfdetr_task"] == "detection", name
+        assert signals["segmentation_head_keys"] == 0, name
+        assert signals["args_segmentation_head"] is None, name
+        assert "task_signals_disagree" not in signals, name
+
+
+# ---------------------------------------------------------------------------
+# RF-DETR-Seg: the mask head is the task signal (rfdetr-seg-support Req 7.1, 7.7)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("envelope", fx.RFDETR_SEG_ENVELOPES)
+def test_rfdetr_seg_envelopes_classify_as_rf_detr_seg(tmp_path, envelope):
+    """Every envelope the spike recorded (M-2): kind stays rfdetr_checkpoint,
+    arch is rf_detr_seg, evidence.rfdetr_task is 'segmentation', the 35
+    segmentation_head.* keys are counted and num_classes still comes from the
+    head width, never from args."""
+    path = tmp_path / f"seg-{envelope}.pth"
+    fx.rfdetr_seg_checkpoint(str(path), envelope=envelope)
+    assert os.path.getsize(path) < 50 * 1024
+    res = cp.classify_checkpoint(str(path))
+    assert res["kind"] == "rfdetr_checkpoint" and res["fine_tunable"] is True
+    assert res["arch"] == "rf_detr_seg"
+    assert set(res) == set(FIELDS) | {"evidence"}  # rfdetr_task lives inside evidence
+    ev = res["evidence"]
+    assert ev["rfdetr_task"] == "segmentation"
+    assert ev["rfdetr_signals"]["segmentation_head_keys"] == 35
+    assert ev["num_classes_source"] == "class_embed.bias.shape[0] - 1"
+    assert "task_signals_disagree" not in ev["rfdetr_signals"]
+    json.dumps(res)
+
+
+def test_rfdetr_seg_stripped_published_weights(tmp_path):
+    # The six published Seg weights: {"model"} only -- no args, model_name or
+    # rfdetr_version, 91-slot COCO head; args_segmentation_head is None and the
+    # size is left to the assessment's unknown-size path (no args_picks at all).
+    path = tmp_path / "rf-detr-seg-nano.pt"
+    fx.rfdetr_seg_checkpoint(str(path), envelope="stripped")
+    res = cp.classify_checkpoint(str(path))
+    ev = res["evidence"]
+    assert res["num_classes"] == 90 and res["class_names"] is None
+    assert ev["top_level_keys"] == ["model"]
+    assert ev["zip_root"] == ["checkpoint_best_regular_stripped"]
+    assert "model_name" not in ev and "args_picks" not in ev
+    assert ev["rfdetr_signals"]["args_type"] == "NoneType"
+    assert ev["rfdetr_signals"]["args_segmentation_head"] is None
+
+
+def test_rfdetr_seg_training_checkpoint_has_model_name_and_no_model_picks(tmp_path):
+    # DDA-trained checkpoint_best_total.pth: args is the TrainConfig dump
+    # (class_names, no model fields), model_name names the size, the PTL
+    # state_dict mirrors `model`.
+    path = tmp_path / "checkpoint_best_total.pth"
+    fx.rfdetr_seg_checkpoint(str(path), envelope="training")
+    res = cp.classify_checkpoint(str(path))
+    ev = res["evidence"]
+    assert res["num_classes"] == 2 and res["class_names"] == ["disc", "block"]
+    assert ev["model_name"] == "RFDETRSegNano"
+    assert ev["names_source"] == "args.class_names"
+    assert ev["rfdetr_signals"]["args_type"] == "dict"
+    assert ev["rfdetr_signals"]["args_fields"] == []
+    assert "args_picks" not in ev
+    assert ev["rfdetr_signals"]["args_segmentation_head"] is None
+    assert "model_config.num_classes" not in ev
+    assert "state_dict" in ev["top_level_keys"] and ev["rfdetr_signals"]["state_dict_prefix"] == ""
+
+
+def test_rfdetr_seg_ema_checkpoint_reads_picks_from_model_config(tmp_path):
+    # checkpoint_best_ema.pth: args still has no model field, so every pick
+    # comes from model_config (the second source); the flag is still absent.
+    path = tmp_path / "checkpoint_best_ema.pth"
+    fx.rfdetr_seg_checkpoint(str(path), envelope="ema", resolution=312)
+    res = cp.classify_checkpoint(str(path))
+    ev = res["evidence"]
+    assert ev["model_name"] == "RFDETRSegNano" and ev["epoch"] == 7
+    assert ev["model_config.num_classes"] == 2
+    assert ev["args_picks"] == {"encoder": "dinov2_windowed_small", "resolution": 312,
+                                "num_queries": 100, "group_detr": 13, "num_classes": 2,
+                                "patch_size": 12, "num_windows": 2, "dec_layers": 2}
+    assert ev["rfdetr_signals"]["args_segmentation_head"] is None
+
+
+def test_rfdetr_seg_legacy_export_for_roboflow_shape(tmp_path):
+    # {"model", "args"} with args.segmentation_head = True and patch_size 12:
+    # no model_name, the explicit flag agrees with the state dict.
+    path = tmp_path / "rf-detr-seg-roboflow.pth"
+    fx.rfdetr_seg_checkpoint(str(path), envelope="legacy", resolution=312)
+    res = cp.classify_checkpoint(str(path))
+    ev = res["evidence"]
+    assert "model_name" not in ev
+    assert res["num_classes"] == 2 and res["class_names"] is None
+    assert ev["rfdetr_signals"]["args_segmentation_head"] is True
+    assert ev["args_picks"]["segmentation_head"] is True
+    assert ev["args_picks"]["patch_size"] == 12 and ev["args_picks"]["resolution"] == 312
+    assert "task_signals_disagree" not in ev["rfdetr_signals"]
+
+
+def test_rfdetr_seg_args_flag_contradicting_the_state_dict_is_recorded_not_believed(tmp_path):
+    """An explicit `segmentation_head: False` beside a populated mask head (and
+    the reverse) is flagged `task_signals_disagree`; the state dict decides."""
+    seg = tmp_path / "flag-false.pth"
+    fx.rfdetr_seg_checkpoint(str(seg), envelope="legacy")
+    # Rebuild the legacy envelope with the flag flipped by hand.
+    from fixtures.checkpoints import builders as b
+    model = b._rfdetr_seg_state_dict(2)
+    b.write_bytes(str(seg), b._torch_zip_bytes("x", {"model": model, "args": {"segmentation_head": False,
+                                                                              "patch_size": 12}}))
+    res = cp.classify_checkpoint(str(seg))
+    assert res["arch"] == "rf_detr_seg" and res["evidence"]["rfdetr_task"] == "segmentation"
+    assert res["evidence"]["rfdetr_signals"]["task_signals_disagree"] is True
+    assert res["evidence"]["rfdetr_signals"]["args_segmentation_head"] is False
+    det = tmp_path / "flag-true.pth"
+    b.write_bytes(str(det), b._torch_zip_bytes("y", {"model": b._rfdetr_state_dict(2),
+                                                     "args": {"segmentation_head": True, "resolution": 512}}))
+    res = cp.classify_checkpoint(str(det))
+    assert res["arch"] == "rf_detr" and res["evidence"]["rfdetr_task"] == "detection"
+    assert res["evidence"]["rfdetr_signals"]["task_signals_disagree"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +386,7 @@ _ENVELOPES = {
     "ultralytics": fx.build_ultralytics_ckpt,
     "rfdetr_published": fx.build_rfdetr_published,
     "rfdetr_ptl": fx.build_rfdetr_ptl,
+    "rfdetr_seg_ema": lambda p: fx.rfdetr_seg_checkpoint(p, envelope="ema"),
     "torchscript": fx.build_torchscript,
     "legacy_tar": fx.build_legacy_torch_tar,
     "onnx": lambda p: fx.build_onnx(p, names={0: "x"}),

@@ -20,5 +20,7 @@ from .builders import (  # noqa: F401
     build_truncated_zip,
     build_ultralytics_ckpt,
     build_zip_without_data_pkl,
+    rfdetr_seg_checkpoint,
+    RFDETR_SEG_ENVELOPES,
     write_bytes,
 )

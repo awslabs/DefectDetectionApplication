@@ -37,7 +37,9 @@ CATALOG = catalog.CATALOG
 NAMES = [s.name for s in CATALOG]
 BY_NAME = {s.name: s for s in CATALOG}
 CLAIM_NAMES = ('sub', 'iss', 'aud', 'scope', 'client_id', 'token_use', 'username', 'email')
-DOTTED_PATH = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\[\])?(\.[A-Za-z_][A-Za-z0-9_]*(\[\])?)*$')
+# `[]` = every element of a list, `{}` = every value of a dict
+# (rfdetr-seg-support 10.7: the live detections map).
+DOTTED_PATH = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\[\]|\{\})?(\.[A-Za-z_][A-Za-z0-9_]*(\[\]|\{\})?)*$')
 SEMVER = re.compile(r'^\d+\.\d+\.\d+$')
 PAGINATION_PARAMS = ('limit', 'size', 'maxResults', 'startingPoint', 'offset')
 

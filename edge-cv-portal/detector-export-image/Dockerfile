@@ -8,7 +8,7 @@
 # requirements.txt), and SageMaker's `train` argument is ignored.
 #
 # Build with ./build-and-push.sh, which stages a minimal context (this
-# Dockerfile, the lock files and the three entry-point modules) instead of
+# Dockerfile, the lock files and the four entry-point modules) instead of
 # sending the repository root.
 #
 # Base: an ECR-hosted image pinned by digest (docker_base_image_audit policy),
@@ -59,10 +59,14 @@ RUN pip install --no-deps --index-url https://download.pytorch.org/whl/cpu \
  && pip check
 
 # Entry point + the trainer modules it reuses (RF-DETR export/verify helpers,
-# metadata writer). Copied last so code edits rebuild one small layer.
+# the RF-DETR-Seg stamp / verifier, metadata writer). Copied last so code
+# edits rebuild one small layer. The smoke imports all three modules:
+# export_checkpoint imports the trainers lazily inside convert_rfdetr, so an
+# `import export_checkpoint` alone would pass with a missing COPY and fail
+# only inside a customer's conversion job (rfdetr-seg-support, task 17.1).
 WORKDIR /opt/program
-COPY export_checkpoint.py train_rfdetr.py _common.py /opt/program/
-RUN python -c "import export_checkpoint" \
+COPY export_checkpoint.py train_rfdetr.py train_rfdetr_seg.py _common.py /opt/program/
+RUN python -c "import export_checkpoint, train_rfdetr, train_rfdetr_seg" \
  && /opt/ort-floor/bin/python -c "import onnxruntime, sys; assert onnxruntime.__version__ == '1.16.3', onnxruntime.__version__"
 
 ENTRYPOINT ["python", "/opt/program/export_checkpoint.py"]

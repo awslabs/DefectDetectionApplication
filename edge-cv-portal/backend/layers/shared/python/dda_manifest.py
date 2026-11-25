@@ -22,6 +22,16 @@ Canonical modality-tagged annotation model (design: "Annotation model"):
      "regions": [{"class": "<label-set name>", "rle": "<COCO-style counts>"}],
      "classification": "normal" | "anomaly"}   # anomaly iff any non-empty region
 
+    # Instance_Segmentation (one RLE mask per object instance; rfdetr-seg-support
+    # Requirement 2.2, DD9). `box` is the tight box derived from `rle` — the
+    # server recomputes it on submit and the serializer re-derives it on export,
+    # so it is never typed by a client.
+    {"modality": "InstanceSegmentation",
+     "image_size": {"width": W, "height": H},
+     "instances": [{"class": "<label-set name>", "rle": "<COCO-style counts>",
+                    "box": {"left": int, "top": int, "width": int, "height": int}}],
+     "classification": "normal" | "anomaly"}   # anomaly iff instances is non-empty
+
 An AnnotationRecord wraps one canonical annotation with its serialization
 context:
 
@@ -36,7 +46,8 @@ context:
 A JobContext supplies the job-wide fields:
 
     {"job_name": str,
-     "modality": "Classification" | "Segmentation" | "ObjectDetection",
+     "modality": "Classification" | "Segmentation" | "ObjectDetection"
+                 | "InstanceSegmentation",
      "label_set": [str]}               # ordered; ['normal','anomaly'] for Classification
 
 RLE format: COCO-style uncompressed counts — space-separated run lengths
@@ -56,10 +67,13 @@ from typing import Callable, Dict, List, Optional, Sequence
 MODALITY_CLASSIFICATION = 'Classification'
 MODALITY_SEGMENTATION = 'Segmentation'
 MODALITY_OBJECT_DETECTION = 'ObjectDetection'
+# Instance_Segmentation (rfdetr-seg-support Requirements 2.1, 3.1; D3).
+MODALITY_INSTANCE_SEGMENTATION = 'InstanceSegmentation'
 SUPPORTED_MODALITIES = (
     MODALITY_CLASSIFICATION,
     MODALITY_SEGMENTATION,
     MODALITY_OBJECT_DETECTION,
+    MODALITY_INSTANCE_SEGMENTATION,
 )
 
 # Fixed Binary_Classification label set (req 4.3)
@@ -70,6 +84,7 @@ ANOMALY_LABEL = 'anomaly'
 CLASSIFICATION_TYPE = 'groundtruth/image-classification'
 SEGMENTATION_TYPE = 'groundtruth/semantic-segmentation'
 OBJECT_DETECTION_TYPE = 'groundtruth/object-detection'
+INSTANCE_SEGMENTATION_TYPE = 'groundtruth/instance-segmentation'
 
 # Fixed mask palette (req 10.4): background plus one distinct color per
 # Label_Set class, deterministic from Label_Set order. Class i gets
@@ -219,16 +234,7 @@ def rle_decode(rle: str, width: int, height: int) -> bytearray:
     """
     if width < 1 or height < 1:
         raise ValueError('width and height must be positive')
-    try:
-        counts = [int(token) for token in rle.split()]
-    except (AttributeError, ValueError):
-        raise ValueError(f'invalid RLE counts: {rle!r}')
-    if any(c < 0 for c in counts):
-        raise ValueError('RLE counts must be non-negative')
-    if sum(counts) != width * height:
-        raise ValueError(
-            f'RLE counts sum {sum(counts)} != width*height {width * height}'
-        )
+    counts = _rle_counts(rle, width, height)
 
     mask = bytearray(width * height)
     position = 0
@@ -241,6 +247,87 @@ def rle_decode(rle: str, width: int, height: int) -> bytearray:
         position += count
         value = 1 - value
     return mask
+
+
+def _rle_counts(rle: str, width: int, height: int) -> List[int]:
+    """
+    Parse COCO-style RLE counts and check them against the mask size.
+
+    The three validation errors `rle_decode` has always raised, factored
+    out so `tight_box_from_rle` applies the identical rules
+    (rfdetr-seg-support DD9).
+
+    Raises:
+        ValueError: a non-integer token, a negative count, or counts not
+            summing to width*height
+    """
+    try:
+        counts = [int(token) for token in rle.split()]
+    except (AttributeError, ValueError):
+        raise ValueError(f'invalid RLE counts: {rle!r}')
+    if any(c < 0 for c in counts):
+        raise ValueError('RLE counts must be non-negative')
+    if sum(counts) != width * height:
+        raise ValueError(
+            f'RLE counts sum {sum(counts)} != width*height {width * height}'
+        )
+    return counts
+
+
+def tight_box_from_rle(rle: str, width: int, height: int) -> tuple:
+    """
+    The tight bounding box of an RLE mask, derived from the runs alone.
+
+    Pure Python and O(number of runs): no bitmap is decoded, so the
+    labeling Lambdas (which carry no numpy) can recompute the box of
+    every submitted instance (rfdetr-seg-support Requirement 2.2, DD9).
+    The counts are column-major with the background run first, so a
+    foreground run covering flat indices [p0, p1] spans the columns
+    p0 // height .. p1 // height; its rows are p0 % height .. p1 % height
+    while it stays in one column, and the full 0 .. height - 1 once it
+    crosses a column boundary (it then covers the bottom of one column
+    and the top of the next).
+
+    Args:
+        rle: Space-separated run lengths (column-major, background first)
+        width: Mask width in pixels
+        height: Mask height in pixels
+
+    Returns:
+        (left, top, width, height) in pixels, inclusive of every
+        foreground pixel
+
+    Raises:
+        ValueError: malformed counts or a sum other than width*height
+            (the `rle_decode` rules), or 'no foreground pixels' when every
+            run is background
+    """
+    if width < 1 or height < 1:
+        raise ValueError('width and height must be positive')
+    counts = _rle_counts(rle, width, height)
+
+    left = right = top = bottom = None
+    position = 0
+    value = 0
+    for count in counts:
+        if value and count > 0:
+            p0 = position
+            p1 = position + count - 1
+            first_column, first_row = divmod(p0, height)
+            last_column, last_row = divmod(p1, height)
+            if first_column == last_column:
+                run_top, run_bottom = first_row, last_row
+            else:
+                run_top, run_bottom = 0, height - 1
+            left = first_column if left is None else min(left, first_column)
+            right = last_column if right is None else max(right, last_column)
+            top = run_top if top is None else min(top, run_top)
+            bottom = run_bottom if bottom is None else max(bottom, run_bottom)
+        position += count
+        value = 1 - value
+    if left is None:
+        raise ValueError('no foreground pixels')
+    return left, top, right - left + 1, bottom - top + 1
 
 
 def _rle_has_foreground(rle: str) -> bool:
@@ -505,6 +592,71 @@ def _serialize_object_detection(record: Dict, job: Dict) -> Dict:
     }
 
 
+def _serialize_instance_segmentation(record: Dict, job: Dict) -> Dict:
+    """
+    The Instance_Manifest line (rfdetr-seg-support Requirement 3.1, O8 a):
+    the `_serialize_object_detection` shape with one `rle` per annotation
+    and no mask PNG. The box fields are always re-derived from the RLE
+    with `tight_box_from_rle` (DD9), so the manifest box can never
+    disagree with the mask whatever the stored annotation carries; a
+    stored client box is still checked against the image bounds, as the
+    detection serializer checks its boxes.
+    """
+    annotation = record['annotation']
+    label_set = job['label_set']
+    class_to_id = {name: i for i, name in enumerate(label_set)}
+    width = annotation['image_size']['width']
+    height = annotation['image_size']['height']
+    confidence = _resolve_confidence(record)
+
+    gt_annotations = []
+    for instance in annotation.get('instances', []):
+        class_name = instance.get('class')
+        if class_name not in class_to_id:
+            raise ValueError(
+                f'instance class {class_name!r} is not in the Label_Set')
+        rle = instance.get('rle')
+        if not isinstance(rle, str) or not rle:
+            raise ValueError(f'instance {instance!r} has no RLE mask')
+        stored_box = instance.get('box')
+        if isinstance(stored_box, dict):
+            left, top = int(stored_box['left']), int(stored_box['top'])
+            box_w, box_h = int(stored_box['width']), int(stored_box['height'])
+            if left < 0 or top < 0 or box_w < 0 or box_h < 0 \
+                    or left + box_w > width or top + box_h > height:
+                raise ValueError(
+                    f'box {stored_box!r} lies outside the image bounds '
+                    f'{width}x{height}'
+                )
+        # Raises for malformed counts, a sum other than width*height, and
+        # an all-background mask (DD9).
+        left, top, box_w, box_h = tight_box_from_rle(rle, width, height)
+        gt_annotations.append({
+            'class_id': class_to_id[class_name],
+            'left': left,
+            'top': top,
+            'width': box_w,
+            'height': box_h,
+            'rle': rle,
+        })
+
+    return {
+        'source-ref': record['source_ref'],
+        'instance-segmentation': {
+            'image_size': [{'width': width, 'height': height, 'depth': 3}],
+            'annotations': gt_annotations,
+        },
+        'instance-segmentation-metadata': {
+            'objects': [{'confidence': confidence} for _ in gt_annotations],
+            'class-map': {str(i): name for i, name in enumerate(label_set)},
+            'type': INSTANCE_SEGMENTATION_TYPE,
+            'human-annotated': _human_annotated_value(record),
+            'creation-date': record.get('creation_date', ''),
+            'job-name': job['job_name'],
+        },
+    }
+
+
 def serialize_manifest(annotations: List[Dict], job: Dict) -> List[str]:
     """
     Serialize canonical annotation records into DDA_Manifest JSON Lines.
@@ -522,6 +674,10 @@ def serialize_manifest(annotations: List[Dict], job: Dict) -> List[str]:
     - Object_Detection (req 10.5): GT `bounding-box` structure with
       zero-based `class_id` and in-bounds pixel coordinates, plus its
       `bounding-box-metadata` class-map
+    - Instance_Segmentation (rfdetr-seg-support req 3.1): the
+      `instance-segmentation` structure — the bounding-box shape with
+      one `rle` per annotation and the box derived from it — plus its
+      `instance-segmentation-metadata` class-map; no mask PNG
 
     Args:
         annotations: AnnotationRecord dicts (see module docstring)
@@ -557,6 +713,8 @@ def serialize_manifest(annotations: List[Dict], job: Dict) -> List[str]:
             entry = _serialize_classification(record, job)
         elif modality == MODALITY_SEGMENTATION:
             entry = _serialize_segmentation(record, job, color_map)
+        elif modality == MODALITY_INSTANCE_SEGMENTATION:
+            entry = _serialize_instance_segmentation(record, job)
         else:
             entry = _serialize_object_detection(record, job)
         lines.append(json.dumps(entry))
@@ -647,6 +805,51 @@ def _parse_object_detection(entry: Dict) -> Dict:
     }
 
 
+def _parse_instance_segmentation(entry: Dict) -> Dict:
+    """Inverse of `_serialize_instance_segmentation` (rfdetr-seg-support
+    Requirement 3.1): `source-ref` is returned verbatim, the box fields
+    are trusted as the tight box the serializer derived."""
+    instance_segmentation = entry['instance-segmentation']
+    metadata = entry.get('instance-segmentation-metadata', {})
+    class_map = metadata.get('class-map', {})
+    image_size = instance_segmentation['image_size'][0]
+
+    instances = []
+    for gt_instance in instance_segmentation.get('annotations', []):
+        class_id = str(gt_instance['class_id'])
+        if class_id not in class_map:
+            raise ValueError(f'class_id {class_id} is not in the class-map')
+        instances.append({
+            'class': class_map[class_id],
+            'rle': gt_instance['rle'],
+            'box': {
+                'left': int(gt_instance['left']),
+                'top': int(gt_instance['top']),
+                'width': int(gt_instance['width']),
+                'height': int(gt_instance['height']),
+            },
+        })
+
+    objects = metadata.get('objects', [])
+    confidence = objects[0].get('confidence') if objects else None
+
+    return {
+        'source_ref': entry['source-ref'],
+        'annotation': {
+            'modality': MODALITY_INSTANCE_SEGMENTATION,
+            'image_size': {
+                'width': int(image_size['width']),
+                'height': int(image_size['height']),
+            },
+            'instances': instances,
+            'classification': ANOMALY_LABEL if instances else NORMAL_LABEL,
+        },
+        'human_annotated': metadata.get('human-annotated', 'yes') == 'yes',
+        'confidence': confidence,
+        'creation_date': metadata.get('creation-date', ''),
+    }
+
+
 def parse_manifest(lines: List[str], modality: str,
                    mask_loader: Optional[Callable[[str], bytes]] = None) -> List[Dict]:
     """
@@ -656,6 +859,7 @@ def parse_manifest(lines: List[str], modality: str,
     Args:
         lines: JSON Lines strings (blank lines ignored)
         modality: 'Classification' | 'Segmentation' | 'ObjectDetection'
+            | 'InstanceSegmentation'
         mask_loader: Segmentation only — callable mapping a mask S3 URI
             to its PNG bytes so regions can be decoded through the
             entry's internal-color-map. When omitted, segmentation
@@ -685,6 +889,8 @@ def parse_manifest(lines: List[str], modality: str,
                 records.append(_parse_classification(entry))
             elif modality == MODALITY_SEGMENTATION:
                 records.append(_parse_segmentation(entry, mask_loader))
+            elif modality == MODALITY_INSTANCE_SEGMENTATION:
+                records.append(_parse_instance_segmentation(entry))
             else:
                 records.append(_parse_object_detection(entry))
         except (KeyError, TypeError) as e:

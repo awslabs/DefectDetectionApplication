@@ -18,6 +18,7 @@
 import axios from "axios";
 import { Connection } from "config/Interface";
 import { MaskBackground } from "api/WorkflowAPI";
+import type { InstanceDetectionEntry } from "components/deployed-workflow/instanceDetections";
 import type { StreamHealth } from "components/image-source/types";
 
 // Endpoint constants are built locally from the read-only Connection export
@@ -109,6 +110,14 @@ export interface WorkflowExecutionResults {
 export interface WorkflowExecutionOverlay {
   maskImage: string | null;
   maskBackground: MaskBackground | null;
+  /**
+   * The run's Detection_List in list form, `mask_rle` included, or `null`
+   * when the run recorded none (rfdetr-seg-support Requirement 10.5c). A
+   * detection run's entries carry no `mask_rle`.
+   */
+  instances?: InstanceDetectionEntry[] | null;
+  /** Whether the device shed some entry's mask at its size ceiling. */
+  detectionsTruncated?: boolean | null;
 }
 
 /** Per-node run status for a single node. */

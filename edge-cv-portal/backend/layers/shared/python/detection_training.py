@@ -1,6 +1,6 @@
 """
 Shared vocabulary and pure helpers for portal-trained Object Detection models
-(YOLO and RF-DETR).
+(YOLO and RF-DETR) and RF-DETR-Seg instance segmentation models.
 
 Single source of truth for the three Lambdas that touch a detection training
 record — `training.py` (create / status), `compilation.py` (Neo bypass) and
@@ -16,8 +16,10 @@ Pure functions only — no boto3, no network I/O. The only filesystem access is
 only DynamoDB access is `resolve_base_model`, which does one `get_item` on the
 table the caller passes in.
 
-Specs: .kiro/specs/portal-detection-training/ (design §Architecture) and
-.kiro/specs/rfdetr-training-and-transfer-learning/ (design §Shared layer).
+Specs: .kiro/specs/portal-detection-training/ (design §Architecture),
+.kiro/specs/rfdetr-training-and-transfer-learning/ (design §Shared layer) and
+.kiro/specs/rfdetr-seg-support/ (design §1: the Seg vocabulary beside the
+detection one — pattern extended, never paralleled).
 """
 import json
 import os
@@ -35,22 +37,45 @@ from checkpoint_probe import classify_checkpoint, FINE_TUNABLE_KINDS  # noqa: F4
 # Vocabulary
 # ---------------------------------------------------------------------------
 MODEL_TYPE_OBJECT_DETECTION = 'object_detection'
+# RF-DETR-Seg records: `model_type = 'instance_segmentation'` AND
+# `detection_arch = 'rf_detr_seg'` (Seg spec Req 1.1). Both model types are
+# "portal-trained detector" records for the predicates below.
+MODEL_TYPE_INSTANCE_SEGMENTATION = 'instance_segmentation'
+DETECTION_MODEL_TYPES = (MODEL_TYPE_OBJECT_DETECTION, MODEL_TYPE_INSTANCE_SEGMENTATION)
 
 # Detector families the portal can train. `detection_arch` on a request /
 # record selects the entry point, the hyperparameter schema, the env the
 # entry point reads and the on-device stage type + preprocessing.
-DETECTION_ARCHES = ('yolo', 'rf_detr')
+DETECTION_ARCHES = ('yolo', 'rf_detr', 'rf_detr_seg')
+# The DETR-family archs share set-based decoding (no NMS, so no
+# iou_threshold), ImageNet normalisation and a size table; `is_detr_family`
+# is the predicate every "rf_detr or Seg" branch uses instead of `== 'rf_detr'`.
+DETR_FAMILY_ARCHES = ('rf_detr', 'rf_detr_seg')
 
 # On-device stage type / decoder selected by the manifest per arch. Must match
 # model_converter.generate_dda_package's detection_stage_type and the
 # OnnxRunner / Yolo|RfDetrDetectionPostProcessor in src/backend.
 DETECTION_STAGE_TYPE = 'yolo_object_detection'
 RFDETR_STAGE_TYPE = 'rf_detr_object_detection'
+# RF-DETR-Seg has one stage type per Output_Mode (Seg spec O16 a); the map
+# carries the default mode's, `stage_type_for` resolves the other.
+RFDETR_SEG_INSTANCE_STAGE_TYPE = 'rf_detr_instance_segmentation'
+RFDETR_SEG_SEMANTIC_STAGE_TYPE = 'rf_detr_semantic_segmentation'
 STAGE_TYPE_FOR_ARCH = {
     'yolo': DETECTION_STAGE_TYPE,
     'rf_detr': RFDETR_STAGE_TYPE,
+    'rf_detr_seg': RFDETR_SEG_INSTANCE_STAGE_TYPE,
 }
 DETECTION_ARCH = 'yolo'   # default arch (callers that omit detection_arch)
+
+# RF-DETR-Seg Output_Mode: per-instance masks (the default) or one semantic
+# mask. A top-level request / record field, deliberately NOT a key of
+# RFDETR_SEG_DEFAULTS (`_reject_unknown` treats the defaults' keys as the
+# accepted hyperparameter set; Seg spec Req 1.1, 5.5).
+OUTPUT_MODE_INSTANCE = 'instance'
+OUTPUT_MODE_SEMANTIC = 'semantic'
+OUTPUT_MODES = (OUTPUT_MODE_INSTANCE, OUTPUT_MODE_SEMANTIC)
+DEFAULT_OUTPUT_MODE = OUTPUT_MODE_INSTANCE
 
 # The SageMaker script-mode entry points (datasets/detection_training/) and
 # the files each needs as SIBLINGS at the sourcedir root. SageMaker's toolkit
@@ -60,12 +85,23 @@ DETECTION_ENTRY_POINT = 'train.py'
 ENTRY_POINT_FOR_ARCH = {
     'yolo': 'train.py',
     'rf_detr': 'train_rfdetr.py',
+    'rf_detr_seg': 'train_rfdetr_seg.py',
 }
 REQUIREMENTS_FOR_ARCH = {
     'yolo': 'requirements.txt',
     'rf_detr': 'requirements-rfdetr.txt',
+    'rf_detr_seg': 'requirements-rfdetr.txt',
 }
-# Shared helpers module both entry points import as a sibling (created by the
+# Further repo files an entry point imports as SIBLINGS from the sourcedir
+# root, beyond the fixed bundle below: the Seg trainer reuses
+# train_rfdetr.py's helpers (Seg spec DD1). Mirrored per entry point by
+# _SIBLINGS_FOR_ENTRY_POINT (see build_sourcedir_tarball).
+SOURCEDIR_SIBLINGS_FOR_ARCH = {
+    'yolo': (),
+    'rf_detr': (),
+    'rf_detr_seg': ('train_rfdetr.py',),
+}
+# Shared helpers module the entry points import as a sibling (created by the
 # RF-DETR spec; bundled when present so older code dirs still tar fine).
 DETECTION_SOURCEDIR_COMMON = '_common.py'
 DETECTION_CONVERTER_FILES = (
@@ -85,6 +121,7 @@ DETECTION_SOURCEDIR_FILES = (
 CHECKPOINT_MEMBER_FOR_ARCH = {
     'yolo': 'best.pt',
     'rf_detr': 'checkpoint_best_total.pth',
+    'rf_detr_seg': 'checkpoint_best_total.pth',
 }
 
 # RF-DETR Apache-2.0 detection checkpoints -> native square resolution.
@@ -107,6 +144,54 @@ RFDETR_RESOLUTION_MAX = 1120
 # Decoder query slots for Nano..Large; the device keeps the top_k detections
 # above score_threshold (set-based, no NMS).
 RFDETR_TOP_K = 300
+
+# RF-DETR-Seg checkpoints (all six Apache-2.0, Seg spec D4; rfdetr 1.10.1
+# config.py) -> native square resolution, rfdetr class, decoder query count
+# (num_queries == num_select, so the slot count is the device's top_k) and
+# the input block the resolution must be a multiple of (patch_size *
+# num_windows: 12 * 1 for nano, 12 * 2 for every other size). Mirrored in
+# detector_conversion.py, export_checkpoint.py and train_rfdetr_seg.py;
+# tests/test_rfdetr_seg_vocabulary_parity.py keeps the copies identical.
+RFDETR_SEG_SIZES = {
+    'nano': 312,
+    'small': 384,
+    'medium': 432,
+    'large': 504,
+    'xlarge': 624,
+    '2xlarge': 768,
+}
+RFDETR_SEG_CLASS_FOR_SIZE = {
+    'nano': 'RFDETRSegNano',
+    'small': 'RFDETRSegSmall',
+    'medium': 'RFDETRSegMedium',
+    'large': 'RFDETRSegLarge',
+    'xlarge': 'RFDETRSegXLarge',
+    '2xlarge': 'RFDETRSeg2XLarge',
+}
+RFDETR_SEG_QUERIES_FOR_SIZE = {
+    'nano': 100,
+    'small': 100,
+    'medium': 200,
+    'large': 200,
+    'xlarge': 300,
+    '2xlarge': 300,
+}
+RFDETR_SEG_INPUT_BLOCK_FOR_SIZE = {
+    'nano': 12,
+    'small': 24,
+    'medium': 24,
+    'large': 24,
+    'xlarge': 24,
+    '2xlarge': 24,
+}
+# Seg resolution bounds (Seg spec Req 1.2): multiples of both blocks,
+# bracketing the natives 312..768 with the detection bounds' headroom. The
+# Seg rule is "a multiple of the selected size's block within these", never
+# the detection step of 32 (312, 432, 504 and 624 are not multiples of 32).
+RFDETR_SEG_RESOLUTION_MIN = 240
+RFDETR_SEG_RESOLUTION_MAX = 1152
+# The mask head predicts on a resolution // 4 grid (rfdetr mask_downsample_ratio).
+RFDETR_SEG_MASK_DOWNSAMPLE = 4
 
 # SageMaker PyTorch GPU Deep Learning Container that runs train.py. The DLC
 # account is 763104351884 in every standard commercial region, so the region
@@ -139,9 +224,25 @@ RFDETR_DEFAULTS: Dict[str, Any] = {
     'score_threshold': 0.5,
     'onnx_opset': 17,
 }
+# RF-DETR-Seg schema: the RF-DETR shape with the Seg size table and the mask
+# binarisation threshold (Seg spec Req 1.1). `output_mode` is NOT here — see
+# DEFAULT_OUTPUT_MODE.
+RFDETR_SEG_DEFAULTS: Dict[str, Any] = {
+    'rfdetr_seg_size': 'small',
+    'resolution': None,
+    'epochs': 100,
+    'batch': 4,
+    'grad_accum': 4,
+    'lr': 1e-4,
+    'patience': 10,
+    'score_threshold': 0.5,
+    'mask_threshold': 0.5,
+    'onnx_opset': 17,
+}
 DEFAULTS_FOR_ARCH = {
     'yolo': DETECTION_DEFAULTS,
     'rf_detr': RFDETR_DEFAULTS,
+    'rf_detr_seg': RFDETR_SEG_DEFAULTS,
 }
 DETECTION_DEFAULT_INSTANCE_TYPE = 'ml.g4dn.xlarge'
 DETECTION_DEFAULT_MAX_RUNTIME_SECONDS = 10800
@@ -157,11 +258,37 @@ DETECTION_METRIC_DEFINITIONS = [
     {'Name': 'test:precision', 'Regex': r'"test_precision": ([0-9.eE+-]+)'},
     {'Name': 'test:recall', 'Regex': r'"test_recall": ([0-9.eE+-]+)'},
 ]
+# The Seg trainer's TEST METRICS line adds the mask mAP pair. Per arch (Seg
+# spec DD19): yolo / rf_detr map to the detection list OBJECT itself, so their
+# SageMaker requests stay byte-identical; rf_detr_seg to that list plus the
+# two mask regexes (`"test_map50": ` is not a substring of
+# `"test_mask_map50": `, so each regex matches only its own key).
+RFDETR_SEG_METRIC_DEFINITIONS = DETECTION_METRIC_DEFINITIONS + [
+    {'Name': 'test:mask-mAP50', 'Regex': r'"test_mask_map50": ([0-9.eE+-]+)'},
+    {'Name': 'test:mask-mAP50-95', 'Regex': r'"test_mask_map50_95": ([0-9.eE+-]+)'},
+]
+METRIC_DEFINITIONS_FOR_ARCH = {
+    'yolo': DETECTION_METRIC_DEFINITIONS,
+    'rf_detr': DETECTION_METRIC_DEFINITIONS,
+    'rf_detr_seg': RFDETR_SEG_METRIC_DEFINITIONS,
+}
 
 # Manifest attribute vocabulary (mirrors dda_manifest.py without importing it:
 # that module has its own heavier dependencies).
 DDA_BBOX_ATTRIBUTE = 'bounding-box'
 GT_OBJECT_DETECTION_TYPE = 'groundtruth/object-detection'
+# The Instance_Manifest (Seg spec Req 3.1): one line per image, an
+# `instance-segmentation` attribute whose annotations carry a box AND an
+# `rle`, with the GT-style metadata companion.
+DDA_INSTANCE_ATTRIBUTE = 'instance-segmentation'
+GT_INSTANCE_SEGMENTATION_TYPE = 'groundtruth/instance-segmentation'
+# The semantic-segmentation manifest's mask attribute (LFV path), named only
+# to reject it for Seg training with a precise message.
+DDA_MASK_REF_ATTRIBUTE = 'anomaly-mask-ref'
+# What validate_detection_manifest_entry may be asked to expect.
+MANIFEST_KIND_BBOX = 'bbox'
+MANIFEST_KIND_INSTANCE = 'instance'
+MANIFEST_KINDS = (MANIFEST_KIND_BBOX, MANIFEST_KIND_INSTANCE)
 
 _BASE_WEIGHTS_RE = re.compile(r'^[A-Za-z0-9._-]+\.pt$')
 
@@ -171,9 +298,9 @@ _BASE_WEIGHTS_RE = re.compile(r'^[A-Za-z0-9._-]+\.pt$')
 # ---------------------------------------------------------------------------
 
 def is_trained_detection_record(training_job: Dict) -> bool:
-    """True for a portal-trained Object Detection record whose training job
-    already exported ONNX (what training.py writes: model_type
-    'object_detection' + runtime 'onnx').
+    """True for a portal-trained Object Detection or RF-DETR-Seg record whose
+    training job already exported ONNX (what training.py writes: model_type
+    'object_detection' / 'instance_segmentation' + runtime 'onnx').
 
     All three conditions matter:
     - `runtime == 'onnx'` distinguishes this path from an `object_detection`
@@ -187,11 +314,22 @@ def is_trained_detection_record(training_job: Dict) -> bool:
     """
     if not isinstance(training_job, dict):
         return False
-    if training_job.get('model_type') != MODEL_TYPE_OBJECT_DETECTION:
+    if training_job.get('model_type') not in DETECTION_MODEL_TYPES:
         return False
     if str(training_job.get('runtime', '')).lower() != 'onnx':
         return False
     return training_job.get('source', 'trained') == 'trained'
+
+
+# ---------------------------------------------------------------------------
+# Seg_Switch (Seg spec DD7)
+# ---------------------------------------------------------------------------
+
+def rfdetr_seg_enabled() -> bool:
+    """Configuration-only off switch for RF-DETR-Seg: `PORTAL_RFDETR_SEG_ENABLED`
+    on the training / converter / packaging Lambdas. Absent (or anything but
+    the literal 'false') means ON — the same default the CDK applies."""
+    return os.environ.get('PORTAL_RFDETR_SEG_ENABLED', 'true').strip().lower() != 'false'
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +351,7 @@ def resolve_detection_training_image(region: str, override: Optional[str] = None
 # ---------------------------------------------------------------------------
 
 def normalize_detection_arch(arch: Optional[str]) -> str:
-    """'yolo' | 'rf_detr' (default 'yolo'); ValueError for anything else.
+    """'yolo' | 'rf_detr' | 'rf_detr_seg' (default 'yolo'); ValueError for anything else.
 
     ValueError is what training.py already maps to HTTP 400 for bad
     hyperparameters, so an unknown `detection_arch` takes the same path.
@@ -225,6 +363,33 @@ def normalize_detection_arch(arch: Optional[str]) -> str:
         raise ValueError(
             f"Invalid detection_arch '{arch}': expected one of {', '.join(DETECTION_ARCHES)}")
     return value
+
+
+def is_detr_family(arch: Optional[str]) -> bool:
+    """True for the DETR-family archs ('rf_detr', 'rf_detr_seg'): the branches
+    that used to test `== 'rf_detr'` and route everything else to YOLO use
+    this, with Seg-specific sub-branches only where the two differ."""
+    return arch in DETR_FAMILY_ARCHES
+
+
+def stage_type_for(arch: str, output_mode: Optional[str] = None) -> str:
+    """The on-device stage type for `arch` (Seg spec DD16).
+
+    For 'rf_detr_seg' the Output_Mode selects it: 'instance' (the default when
+    `output_mode` is None) -> rf_detr_instance_segmentation, 'semantic' ->
+    rf_detr_semantic_segmentation. Every other arch returns
+    STAGE_TYPE_FOR_ARCH[arch] and ignores `output_mode`.
+    """
+    arch = normalize_detection_arch(arch)
+    if arch != 'rf_detr_seg':
+        return STAGE_TYPE_FOR_ARCH[arch]
+    mode = DEFAULT_OUTPUT_MODE if output_mode is None else str(output_mode).strip().lower()
+    if mode not in OUTPUT_MODES:
+        raise ValueError(
+            f"Invalid output_mode '{output_mode}': expected one of {', '.join(OUTPUT_MODES)}")
+    if mode == OUTPUT_MODE_SEMANTIC:
+        return RFDETR_SEG_SEMANTIC_STAGE_TYPE
+    return RFDETR_SEG_INSTANCE_STAGE_TYPE
 
 
 # ---------------------------------------------------------------------------
@@ -271,14 +436,21 @@ def parse_detection_hyperparameters(raw: Optional[Dict], arch: str = DETECTION_A
     Raises ValueError naming the offending field (Requirement 3.8). Returns a
     dict with native types; parsing the result again is a no-op.
 
-    - yolo:    {imgsz, epochs, batch, base_weights, patience, score_threshold,
-                iou_threshold, onnx_opset} (unchanged from portal-detection-training)
-    - rf_detr: {rfdetr_size, resolution, epochs, batch, grad_accum, lr, patience,
-                score_threshold, onnx_opset}; `resolution` defaults to the
-                size's native value (RFDETR_SIZES).
+    - yolo:        {imgsz, epochs, batch, base_weights, patience, score_threshold,
+                    iou_threshold, onnx_opset} (unchanged from portal-detection-training)
+    - rf_detr:     {rfdetr_size, resolution, epochs, batch, grad_accum, lr, patience,
+                    score_threshold, onnx_opset}; `resolution` defaults to the
+                    size's native value (RFDETR_SIZES).
+    - rf_detr_seg: {rfdetr_seg_size, resolution, epochs, batch, grad_accum, lr,
+                    patience, score_threshold, mask_threshold, onnx_opset};
+                    `resolution` defaults to the size's native value
+                    (RFDETR_SEG_SIZES) and must be a multiple of the size's
+                    input block, never of 32.
     """
     arch = normalize_detection_arch(arch)
-    if arch == 'rf_detr':
+    if arch == 'rf_detr_seg':
+        return _parse_rfdetr_seg_hyperparameters(raw)
+    if is_detr_family(arch):
         return _parse_rfdetr_hyperparameters(raw)
     return _parse_yolo_hyperparameters(raw)
 
@@ -401,6 +573,83 @@ def _parse_rfdetr_hyperparameters(raw: Optional[Dict]) -> Dict[str, Any]:
     }
 
 
+def _parse_rfdetr_seg_hyperparameters(raw: Optional[Dict]) -> Dict[str, Any]:
+    """The RF-DETR parser's shape for RF-DETR-Seg (Seg spec Req 1.2): the Seg
+    size table, `resolution` validated as a positive multiple of the SELECTED
+    size's input block within the Seg bounds (default None = native),
+    `mask_threshold` strictly in (0, 1), and no `iou_threshold` key."""
+    raw = dict(raw or {})
+    _reject_unknown(raw, RFDETR_SEG_DEFAULTS)
+    d = RFDETR_SEG_DEFAULTS
+
+    size_value = raw.get('rfdetr_seg_size', d['rfdetr_seg_size'])
+    seg_size = str(size_value).strip().lower() if isinstance(size_value, str) else None
+    if seg_size not in RFDETR_SEG_SIZES:
+        raise ValueError(
+            "Invalid hyperparameter 'rfdetr_seg_size': must be one of "
+            f"{', '.join(RFDETR_SEG_SIZES)}")
+    block = RFDETR_SEG_INPUT_BLOCK_FOR_SIZE[seg_size]
+
+    # Absent / null -> the size's native resolution; anything else validated
+    # against the size's block (12 for nano, 24 otherwise), never against 32.
+    if raw.get('resolution') is None:
+        resolution = RFDETR_SEG_SIZES[seg_size]
+    else:
+        resolution = _as_int(raw, 'resolution', d)
+    if (resolution < RFDETR_SEG_RESOLUTION_MIN or resolution > RFDETR_SEG_RESOLUTION_MAX
+            or resolution % block != 0):
+        raise ValueError(
+            f"Invalid hyperparameter 'resolution': must be a multiple of {block} between "
+            f"{RFDETR_SEG_RESOLUTION_MIN} and {RFDETR_SEG_RESOLUTION_MAX} for RF-DETR-Seg {seg_size}")
+
+    epochs = _as_int(raw, 'epochs', d)
+    if not 1 <= epochs <= 1000:
+        raise ValueError("Invalid hyperparameter 'epochs': must be between 1 and 1000")
+
+    batch = _as_int(raw, 'batch', d)
+    if not 1 <= batch <= 64:
+        raise ValueError("Invalid hyperparameter 'batch': must be between 1 and 64")
+
+    grad_accum = _as_int(raw, 'grad_accum', d)
+    if not 1 <= grad_accum <= 64:
+        raise ValueError("Invalid hyperparameter 'grad_accum': must be between 1 and 64")
+
+    lr = _as_float(raw, 'lr', d)
+    if not 0.0 < lr < 1.0:
+        raise ValueError("Invalid hyperparameter 'lr': must be strictly between 0 and 1")
+
+    patience = _as_int(raw, 'patience', d)
+    if not 0 <= patience <= 1000:
+        raise ValueError("Invalid hyperparameter 'patience': must be between 0 and 1000")
+
+    score_threshold = _as_float(raw, 'score_threshold', d)
+    if not 0.0 < score_threshold < 1.0:
+        raise ValueError(
+            "Invalid hyperparameter 'score_threshold': must be strictly between 0 and 1")
+
+    mask_threshold = _as_float(raw, 'mask_threshold', d)
+    if not 0.0 < mask_threshold < 1.0:
+        raise ValueError(
+            "Invalid hyperparameter 'mask_threshold': must be strictly between 0 and 1")
+
+    onnx_opset = _as_int(raw, 'onnx_opset', d)
+    if not 11 <= onnx_opset <= 20:
+        raise ValueError("Invalid hyperparameter 'onnx_opset': must be between 11 and 20")
+
+    return {
+        'rfdetr_seg_size': seg_size,
+        'resolution': resolution,
+        'epochs': epochs,
+        'batch': batch,
+        'grad_accum': grad_accum,
+        'lr': lr,
+        'patience': patience,
+        'score_threshold': score_threshold,
+        'mask_threshold': mask_threshold,
+        'onnx_opset': onnx_opset,
+    }
+
+
 def detection_job_environment(
     manifest_s3: str,
     params: Dict[str, Any],
@@ -410,17 +659,23 @@ def detection_job_environment(
 ) -> Dict[str, str]:
     """The bare environment names the arch's entry point reads (all values strings).
 
-    Thresholds are NOT passed: they only shape the device manifest (record ->
-    packaging), never the training run. `BASE_WEIGHTS_S3` (and
-    `BASE_WEIGHTS_MEMBER` when the URI is a tarball the entry point must
-    extract the checkpoint from) are added only when a base model resolved
-    to real weights — the published-checkpoint env is unchanged.
+    Thresholds are NOT passed (score and, for Seg, mask): they only shape the
+    device manifest (record -> packaging), never the training run.
+    `BASE_WEIGHTS_S3` (and `BASE_WEIGHTS_MEMBER` when the URI is a tarball the
+    entry point must extract the checkpoint from) are added only when a base
+    model resolved to real weights — the published-checkpoint env is unchanged.
+    The two DETR-family envs differ only in the size variable: `RFDETR_SIZE`
+    for rf_detr, `RFDETR_SEG_SIZE` for rf_detr_seg.
     """
     arch = normalize_detection_arch(arch)
-    if arch == 'rf_detr':
+    if is_detr_family(arch):
+        if arch == 'rf_detr_seg':
+            size_env = {'RFDETR_SEG_SIZE': str(params['rfdetr_seg_size'])}
+        else:
+            size_env = {'RFDETR_SIZE': str(params['rfdetr_size'])}
         env = {
             'MANIFEST_S3': manifest_s3,
-            'RFDETR_SIZE': str(params['rfdetr_size']),
+            **size_env,
             'RESOLUTION': str(params['resolution']),
             'EPOCHS': str(params['epochs']),
             'BATCH': str(params['batch']),
@@ -471,6 +726,28 @@ def detect_bbox_attribute(entry: Dict) -> Optional[str]:
     return None
 
 
+def detect_instance_attribute(entry: Dict) -> Optional[str]:
+    """Name of the instance-segmentation label attribute in a manifest entry, or None.
+
+    Accepts the DDA literal `instance-segmentation` and a Ground Truth
+    job-named attribute whose `<name>-metadata.type` is
+    groundtruth/instance-segmentation (Seg spec Req 3.1, 3.5).
+    """
+    if not isinstance(entry, dict):
+        return None
+    if isinstance(entry.get(DDA_INSTANCE_ATTRIBUTE), dict):
+        return DDA_INSTANCE_ATTRIBUTE
+    for key, value in entry.items():
+        if not key.endswith('-metadata') or not isinstance(value, dict):
+            continue
+        if str(value.get('type', '')).lower() != GT_INSTANCE_SEGMENTATION_TYPE:
+            continue
+        base = key[:-len('-metadata')]
+        if isinstance(entry.get(base), dict):
+            return base
+    return None
+
+
 def class_names_from_class_map(class_map: Dict) -> List[str]:
     """Ordered class names from a GT/DDA `class-map` ({"0": "a", "1": "b"})."""
     ordered = []
@@ -479,16 +756,28 @@ def class_names_from_class_map(class_map: Dict) -> List[str]:
     return ordered
 
 
-def validate_detection_manifest_entry(entry: Any) -> Dict[str, Any]:
-    """Validate the first line of a manifest as an Object Detection entry.
+def validate_detection_manifest_entry(entry: Any, expected: str = MANIFEST_KIND_BBOX) -> Dict[str, Any]:
+    """Validate the first line of a manifest as an Object Detection entry
+    (`expected='bbox'`, exactly as before) or as an Instance_Manifest entry
+    for RF-DETR-Seg training (`expected='instance'`, Seg spec Req 3.5).
 
-    Returns {'valid', 'errors', 'class_names', 'attribute', 'detected_attributes'}.
-    Never suggests the Manifest Transformer: it has no ObjectDetection
-    handling, so that advice would be a dead end (gap doc §5.2).
+    Returns {'valid', 'errors', 'class_names', 'attribute', 'detected_attributes'};
+    the instance form adds 'kind': 'instance'. The two forms differ only in
+    the attribute they look for and in the message when it is missing — a
+    bbox-only manifest offered to Seg training and a semantic
+    (anomaly-mask-ref) manifest each get a precise one. Never suggests the
+    Manifest Transformer: it has no ObjectDetection / instance handling, so
+    that advice would be a dead end (gap doc §5.2).
     """
+    if expected not in MANIFEST_KINDS:
+        raise ValueError(
+            f"Invalid manifest kind '{expected}': expected one of {', '.join(MANIFEST_KINDS)}")
+    instance = expected == MANIFEST_KIND_INSTANCE
+    kind = {'kind': MANIFEST_KIND_INSTANCE} if instance else {}
+
     if not isinstance(entry, dict):
         return {'valid': False, 'errors': ['Manifest entry is not a JSON object'],
-                'class_names': [], 'attribute': None, 'detected_attributes': []}
+                'class_names': [], 'attribute': None, 'detected_attributes': [], **kind}
 
     detected = list(entry.keys())
     errors: List[str] = []
@@ -496,9 +785,21 @@ def validate_detection_manifest_entry(entry: Any) -> Dict[str, Any]:
     if not isinstance(entry.get('source-ref'), str) or not entry['source-ref']:
         errors.append('source-ref must be a non-empty string (S3 URI)')
 
-    attr = detect_bbox_attribute(entry)
+    attr = detect_instance_attribute(entry) if instance else detect_bbox_attribute(entry)
     if attr is None:
-        if 'anomaly-label' in entry:
+        if instance:
+            if DDA_MASK_REF_ATTRIBUTE in entry:
+                errors.append(
+                    'Manifest is a semantic segmentation manifest (anomaly-mask-ref); '
+                    'RF-DETR-Seg requires an instance-segmentation manifest')
+            elif detect_bbox_attribute(entry) is not None:
+                errors.append('RF-DETR-Seg needs instance masks; this manifest has boxes only')
+            else:
+                errors.append(
+                    "No instance-segmentation attribute found: expected 'instance-segmentation' "
+                    "with an 'instance-segmentation-metadata' companion, or a Ground Truth "
+                    f"attribute whose metadata type is '{GT_INSTANCE_SEGMENTATION_TYPE}'")
+        elif 'anomaly-label' in entry:
             errors.append(
                 'Manifest is a classification/segmentation manifest (anomaly-label) — '
                 'Object Detection requires a bounding-box manifest with '
@@ -509,7 +810,7 @@ def validate_detection_manifest_entry(entry: Any) -> Dict[str, Any]:
                 "'bounding-box-metadata' companion, or a Ground Truth attribute whose "
                 f"metadata type is '{GT_OBJECT_DETECTION_TYPE}'")
         return {'valid': False, 'errors': errors, 'class_names': [],
-                'attribute': None, 'detected_attributes': detected}
+                'attribute': None, 'detected_attributes': detected, **kind}
 
     bbox = entry.get(attr) or {}
     meta = entry.get(f'{attr}-metadata') or {}
@@ -538,6 +839,7 @@ def validate_detection_manifest_entry(entry: Any) -> Dict[str, Any]:
         'class_names': class_names,
         'attribute': attr,
         'detected_attributes': detected,
+        **kind,
     }
 
 
@@ -556,6 +858,9 @@ def build_detection_device_manifest(
     preserve_aspect: Optional[bool] = None,
     detection_arch: str = DETECTION_ARCH,
     top_k: int = RFDETR_TOP_K,
+    output_mode: Optional[str] = None,
+    mask_threshold: Optional[float] = None,
+    output_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """The on-device manifest.json for a portal-trained ONNX detector.
 
@@ -579,16 +884,46 @@ def build_detection_device_manifest(
                defaults to False because RF-DETR trains on an aspect-destroying
                square resize — letterboxing would be the same geometry
                mismatch in the other direction.
+    - rf_detr_seg (Seg spec §6, Req 6.1): the rf_detr manifest with the stage
+               type resolved by `stage_type_for(arch, output_mode)` (instance
+               -> rf_detr_instance_segmentation, semantic ->
+               rf_detr_semantic_segmentation; `output_mode` defaults to
+               DEFAULT_OUTPUT_MODE), `normalize: True`, `preserve_aspect`
+               defaulting to False, no `iou_threshold`. The TOP-LEVEL
+               `detection` block is the rf_detr block (`layout: 'rf_detr'`,
+               the decoder family) plus `mask_threshold` (default 0.5),
+               `output_mode`, `output_names` (when given) and, last,
+               `class_names` (when given) — never a stage-level block: the
+               Triton base model merges the top-level one into the stage with
+               setdefault. `model_graph.pixel_level_classes` = `['background']`
+               + the class names (or `class_<i>` placeholders where the trainer
+               path has none), exactly num_classes + 1 names in both modes,
+               because both modes write a Composite_Mask through the
+               anomaly-mask utilities. Instance mode keeps `task:
+               'object_detection'`; semantic mode omits `task` (the anomaly
+               default), the only other difference between the two modes.
+               `output_mode`, `mask_threshold` and `output_names` are ignored
+               for yolo / rf_detr.
 
-    `output_shape` is nominal for both arches ([1, C+4, 8400], exactly what
+    `output_shape` is nominal for every arch ([1, C+4, 8400], exactly what
     Smart Import writes; the device does not read it) — packaging replaces it
-    with the real exported shape recorded in training_metadata.json.
+    with the real exported shape(s) recorded in training_metadata.json.
+
+    Key order is fixed by construction (runtime, runtime_artifact, model_graph,
+    input_shape, preprocessing, [task], detection, dataset) and shared with
+    generate_dda_package, so the parity test can compare json.dumps output.
     """
     arch = normalize_detection_arch(detection_arch)
+    is_seg = arch == 'rf_detr_seg'
     if preserve_aspect is None:
         preserve_aspect = arch == 'yolo'
-    if arch != 'rf_detr' and iou_threshold is None:
+    if not is_detr_family(arch) and iou_threshold is None:
         raise ValueError("iou_threshold is required for a yolo detection manifest")
+    mode = None
+    if is_seg:
+        mode = DEFAULT_OUTPUT_MODE if output_mode is None else str(output_mode).strip().lower()
+        if mask_threshold is None:
+            mask_threshold = RFDETR_SEG_DEFAULTS['mask_threshold']
 
     image_width = int(image_width)
     image_height = int(image_height)
@@ -597,45 +932,62 @@ def build_detection_device_manifest(
     output_shape = [1, num_classes + 4, 8400]
 
     stage = {
-        'type': STAGE_TYPE_FOR_ARCH[arch],
+        'type': stage_type_for(arch, mode),
         'input_shape': input_shape,
         'output_shape': output_shape,
         'image_width': image_width,
         'image_height': image_height,
         'image_range_scale': True,
-        'normalize': arch == 'rf_detr',
+        'normalize': is_detr_family(arch),
         'threshold': float(score_threshold),
         'num_classes': num_classes,
     }
     detection: Dict[str, Any] = {
-        'layout': arch,
+        'layout': 'rf_detr' if is_seg else arch,
         'num_classes': num_classes,
         'score_threshold': float(score_threshold),
         'network_input': image_width,
         'preserve_aspect': bool(preserve_aspect),
     }
-    if arch == 'rf_detr':
+    if is_detr_family(arch):
         detection['top_k'] = int(top_k)
     else:
         detection['iou_threshold'] = float(iou_threshold)
+    if is_seg:
+        detection['mask_threshold'] = float(mask_threshold)
+        detection['output_mode'] = mode
+        if output_names:
+            detection['output_names'] = [str(n) for n in output_names]
+    model_graph: Dict[str, Any] = {
+        'model_graph_type': 'single_stage_model_graph',
+        'stages': [stage],
+    }
+    if is_seg:
+        # Index 0 = background, index i + 1 = class i; exactly num_classes + 1
+        # names whatever the caller handed in (names are truncated to or
+        # padded up to num_classes with placeholders).
+        labels = [str(c) for c in (class_names or [])][:num_classes]
+        labels += [f'class_{i}' for i in range(len(labels), num_classes)]
+        model_graph['pixel_level_classes'] = {
+            'names': ['background'] + labels,
+            'normal_ids': [0],
+        }
     manifest: Dict[str, Any] = {
         'runtime': 'onnx',
         'runtime_artifact': 'model.onnx',
-        'model_graph': {
-            'model_graph_type': 'single_stage_model_graph',
-            'stages': [stage],
-        },
+        'model_graph': model_graph,
         'input_shape': input_shape,
         'preprocessing': {
             'resize': [image_width, image_height],
             'channel_order': 'RGB',
         },
-        'task': MODEL_TYPE_OBJECT_DETECTION,
-        'detection': detection,
-        'dataset': {
-            'image_width': image_width,
-            'image_height': image_height,
-        },
+    }
+    if not (is_seg and mode == OUTPUT_MODE_SEMANTIC):
+        manifest['task'] = MODEL_TYPE_OBJECT_DETECTION
+    manifest['detection'] = detection
+    manifest['dataset'] = {
+        'image_width': image_width,
+        'image_height': image_height,
     }
     if class_names:
         manifest['detection']['class_names'] = [str(c) for c in class_names]
@@ -649,6 +1001,9 @@ def build_detection_device_manifest(
 _REQUIREMENTS_FOR_ENTRY_POINT = {
     ENTRY_POINT_FOR_ARCH[a]: REQUIREMENTS_FOR_ARCH[a] for a in DETECTION_ARCHES
 }
+_SIBLINGS_FOR_ENTRY_POINT = {
+    ENTRY_POINT_FOR_ARCH[a]: SOURCEDIR_SIBLINGS_FOR_ARCH[a] for a in DETECTION_ARCHES
+}
 
 
 def build_sourcedir_tarball(
@@ -660,8 +1015,10 @@ def build_sourcedir_tarball(
 
     Members: the named entry point, ITS requirements file renamed to
     `requirements.txt` (the SageMaker toolkit installs exactly that name), the
-    two converter files, and `_common.py` when `code_dir` has one. Nothing
-    else — each job's sourcedir stays minimal (Req 3.4) and the other arch's
+    two converter files, the entry point's sibling modules
+    (`_SIBLINGS_FOR_ENTRY_POINT`: train_rfdetr.py for the Seg trainer, none
+    for the others) and `_common.py` when `code_dir` has one. Nothing else —
+    each job's sourcedir stays minimal (Req 3.4) and the other arch's
     heavyweight pins never get installed.
 
     Everything is flat: train*.py resolves manifest_to_detector_dataset.py and
@@ -688,6 +1045,7 @@ def build_sourcedir_tarball(
     # (source filename in code_dir, name inside the tarball)
     members = [(entry_point, entry_point), (requirements_src, 'requirements.txt')]
     members += [(name, name) for name in DETECTION_CONVERTER_FILES]
+    members += [(name, name) for name in _SIBLINGS_FOR_ENTRY_POINT[entry_point]]
     if os.path.isfile(os.path.join(code_dir, DETECTION_SOURCEDIR_COMMON)):
         members.append((DETECTION_SOURCEDIR_COMMON, DETECTION_SOURCEDIR_COMMON))
     for src, _arcname in members:
@@ -708,7 +1066,7 @@ def build_sourcedir_tarball(
 
 BASE_MODEL_KINDS = ('published', 'training_job', 'imported')
 
-_ARTICLE_FOR_ARCH = {'yolo': 'a', 'rf_detr': 'an'}
+_ARTICLE_FOR_ARCH = {'yolo': 'a', 'rf_detr': 'an', 'rf_detr_seg': 'an'}
 
 
 def _record_display_name(record: Dict, fallback: str) -> str:

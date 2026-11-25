@@ -47,6 +47,14 @@ from hypothesis import settings as _hyp_settings
 _hyp_settings.register_profile("fast", max_examples=25, deadline=None)
 _hyp_settings.register_profile("ci", max_examples=100)
 _hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "fast"))
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "timing: records decode costs on the device under test (rfdetr-seg-support "
+        "spike S6); skipped unless DDA_SEG_TIMING=1 is set.",
+    )
 def import_mocker(name, *args,**kwargs):
     if name == 'dda_logging.logger':
         return mock_logger

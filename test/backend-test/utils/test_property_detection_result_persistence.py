@@ -372,9 +372,10 @@ def test_db_marshalled_detection_result_validates_for_storage(inference_res):
     validates for storage.
 
     Arbitrary ``detection_count`` and arbitrary detections with arbitrary class
-    labels and bounding boxes are generated as inputs; they are correctly not
-    persisted (the stored row has no such columns), and the fix must not change
-    that.
+    labels and bounding boxes are generated as inputs; ``detection_count`` is
+    correctly not persisted (the stored row has no such column), while the
+    detections map is persisted in list form as the ``detections`` column
+    (rfdetr-seg-support Req 10.5b) -- and the row still validates for storage.
 
     Validates: Requirements 2.6, 2.8
     """
@@ -389,9 +390,21 @@ def test_db_marshalled_detection_result_validates_for_storage(inference_res):
         "bugfix.md 1.10: the db marshal must keep typing the capture "
         "{!r}; got {!r}".format(DETECTION, row["prediction"])
     )
-    assert "detections" not in row and "detection_count" not in row, (
-        "the detections block is not a stored column and must not leak into the row"
+    assert "detection_count" not in row, (
+        "detection_count is not a stored column and must not leak into the row"
     )
+    # rfdetr-seg-support Req 10.5b: the Detection_List IS stored, in list form
+    # (the map's entries in ascending integer key order); an empty map writes
+    # no key, like every other stripped None.
+    block = inference_res["inferenceResult"]["detections"]
+    if block:
+        assert row.get("detections") == [block[k] for k in sorted(block, key=int)], (
+            "the detections column must hold the map's entries in ascending key order"
+        )
+    else:
+        assert "detections" not in row, (
+            "an empty detections map must not write a detections column"
+        )
     _assert_validates_and_round_trips(row)
 
 
