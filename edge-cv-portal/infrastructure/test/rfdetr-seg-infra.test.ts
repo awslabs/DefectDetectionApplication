@@ -251,13 +251,14 @@ describe('Seg_Switch environment (Requirement 15.1)', () => {
 // ---------------------------------------------------------------------------
 describe('RF-DETR-Seg feature floor (Requirement 14.8)', () => {
   // Filled by spec group 20 (task 20.1) with the first Seg-capable LocalServer
-  // build of each architecture; arm64_cpu has no Portal build target and is
+  // build of each architecture, arm64_jp6 then raised to the rebuilt image a
+  // JP6 device verified (group 22). arm64_cpu (no Portal build target) and
+  // arm64_jp7 (no device verified its build, Requirement 14.8 d iii) are
   // listed as unverified in the backend coverage test, which requires every
   // other packager arch here. This expectation moves with the literal.
   const DEPLOYED_FLOOR: Record<string, string> = {
     arm64_jp5: '1.0.62',
-    arm64_jp6: '1.0.84',
-    arm64_jp7: '1.0.59',
+    arm64_jp6: '1.0.85',
     x86_64: '1.0.56',
     x86_64_nvidia: '1.0.56',
   };

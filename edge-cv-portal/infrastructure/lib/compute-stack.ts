@@ -846,16 +846,20 @@ export class ComputeStack extends cdk.Stack {
     // instead of here. WORKFLOW_MIN_LOCAL_SERVER_VERSIONS above and the
     // stream literal are not raised for Seg.
     // Filled by spec group 20 (task 20.1) from the Requirement 14.5 builds of
-    // the Seg-capable LocalServer: arm64_jp5 / arm64_jp6 / arm64_jp7 are the
-    // first arm64JP5 / arm64JP6 / arm64JP7 builds carrying the Seg contract,
-    // x86_64 and x86_64_nvidia the first .amd64 build (both arch ids run that
-    // component). arm64_cpu has no Portal build target and is listed as
-    // unverified in tests/test_rfdetr_seg_feature_floor_coverage.py.
+    // the Seg-capable LocalServer: arm64_jp5 / arm64_jp6 are the first
+    // arm64JP5 / arm64JP6 builds carrying the Seg contract, x86_64 and
+    // x86_64_nvidia the first .amd64 build (both arch ids run that
+    // component). arm64_jp6 was raised to the rebuilt image verified on a
+    // JP6 device (spec group 22; Requirement 14.8 d ii: a failed build stays
+    // below the floor). arm64_jp7 has no entry: no JP7 device was available
+    // for the Requirement 18 run (14.8 d iii), so its candidate build stays
+    // unverified and Seg workflows are refused for that architecture until a
+    // device verifies it. arm64_cpu has no Portal build target. Both are
+    // listed as unverified in tests/test_rfdetr_seg_feature_floor_coverage.py.
     const rfDetrSegFeatureFloorEnvironment = {
       WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
         arm64_jp5: '1.0.62',
-        arm64_jp6: '1.0.84',
-        arm64_jp7: '1.0.59',
+        arm64_jp6: '1.0.85',
         x86_64: '1.0.56',
         x86_64_nvidia: '1.0.56',
       }),

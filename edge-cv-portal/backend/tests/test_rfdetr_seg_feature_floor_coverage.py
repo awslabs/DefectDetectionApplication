@@ -75,13 +75,21 @@ FEATURE_FLOOR_ENV = 'WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS'
 #: it). Every other architecture in ARCH_TO_LOCAL_SERVER_COMPONENT must have
 #: a floor once the literal carries any entry. Remove an entry here in the
 #: same change that adds its floor to compute-stack.ts. Spec group 20 filled
-#: the literal and recorded this set together (task 20.1).
+#: the literal and recorded this set together (task 20.1); the JP6 hardware
+#: run (group 22) then removed the arm64_jp7 entry under 14.8 (d) iii.
 UNVERIFIED_RFDETR_SEG_ARCHES = {
     "arm64_cpu": (
         "spec task 18.6 fallback (Requirement 14.8 d iii): the generic arm64 "
         "CPU LocalServer has no Portal build target and no Build Fleet job has "
         "ever built it, so no Seg-capable build of it exists; the stream "
         "feature floor left arm64_cpu out for the same reason"),
+    "arm64_jp7": (
+        "spec group 21 deferred (Requirement 14.8 d iii, 18.6): no JP7 device "
+        "was available in the verification window, so the Seg-capable "
+        "arm64JP7 candidate build (published, built with the same source as "
+        "the JP6 build that group 22 verified) is unverified on hardware; the "
+        "entry is re-added when a JP7 device runs the Requirement 18 legs on "
+        "that build (follow-up tasks 21.1-21.3, 23.1)"),
 }
 
 #: Semantic version shape every floor value must carry (plain N.N.N).
