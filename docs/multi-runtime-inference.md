@@ -1091,10 +1091,23 @@ Build Fleet server in the Export_Image container (16 vCPU, CPU only,
 | 10 | 49 ms | 20 ms | 6 ms | 22 ms | 46 KB |
 | 100 | 447 ms | 177 ms | 58 ms | 212 ms | 458 KB |
 
-The Jetson figure (the lab JP6 Orin devkit) is taken during the on-device
-verification of the feature and recorded here with it. These numbers are the
-post-processing cost per frame on top of the ONNX run, and scale with the
-number of kept instances, not with `top_k`.
+The same fixture (`test/backend-test/test_rf_detr_seg_postprocessor.py`,
+`-k timing` with `DDA_SEG_TIMING=1`) on the lab JP6 Orin devkit (12-core
+aarch64, MAXN, CPU only, in the published arm64JP6 image's interpreter —
+numpy 1.26.4, OpenCV 4.11.0; median of three runs, 2026-11-24). The fixture
+times the decode as one step (sigmoid + bilinear resize + threshold +
+packbits) and the serialisation as unpack + RLE encode:
+
+| instances | decode total | unpack + paint composite | unpack + RLE encode | bare unpack | `mask_rle` text |
+|---|---|---|---|---|---|
+| 10 | 32 ms | 8 ms | 85 ms | 3 ms | 50 KB |
+| 100 | 155 ms | 75 ms | 802 ms | 30 ms | 501 KB |
+
+These numbers are the post-processing cost per frame on top of the ONNX
+run, and scale with the number of kept instances, not with `top_k`. The
+Canonical_RLE encode is the dominant cost on the device (about 8 ms per 1080p
+instance); the packed-bit storage itself (`packbits` / `unpackbits`) stays
+below 0.3 ms per instance.
 
 ### 24.7 Where the record goes on the device
 
