@@ -30,6 +30,11 @@ for identical inputs (Property 27):
    (``ok``, ``warning`` or ``error``) is recorded on its node status and
    on the per-run document (:data:`OUTCOMES_KEY`), where the output
    bindings read it for gating.
+   The same pass evaluates every ``layout_check`` binding
+   (car-assembly-check Requirements 5.4, 5.5; design section 3) through
+   the vendored ``workflow_core.analytics.layout`` over the capture
+   record's raw entries (which carry ``mask_rle``) joined to the
+   Detection_IDs, and merges ``layout.<nodeId>``; it never carries a mask.
 2. :func:`evaluate_event_gates` runs in ``OutputBindingProcessor`` before
    the inference filters, conditionals and outputs. It steps every
    ``event_gate`` binding in topological order over the full run metadata
@@ -41,24 +46,31 @@ Gating is direct-upstream, like chained inference filters: an analytics
 ``error`` outcome, or a gate that does not pass, gates only its direct
 downstream nodes, and neither fails the run.
 """
+import json
 import logging
+import os
 import threading
+import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from workflow_engine.vendor.workflow_core.analytics import scene
+from workflow_engine import detections as detection_records
+from workflow_engine.vendor.workflow_core.analytics import layout, scene
 
 logger = logging.getLogger(__name__)
 
 DETECTION_COUNTER_BINDING = "detection_counter"
 OBJECT_ASSOCIATION_BINDING = "object_association"
 EVENT_GATE_BINDING = "event_gate"
-SCENE_ANALYTICS_BINDINGS = (DETECTION_COUNTER_BINDING, OBJECT_ASSOCIATION_BINDING, EVENT_GATE_BINDING)
+LAYOUT_CHECK_BINDING = "layout_check"
+SCENE_ANALYTICS_BINDINGS = (DETECTION_COUNTER_BINDING, OBJECT_ASSOCIATION_BINDING, EVENT_GATE_BINDING,
+                            LAYOUT_CHECK_BINDING)
 
 DETECTIONS_KEY = "detections"
 FRAME_KEY = "frame"
 COUNTER_KEY = "counter"
 ASSOCIATION_KEY = "association"
 EVENT_KEY = "event"
+LAYOUT_KEY = "layout"
 
 #: The per-run document key carrying the counter and association outcomes
 #: (``{nodeId: "ok" | "warning" | "error"}``) from the executor to the
@@ -134,7 +146,98 @@ def _section(metadata: Dict[str, Any], key: str) -> Dict[str, Any]:
     return section
 
 
+def capture_record_input_size(output_dir: Optional[str],
+                              capture_id: Optional[str]) -> Optional[Tuple[int, int]]:
+    """The ``(width, height)`` of the image the capture record's
+    ``deviceFleetAuxiliaryInputs`` reference first as ``file://``, read
+    from the image header only (``PIL.Image.open`` decodes no pixels), or
+    None when there is no record, no such reference or no readable image
+    (design DD4). Best-effort: never raises."""
+    if not output_dir or not capture_id:
+        return None
+    path = os.path.join(output_dir, "{0}.jsonl".format(capture_id))
+    try:
+        with open(path, "r") as jsonl_file:
+            lines = [line for line in jsonl_file.read().splitlines() if line.strip()]
+        if not lines:
+            return None
+        inputs = json.loads(lines[-1]).get("deviceFleetAuxiliaryInputs") or []
+        for entry in inputs:
+            ref = entry.get("data-ref") if isinstance(entry, dict) else None
+            if isinstance(ref, str) and ref.startswith("file://"):
+                from PIL import Image  # lazy: only a Layout_Check run needs it
+                with Image.open(ref[len("file://"):]) as image:
+                    width, height = image.size
+                return int(width), int(height)
+    except Exception:  # noqa: BLE001 - best-effort, the frame fallback follows
+        logger.debug("Could not read the input image size of capture %s", capture_id, exc_info=True)
+    return None
+
+
+def _layout_pieces_text(node_metadata: Dict[str, Any]) -> str:
+    """``rear_fender misplaced (IoU 0.12), roof missing``: every piece whose
+    status is not ``ok``, in the section's order."""
+    parts = []
+    for label, piece in (node_metadata.get("pieces") or {}).items():
+        status = piece.get("status") if isinstance(piece, dict) else None
+        if status is None or status == layout.STATUS_OK:
+            continue
+        found = [detection for detection in piece.get("detections") or [] if isinstance(detection, dict)]
+        text = "{0} {1}".format(label, status)
+        if status == layout.STATUS_DUPLICATE:
+            text += " ({0})".format(len(found))
+        elif status == layout.STATUS_MISPLACED and piece.get("iou") is not None:
+            text += " (IoU {0:.2f})".format(piece["iou"])
+        elif status == layout.STATUS_MISPLACED:
+            unmasked = [str(detection["id"]) for detection in found
+                        if detection.get("iou") is None and detection.get("id") is not None]
+            text += " (no mask: {0})".format(", ".join(unmasked)) if unmasked else " (no mask)"
+        parts.append(text)
+    return ", ".join(parts)
+
+
+def _layout_ignored_suffix(node_metadata: Dict[str, Any]) -> str:
+    """``; ignored outside the car outline: rear_fender (1)`` when the check
+    ignored an instance (design DD23), else empty."""
+    counts: Dict[str, int] = {}
+    for entry in node_metadata.get("ignored") or []:
+        if isinstance(entry, dict):
+            label = str(entry.get("class_label"))
+            counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return ""
+    return "; ignored outside the car outline: {0}".format(
+        ", ".join("{0} ({1})".format(label, counts[label]) for label in sorted(counts)))
+
+
+def _layout_verdict(node_metadata: Dict[str, Any]) -> str:
+    """``PASS``, or ``FAIL`` with the pieces that are not ``ok``."""
+    if node_metadata.get("pass") is True:
+        return "PASS"
+    pieces = _layout_pieces_text(node_metadata)
+    return "FAIL: {0}".format(pieces) if pieces else "FAIL"
+
+
+def _layout_warning(problems: List[str], node_metadata: Dict[str, Any]) -> str:
+    """The warning text of a Layout_Check node: ``no detections to check``
+    or ``frame size unknown`` (every piece is missing then), else the
+    verdict, which names a mask-less detection (``roof misplaced (no mask:
+    b07d44aa)``), followed by the other problems (``unexpected classes:
+    wheel``) and the ignored instances."""
+    unknown = [problem for problem in problems
+               if problem in (layout._PROBLEM_NO_DETECTIONS, layout._PROBLEM_FRAME_UNKNOWN)]
+    parts = list(unknown)
+    if not unknown and _layout_pieces_text(node_metadata):
+        parts.append(_layout_verdict(node_metadata))
+    parts.extend(problem for problem in problems
+                 if problem not in unknown and " has no usable mask: " not in problem)
+    text = "; ".join(parts) if parts else _layout_verdict(node_metadata)
+    return text + _layout_ignored_suffix(node_metadata)
+
+
 def _summary(kind: str, node_metadata: Dict[str, Any]) -> str:
+    if kind == LAYOUT_CHECK_BINDING:
+        return _layout_verdict(node_metadata) + _layout_ignored_suffix(node_metadata)
     if kind == DETECTION_COUNTER_BINDING:
         counted = ["{0} {1}".format(key or "(unlabeled)", count)
                    for key, count in (node_metadata.get("counts") or {}).items() if count]
@@ -143,7 +246,7 @@ def _summary(kind: str, node_metadata: Dict[str, Any]) -> str:
 
 
 def _record_outcome(collector, node_id: str, kind: str, outcome: Dict[str, Any],
-                    node_metadata: Dict[str, Any]) -> None:
+                    node_metadata: Dict[str, Any], failure_text: Optional[str] = None) -> None:
     """The node's status: a summary detail when ok, a warning or a
     failure (which never fails the run) carrying the problems."""
     if collector is None:
@@ -151,7 +254,10 @@ def _record_outcome(collector, node_id: str, kind: str, outcome: Dict[str, Any],
     problems = "; ".join(str(problem) for problem in outcome.get("problems") or ())
     try:
         if outcome.get("outcome") == scene.OUTCOME_ERROR:
-            collector.mark_failure(node_id, problems or "the node could not be evaluated")
+            collector.mark_failure(node_id, failure_text or problems or "the node could not be evaluated")
+        elif outcome.get("outcome") == scene.OUTCOME_WARNING and kind == LAYOUT_CHECK_BINDING:
+            collector.mark_warning(node_id, _layout_warning(
+                [str(problem) for problem in outcome.get("problems") or ()], node_metadata))
         elif outcome.get("outcome") == scene.OUTCOME_WARNING:
             collector.mark_warning(node_id, "{0} ({1})".format(_summary(kind, node_metadata), problems)
                                    if problems else _summary(kind, node_metadata))
@@ -161,22 +267,91 @@ def _record_outcome(collector, node_id: str, kind: str, outcome: Dict[str, Any],
         logger.debug("Could not record the outcome of node %s", node_id, exc_info=True)
 
 
+def _layout_inputs(output_dir: Optional[str], capture_id: Optional[str],
+                   tag_values: Dict[str, Any]) -> Tuple[Optional[List[dict]], Any]:
+    """The Layout_Check's entries and frame size for the run: the capture
+    record's raw entries (with ``mask_rle``) carrying the Detection_IDs of
+    the run's Detection_List (design DD5), or None when no raw entries
+    exist; the input image's size, else ``metadata.frame`` (DD4)."""
+    raw = detection_records.read_detections(output_dir, capture_id)
+    entries = (layout.attach_detection_ids(raw, tag_values.get(DETECTIONS_KEY))
+               if isinstance(raw, list) else None)
+    size = capture_record_input_size(output_dir, capture_id) or scene._frame_dimensions(tag_values.get(FRAME_KEY))
+    return entries, size
+
+
+def _check_layout(parameters: Dict[str, Any], entries: Optional[List[dict]],
+                  size: Any) -> Tuple[Dict[str, Any], Optional[str]]:
+    """``check_layout``'s result for one node, the ``expected_regions``
+    parse problems first, and the failure text when the value is
+    unusable."""
+    regions, parse_problems = layout.parse_expected_regions(parameters.get("expected_regions"))
+    outcome = layout.check_layout(
+        entries, size, regions,
+        min_iou=parameters.get("min_iou", layout.DEFAULT_MIN_IOU),
+        min_confidence=parameters.get("min_confidence", layout.DEFAULT_MIN_CONFIDENCE),
+        min_outline_overlap=parameters.get("min_outline_overlap", layout.DEFAULT_MIN_OUTLINE_OVERLAP),
+    )
+    failure_text = None
+    if regions is None:
+        outcome["problems"] = list(parse_problems) + list(outcome.get("problems") or ())
+        outcome["outcome"] = scene.OUTCOME_ERROR
+        failure_text = "expected_regions: {0}".format("; ".join(parse_problems or outcome["problems"]))
+    return outcome, failure_text
+
+
+def _record_duration(collector, node_id: Optional[str], started: float) -> None:
+    """The Layout_Check times itself (design DD6): the scene-analytics
+    step has no duration sink, and the counters stay untimed."""
+    if collector is None:
+        return
+    try:
+        collector.record_invocation_duration(node_id, (time.monotonic() - started) * 1000.0)
+    except Exception:  # noqa: BLE001 - node status is best-effort
+        logger.debug("Could not record the duration of node %s", node_id, exc_info=True)
+
+
 def apply_scene_analytics(document: Dict[str, Any], tag_values: Dict[str, Any],
-                          frame_size: Any = None, collector=None) -> Dict[str, str]:
-    """Evaluate the document's counters and associations over the run's
-    Detection_List and merge their metadata into ``tag_values`` (see the
-    module docstring). Returns ``{nodeId: outcome}``, also stored on the
-    per-run document under :data:`OUTCOMES_KEY`."""
+                          frame_size: Any = None, collector=None,
+                          output_dir: Optional[str] = None,
+                          capture_id: Optional[str] = None) -> Dict[str, str]:
+    """Evaluate the document's counters, associations and layout checks
+    over the run's Detection_List and merge their metadata into
+    ``tag_values`` (see the module docstring). ``output_dir`` and
+    ``capture_id`` locate the capture record a layout check reads its
+    masks and frame size from. Returns ``{nodeId: outcome}``, also stored
+    on the per-run document under :data:`OUTCOMES_KEY`."""
     ordered = [binding for binding in topological_order(_bindings(document))
-               if binding.get("binding") in (DETECTION_COUNTER_BINDING, OBJECT_ASSOCIATION_BINDING)]
+               if binding.get("binding") in (DETECTION_COUNTER_BINDING, OBJECT_ASSOCIATION_BINDING,
+                                             LAYOUT_CHECK_BINDING)]
     outcomes: Dict[str, str] = {}
     if not ordered:
         return outcomes
     detections = tag_values.get(DETECTIONS_KEY)
+    layout_inputs: Optional[Tuple[Optional[List[dict]], Any]] = None
     for binding in ordered:
         kind = binding.get("binding")
         node_id = binding.get("nodeId")
         parameters = binding.get("parameters") or {}
+        if kind == LAYOUT_CHECK_BINDING:
+            started = time.monotonic()
+            if layout_inputs is None:
+                # Read once per run, on the first layout check.
+                layout_inputs = _layout_inputs(output_dir, capture_id, tag_values)
+            outcome, failure_text = _check_layout(parameters, *layout_inputs)
+            node_metadata = layout.run_metadata(outcome)
+            _section(tag_values, LAYOUT_KEY)[node_id] = node_metadata
+            # An ``error`` gates only the bindings wired directly to this
+            # node (analytics_gating, like a counter's). In the sample
+            # topology that is a ``conditional``, which is never gated, so
+            # its ``reject`` port still publishes the ``pass = false``
+            # verdict: fail-closed, and unreachable once V14 validates.
+            outcomes[node_id] = outcome["outcome"]
+            _record_outcome(collector, node_id, kind, outcome, node_metadata, failure_text)
+            _record_duration(collector, node_id, started)
+            if outcome["outcome"] != scene.OUTCOME_OK:
+                logger.warning("Layout check node %s: %s", node_id, "; ".join(outcome.get("problems") or ()))
+            continue
         if kind == DETECTION_COUNTER_BINDING:
             outcome = scene.count_detections(
                 detections,

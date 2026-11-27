@@ -283,5 +283,6 @@ def document_has_stream_or_analytics(document: Any) -> bool:
         return True
     bindings = document.get("executorBindings") if isinstance(document, dict) else None
     return any(isinstance(binding, Mapping)
-               and binding.get("binding") in ("detection_counter", "object_association", "event_gate")
+               and binding.get("binding") in ("detection_counter", "object_association", "event_gate",
+                                              "layout_check")
                for binding in (bindings or []))
