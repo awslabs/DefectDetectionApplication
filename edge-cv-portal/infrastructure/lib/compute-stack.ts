@@ -2887,7 +2887,9 @@ export class ComputeStack extends cdk.Stack {
     // Auto-label queue + DLQ (camera-shadow queue pattern). The visibility
     // timeout equals the consumer Lambda timeout (300 s) so a message is
     // never redelivered while its Bedrock/SAM inference is still running;
-    // after 3 failed receives the message dead-letters.
+    // after 3 failed receives the message dead-letters. The consumer also
+    // sends records back to this queue: those beyond Settings → Auto-Labeling's
+    // Images per worker run, as new messages for another run.
     const ddaAutolabelDlq = new sqs.Queue(this, 'DdaAutolabelDLQ', {
       queueName: 'dda-portal-autolabel-queue-dlq',
       retentionPeriod: cdk.Duration.days(14),
@@ -3098,6 +3100,10 @@ export class ComputeStack extends cdk.Stack {
         // as LLM_MODEL_IMAGE_LIMITS and read from the same persisted settings
         // item the preview reads (llm-model-token-and-image-sizing Req 1.6, 1.8).
         LLM_MODEL_TOKEN_LIMITS: llmModelTokenLimits,
+        // The worker sends the records of a run beyond Settings → Auto-Labeling's
+        // Images per worker run back to its own queue; read by
+        // dda_autolabel_worker.py.
+        AUTOLABEL_QUEUE_URL: ddaAutolabelQueue.queueUrl,
       },
       // The same imagingLayer LayerVersion DdaLabelingWorker and
       // DdaLabelingHandler attach: one Pillow build across every function that
@@ -3120,6 +3126,11 @@ export class ComputeStack extends cdk.Stack {
       batchSize: 5,
       reportBatchItemFailures: true,
     }));
+
+    // Records beyond Settings → Auto-Labeling's Images per worker run go back
+    // to the queue as new messages. The queue's AWS managed key needs no KMS
+    // grant (see the managed-key comment above the auto-label queue).
+    ddaAutolabelQueue.grantSendMessages(ddaAutolabelWorker);
 
     // Bedrock vision pre-labeling via the Converse API (authorized by
     // bedrock:InvokeModel). The model id is runtime job configuration, so

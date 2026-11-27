@@ -21,6 +21,7 @@ import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import { useAuth } from '../contexts/AuthContext';
 import BedrockConfigurationSettings from '../components/BedrockConfigurationSettings';
 import BuildInfrastructureSettings from '../components/BuildInfrastructureSettings';
+import AutoLabelingSettings from '../components/AutoLabelingSettings';
 import AssistantSettings from '../components/assistant/AssistantSettings';
 import { assistantConfigured } from '../components/assistant/assistantApi';
 
@@ -433,6 +434,13 @@ export default function Settings() {
                         },
                       ]
                     : []),
+                  // Settings → Auto-Labeling: Images per worker run,
+                  // PortalAdmin-only.
+                  {
+                    id: 'auto-labeling',
+                    label: 'Auto-Labeling',
+                    content: <AutoLabelingSettings />,
+                  },
                 ]
               : []),
             {

@@ -249,8 +249,9 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
     const [, fn] = lambdaByHandler('dda_autolabel_worker.handler');
     const env = fn.Properties.Environment.Variables;
     // lambdaEnvironment (the shared portal Lambda environment) plus the
-    // three DdaAutolabelWorker-specific keys (CODE_VERSION and the two
-    // per-model `llm:` settings), plus exactly one key gained by the
+    // DdaAutolabelWorker-specific keys (CODE_VERSION, the two per-model
+    // `llm:` settings and, since autolabel-time-limits-settings,
+    // AUTOLABEL_QUEUE_URL), plus exactly one key gained by the
     // default-ON Worker_Flag (portal-deploy-flag-hardening Req 6.1):
     // GROUNDED_SAM_WORKER_FUNCTION_NAME. No other key added, none removed:
     // the grounded-sam family's prompt inputs ride the job record, not the
@@ -278,9 +279,18 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
     // S3 grants were synthesized with (design I5), carried on every handler
     // like the two keys above. SUPERSEDED expectation, recorded verbatim: the
     // list below without 'DATA_PLANE_SCOPING'.
+    //
+    // REPOINTED (autolabel-time-limits-settings): DdaAutolabelWorker gained
+    // AUTOLABEL_QUEUE_URL, its own queue's URL, to which it sends the records
+    // of a run beyond Settings → Auto-Labeling's Images per worker run
+    // (autolabel-run-limit-infra.test.ts pins its value and the send grant).
+    // The oracle gains that one key and still forbids any other change.
+    // SUPERSEDED expectation, recorded verbatim: the list below without
+    // 'AUTOLABEL_QUEUE_URL'.
     expect(Object.keys(env).sort()).toEqual(
       [
         'AUDIT_LOG_TABLE',
+        'AUTOLABEL_QUEUE_URL',
         'CAMERA_REGISTRY_TABLE',
         'CODE_VERSION',
         'COMPONENTS_TABLE',

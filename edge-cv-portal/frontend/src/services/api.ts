@@ -4920,6 +4920,33 @@ class ApiService {
     });
   }
 
+  // Auto-labeling configuration endpoints (Settings → Auto-Labeling). Like
+  // the Bedrock_Configuration, they ride the PortalAdmin-only
+  // /data-accounts/{id} routes, with the reserved id 'autolabel-configuration'
+  // (handled by the data_accounts Lambda). `images_per_run` is the saved
+  // number of images the auto-label worker labels per run; null means nothing
+  // is saved and the worker uses `default_images_per_run`.
+  async getAutoLabelingConfiguration(): Promise<{
+    images_per_run: number | null;
+    default_images_per_run: number;
+    min_images_per_run: number;
+    max_images_per_run: number;
+  }> {
+    return this.request('/data-accounts/autolabel-configuration');
+  }
+
+  // PortalAdmin-only. A whole number within the bounds is saved; null clears
+  // the saved value, so the worker uses the default again.
+  async updateAutoLabelingConfiguration(config: { images_per_run: number | null }): Promise<{
+    message: string;
+    images_per_run: number | null;
+  }> {
+    return this.request('/data-accounts/autolabel-configuration', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    });
+  }
+
   // Build infrastructure configuration endpoints (build_config.py,
   // portal-build-fleet-and-workflow-gates Requirement 9). GET returns the
   // effective configuration with documented defaults applied per field
