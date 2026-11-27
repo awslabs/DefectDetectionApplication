@@ -3,6 +3,8 @@ import {
   checkV4,
   checkV5,
   checkV10Metadata,
+  checkV14LayoutConfig,
+  checkW4LayoutNoDetector,
   CODE_V4_INVALID_PARAMETER_VALUE,
   CODE_V4_MISSING_REQUIRED_PARAMETER,
   CODE_V5_UNREACHABLE_NODE,
@@ -10,6 +12,9 @@ import {
   CODE_V10_METADATA_EMPTY_FIELD_PATH,
   CODE_V10_METADATA_MAPPINGS_INVALID,
   CODE_V10_METADATA_STATIC_JSON_INVALID,
+  CODE_V14_LAYOUT_CONFIG_INVALID,
+  CODE_W4_LAYOUT_NO_DETECTOR,
+  parseExpectedRegions,
   resolvedPorts,
   runInlineChecks,
 } from './inlineChecks';
@@ -22,6 +27,7 @@ import {
   PORT_TYPE_INFERENCE_META,
   PORT_TYPE_VIDEO_FRAMES,
   SEVERITY_ERROR,
+  SEVERITY_WARNING,
   type NodeTypeDescriptor,
   type WorkflowConnection,
   type WorkflowNode,
@@ -417,5 +423,186 @@ describe('checkV10Metadata', () => {
     };
     const codes = runInlineChecks(graph, METADATA_CATALOG).map((f) => f.code);
     expect(codes).toContain(CODE_V10_METADATA_STATIC_JSON_INVALID);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Layout Check mirrors (car-assembly-check task 7.3): parseExpectedRegions,
+// V14 and W4. The Python-generated parity corpus pins every rule's text;
+// these cases pin the shapes and the composition.
+// --------------------------------------------------------------------------
+
+const LAYOUT_CHECK: NodeTypeDescriptor = {
+  typeId: 'layout_check',
+  category: CATEGORY_POST_PROCESSING,
+  displayName: 'Layout Check',
+  inputs: [{ name: 'in', portType: PORT_TYPE_INFERENCE_META }],
+  outputs: [{ name: 'out', portType: PORT_TYPE_INFERENCE_META }],
+  parameters: [
+    { name: 'expected_regions', paramType: 'string', required: true, default: null, constraints: { minLength: 2 } },
+    { name: 'min_iou', paramType: 'float', required: false, default: 0.7, constraints: { min: 0.01, max: 1.0 } },
+    { name: 'min_confidence', paramType: 'float', required: false, default: 0.5, constraints: { min: 0, max: 1 } },
+    { name: 'min_outline_overlap', paramType: 'float', required: false, default: 0.1, constraints: { min: 0, max: 0.5 } },
+  ],
+  mappings: [],
+  hardwareDependent: false,
+};
+
+const LAYOUT_CATALOG = [...CATALOG, LAYOUT_CHECK];
+const TRIANGLE = [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]];
+const VALID_REGIONS = JSON.stringify({ roof: TRIANGLE });
+
+function layoutGraph(parameters: WorkflowNode['parameters'], upstream: string[] = ['model_inference']) {
+  const nodes = [node('src', 'camera_source', { device: '/dev/video0' })];
+  upstream.forEach((type, index) => nodes.push(node(`up${index}`, type)));
+  nodes.push(node('layout', 'layout_check', parameters));
+  const connections = nodes
+    .slice(1)
+    .map((target, index) => conn(`c${index}`, nodes[index].id, target.id));
+  return { nodes, connections };
+}
+
+describe('parseExpectedRegions', () => {
+  it('reads a ring that repeats its first vertex last as closed', () => {
+    const [regions, problems] = parseExpectedRegions(
+      JSON.stringify({ roof: [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8], [0.2, 0.2]] })
+    );
+    expect(problems).toEqual([]);
+    expect(regions?.get('roof')).toEqual([
+      [0.2, 0.2],
+      [0.8, 0.2],
+      [0.8, 0.8],
+      [0.2, 0.8],
+    ]);
+  });
+
+  it('counts the vertices that remain after the cyclic drop', () => {
+    expect(parseExpectedRegions('{"roof": [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9], [0.1, 0.1]]}')[0]?.get('roof')).toHaveLength(3);
+    expect(parseExpectedRegions('{"roof": [[0, 0], [1, 0], [0, 0]]}')).toEqual([
+      null,
+      ["Region 'roof': the polygon must have between 3 and 64 distinct points; this one has 2."],
+    ]);
+  });
+
+  it('strips labels and accepts an already-parsed object', () => {
+    const [regions, problems] = parseExpectedRegions({ ' roof ': TRIANGLE });
+    expect(problems).toEqual([]);
+    expect([...(regions?.keys() ?? [])]).toEqual(['roof']);
+  });
+
+  it('reports every rule of every region, in key order', () => {
+    expect(
+      parseExpectedRegions('{"roof": [[0, 0], [2, 0], [0.5]], "": [[0, 0], [1, 0], [0, 1]], "wheel": [[0.1, 0.1], [0.9, 0.9], [0.9, 0.1], [0.1, 0.9]]}')
+    ).toEqual([
+      null,
+      [
+        "Region 'roof': point 2 x coordinate must be between 0 and 1.",
+        "Region 'roof': point 3 must be a pair of numbers [x, y].",
+        'Region 2: the class label is empty.',
+        "Region 'wheel': the polygon must cover at least 0.5% of the frame.",
+        "Region 'wheel': the polygon crosses itself; no two of its edges may intersect.",
+      ],
+    ]);
+  });
+
+  it('reads NaN and Infinity the way Python json.loads does', () => {
+    expect(parseExpectedRegions('{"roof": [[0, 0], [1, 0], [NaN, 1]]}')[1]).toEqual([
+      "Region 'roof': point 3 must be a pair of numbers [x, y].",
+    ]);
+    expect(parseExpectedRegions('not json')[1]).toEqual(['Expected regions are not valid JSON.']);
+  });
+
+  it('keeps a __proto__ label as a label', () => {
+    const [regions, problems] = parseExpectedRegions(`{"__proto__": ${JSON.stringify(TRIANGLE)}}`);
+    expect(problems).toEqual([]);
+    expect([...(regions?.keys() ?? [])]).toEqual(['__proto__']);
+  });
+});
+
+describe('checkV14LayoutConfig', () => {
+  it('returns no findings for a valid configuration and the defaults', () => {
+    expect(checkV14LayoutConfig(layoutGraph({ expected_regions: VALID_REGIONS }), LAYOUT_CATALOG)).toEqual([]);
+  });
+
+  it('leaves a blank or missing expected_regions to V4', () => {
+    const blanks: WorkflowNode['parameters'][] = [
+      {},
+      { expected_regions: '' },
+      { expected_regions: '   ' },
+      { expected_regions: null },
+    ];
+    for (const parameters of blanks) {
+      expect(checkV14LayoutConfig(layoutGraph(parameters), LAYOUT_CATALOG)).toEqual([]);
+    }
+    const codes = runInlineChecks(layoutGraph({}), LAYOUT_CATALOG).map((f) => f.code);
+    expect(codes).toContain(CODE_V4_MISSING_REQUIRED_PARAMETER);
+  });
+
+  it('reports one finding per offending parameter', () => {
+    const findings = checkV14LayoutConfig(
+      layoutGraph({ expected_regions: '{}', min_iou: 1.5, min_confidence: 0.5, min_outline_overlap: '0.51' }),
+      LAYOUT_CATALOG
+    );
+    expect(findings).toEqual([
+      {
+        severity: SEVERITY_ERROR,
+        code: CODE_V14_LAYOUT_CONFIG_INVALID,
+        message:
+          "Node 'layout': parameter 'expected_regions': Expected regions must name between 1 and 10 classes; this value names 0.",
+        nodeId: 'layout',
+        connectionId: null,
+      },
+      {
+        severity: SEVERITY_ERROR,
+        code: CODE_V14_LAYOUT_CONFIG_INVALID,
+        message: "Node 'layout': parameter 'min_iou': The value must be between 0.01 and 1.",
+        nodeId: 'layout',
+        connectionId: null,
+      },
+      {
+        severity: SEVERITY_ERROR,
+        code: CODE_V14_LAYOUT_CONFIG_INVALID,
+        message: "Node 'layout': parameter 'min_outline_overlap': The value must be between 0 and 0.5.",
+        nodeId: 'layout',
+        connectionId: null,
+      },
+    ]);
+  });
+
+  it('accepts the bounds of min_outline_overlap and refuses just outside them', () => {
+    const findingsFor = (value: number) =>
+      checkV14LayoutConfig(layoutGraph({ expected_regions: VALID_REGIONS, min_outline_overlap: value }), LAYOUT_CATALOG);
+    expect(findingsFor(0)).toEqual([]);
+    expect(findingsFor(0.5)).toEqual([]);
+    expect(findingsFor(-0.1)).toHaveLength(1);
+    expect(findingsFor(0.51)).toHaveLength(1);
+  });
+
+  it('fires only on layout_check nodes', () => {
+    const graph = { nodes: [node('x', 'custom_python', { expected_regions: 'not json', min_iou: 7 })], connections: [] };
+    expect(checkV14LayoutConfig(graph, LAYOUT_CATALOG)).toEqual([]);
+  });
+});
+
+describe('checkW4LayoutNoDetector', () => {
+  const W4_MESSAGE =
+    "Node 'layout': no 'model_inference' node is upstream of this 'layout_check' node, " +
+    'so no instance masks will exist for it to check at runtime';
+
+  it('warns when no model_inference node is upstream', () => {
+    expect(checkW4LayoutNoDetector(layoutGraph({ expected_regions: VALID_REGIONS }, []))).toEqual([
+      { severity: SEVERITY_WARNING, code: CODE_W4_LAYOUT_NO_DETECTOR, message: W4_MESSAGE, nodeId: 'layout', connectionId: null },
+    ]);
+  });
+
+  it('is silent with a detector directly or transitively upstream', () => {
+    expect(checkW4LayoutNoDetector(layoutGraph({}, ['model_inference']))).toEqual([]);
+    expect(checkW4LayoutNoDetector(layoutGraph({}, ['model_inference', 'detection_counter']))).toEqual([]);
+  });
+
+  it('is composed into runInlineChecks beside V14', () => {
+    const codes = runInlineChecks(layoutGraph({ expected_regions: 'not json' }, []), LAYOUT_CATALOG).map((f) => f.code);
+    expect(codes).toContain(CODE_V14_LAYOUT_CONFIG_INVALID);
+    expect(codes).toContain(CODE_W4_LAYOUT_NO_DETECTOR);
   });
 });

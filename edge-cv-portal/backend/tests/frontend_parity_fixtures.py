@@ -5,9 +5,11 @@ parity).
 
 The Python modules are the source of truth; the Workflow_Builder carries
 TypeScript ports (``pages/workflows/streamUrl.ts``, ``sceneConfig.ts`` and
-the V7/V9/V11/V12/V13/W3 mirrors in ``inlineChecks.ts``). This module
-generates two deterministic corpora from the Python implementation, which
-the frontend property tests replay:
+the V7/V9/V11/V12/V13/W3 mirrors in ``inlineChecks.ts``, plus the Layout
+Check mirrors V14/W4 with their ``parseExpectedRegions`` port,
+car-assembly-check task 7.3). This module generates two deterministic
+corpora from the Python implementation, which the frontend property tests
+replay:
 
 - ``streamUrlCorpus.json``: values run through ``check_stream_url`` with
   each Stream_Camera_Source_Node type's schemes (and a few custom scheme
@@ -24,6 +26,7 @@ rules cannot silently leave the TypeScript ports behind. Regenerate with::
     ~/.venvs/dda-portal-tests/bin/python tests/frontend_parity_fixtures.py --write
 """
 import json
+import math
 import os
 import random
 import sys
@@ -37,7 +40,8 @@ STREAM_URL_CORPUS = os.path.join(FIXTURES_DIR, "streamUrlCorpus.json")
 INLINE_PARITY_CORPUS = os.path.join(FIXTURES_DIR, "inlineParityCorpus.json")
 
 #: The validator codes the frontend mirrors for this feature (Property 6),
-#: plus V9, whose continuous-stream skip is part of the same rule set.
+#: plus V9, whose continuous-stream skip is part of the same rule set, and
+#: the Layout Check rules V14 and W4 (car-assembly-check task 7.3).
 MIRRORED_CODES = (
     "V7_COEXISTENCE_CONFLICT",
     "V9_MIXED_ACTIVATION_MODEL",
@@ -45,6 +49,8 @@ MIRRORED_CODES = (
     "V12_CONTINUOUS_ACTIVATION",
     "V13_ANALYTICS_CONFIG_INVALID",
     "W3_ANALYTICS_NO_DETECTOR",
+    "V14_LAYOUT_CONFIG_INVALID",
+    "W4_LAYOUT_NO_DETECTOR",
 )
 
 SEED = 20260926
@@ -201,6 +207,12 @@ _ALL_TYPES = (
     "detection_counter", "object_association", "event_gate", "capture",
 )
 
+#: The descriptors the corpus serves: every generated type plus
+#: ``layout_check``, which only the handwritten graphs use. ``_ALL_TYPES``
+#: itself stays as it is, because ``_graph`` draws from it with a
+#: positional weights list and the seeded graphs must not change.
+_CATALOG_TYPES = _ALL_TYPES + ("layout_check",)
+
 
 def _maybe(rng, parameters, name, pool, absent_weight=0.2):
     """Set ``name`` from ``pool``, or leave it unset."""
@@ -309,6 +321,137 @@ _HANDWRITTEN = [
       ("valueOf", {})], []),
 ]
 
+# Layout Check (car-assembly-check task 7.3): every V14 rule of
+# ``analytics.layout.parse_expected_regions`` (including the wrap-around
+# ring the cyclic duplicate rule reads as closed), the three range rules,
+# and W4 with and without an upstream model_inference.
+_LAYOUT_TRIANGLE = [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]]
+_LAYOUT_VALID = json.dumps({"roof": _LAYOUT_TRIANGLE})
+_UNSET_PARAMETER = object()
+_LAYOUT_CIRCLE_65 = [[round(0.5 + 0.4 * math.cos(2 * math.pi * i / 65), 6),
+                      round(0.5 + 0.4 * math.sin(2 * math.pi * i / 65), 6)]
+                     for i in range(65)]
+
+_LAYOUT_REGION_CASES = [
+    ("not json", "not json"),
+    ("not an object", "[[0, 0], [1, 0], [0, 1]]"),
+    ("a JSON string", '"text"'),
+    ("a number", 5),
+    ("no classes", "{}"),
+    ("eleven classes",
+     json.dumps({f"c{i}": _LAYOUT_TRIANGLE for i in range(11)})),
+    ("ten classes", json.dumps({f"c{i}": _LAYOUT_TRIANGLE for i in range(10)})),
+    ("empty label", json.dumps({"": _LAYOUT_TRIANGLE})),
+    ("blank label", json.dumps({"roof": _LAYOUT_TRIANGLE, "  ": _LAYOUT_TRIANGLE})),
+    ("65-character label", json.dumps({"x" * 65: _LAYOUT_TRIANGLE})),
+    ("label repeated once stripped",
+     json.dumps({"roof": _LAYOUT_TRIANGLE, " roof ": _LAYOUT_TRIANGLE})),
+    ("polygon not a list", '{"roof": "x"}'),
+    ("polygon an object", '{"roof": {"points": []}}'),
+    ("point not a pair", '{"roof": [[0, 0], [1, 0], [0.5]]}'),
+    ("point with a boolean", '{"roof": [[0, 0], [1, 0], [0.5, true]]}'),
+    ("point with NaN", '{"roof": [[0, 0], [1, 0], [NaN, 1]]}'),
+    ("point with -Infinity", '{"roof": [[0, 0], [1, 0], [0.5, -Infinity]]}'),
+    ("point with a string", '{"roof": [[0, 0], [1, 0], ["0.5", 1]]}'),
+    ("x out of range", '{"roof": [[0, 0], [1.5, 0], [0.5, 1]]}'),
+    ("y out of range", '{"roof": [[0, 0], [1, 0], [0.5, -0.1]]}'),
+    ("huge coordinate", '{"roof": [[0, 0], [1e999, 0], [0.5, 1]]}'),
+    ("two points", '{"roof": [[0, 0], [1, 1]]}'),
+    ("wrap-around ring of two", '{"roof": [[0, 0], [1, 0], [0, 0]]}'),
+    ("consecutive duplicates of two", '{"roof": [[0, 0], [0, 0], [1, 0], [1, 0]]}'),
+    ("wrap-around ring accepted",
+     json.dumps({"roof": [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8], [0.2, 0.2]]})),
+    ("three plus the repeated first accepted",
+     json.dumps({"roof": [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9], [0.1, 0.1]]})),
+    ("65 points", json.dumps({"roof": _LAYOUT_CIRCLE_65})),
+    ("64 points and the repeated first",
+     json.dumps({"roof": _LAYOUT_CIRCLE_65[:64] + [_LAYOUT_CIRCLE_65[0]]})),
+    ("tiny region", '{"roof": [[0, 0], [0.05, 0], [0, 0.05]]}'),
+    ("self-intersecting ring",
+     '{"roof": [[0.1, 0.1], [0.9, 0.9], [0.9, 0.1], [0.1, 0.5]]}'),
+    ("symmetric bow tie", '{"roof": [[0.1, 0.1], [0.9, 0.9], [0.9, 0.1], [0.1, 0.9]]}'),
+    ("touching non-adjacent edges",
+     '{"roof": [[0.1, 0.1], [0.9, 0.1], [0.5, 0.5], [0.9, 0.9], [0.1, 0.9], [0.5, 0.1]]}'),
+    ("several problems",
+     '{"roof": [[0, 0], [2, 0], [0.5]], "": [[0, 0], [1, 0], [0, 1]], '
+     '"wheel": [[0, 0], [1, 1]]}'),
+    ("three classes accepted", json.dumps({
+        "rear_fender": [[0.12, 0.44], [0.19, 0.38], [0.30, 0.37], [0.47, 0.37],
+                        [0.47, 0.86], [0.40, 0.90], [0.31, 0.90], [0.26, 0.82],
+                        [0.12, 0.80]],
+        "front_fender": [[0.47, 0.37], [0.74, 0.37], [0.88, 0.47], [0.90, 0.60],
+                         [0.86, 0.78], [0.78, 0.81], [0.72, 0.88], [0.63, 0.88],
+                         [0.58, 0.80], [0.47, 0.80]],
+        "roof": [[0.30, 0.36], [0.33, 0.24], [0.40, 0.16], [0.50, 0.13],
+                 [0.60, 0.16], [0.68, 0.24], [0.72, 0.36]]})),
+    ("an already-parsed object", {"roof": _LAYOUT_TRIANGLE}),
+    ("an already-parsed object with a problem", {"roof": [[0, 0], [1, 1]]}),
+    # Blank or missing: V4's concern, no V14 finding.
+    ("blank", "   "),
+    ("empty", ""),
+    ("null", None),
+    ("missing", _UNSET_PARAMETER),
+]
+
+_LAYOUT_THRESHOLD_CASES = [
+    ("min_iou below", {"min_iou": 0.005}),
+    ("min_iou above", {"min_iou": 1.5}),
+    ("min_iou as text", {"min_iou": "1.5"}),
+    ("min_iou at its bounds", {"min_iou": 0.01}),
+    ("min_iou one", {"min_iou": 1}),
+    ("min_iou not a number", {"min_iou": "abc"}),
+    ("min_confidence below", {"min_confidence": -0.1}),
+    ("min_confidence above", {"min_confidence": 1.2}),
+    ("min_confidence at its bounds", {"min_confidence": 0}),
+    ("min_outline_overlap below", {"min_outline_overlap": -0.1}),
+    ("min_outline_overlap above", {"min_outline_overlap": 0.51}),
+    ("min_outline_overlap at its bounds", {"min_outline_overlap": 0.5}),
+    ("min_outline_overlap zero", {"min_outline_overlap": 0}),
+    ("min_outline_overlap as padded text", {"min_outline_overlap": " 0.75 "}),
+    ("min_outline_overlap as an overflowing text", {"min_outline_overlap": "1e999"}),
+    ("min_outline_overlap as hex text", {"min_outline_overlap": "0x1"}),
+    ("every threshold out of range",
+     {"min_iou": 0, "min_confidence": 2, "min_outline_overlap": 0.9}),
+]
+
+
+def _layout_spec(name, parameters, detector=True):
+    """folder_source [-> model_inference] -> layout_check."""
+    if detector:
+        return (name, [("folder_source", {}), ("model_inference", {}),
+                       ("layout_check", parameters)],
+                [(0, 1, "in"), (1, 2, "in")])
+    return (name, [("folder_source", {}), ("layout_check", parameters)],
+            [(0, 1, "in")])
+
+
+_HANDWRITTEN += [
+    _layout_spec(f"layout regions: {name}",
+                 {} if value is _UNSET_PARAMETER else {"expected_regions": value})
+    for name, value in _LAYOUT_REGION_CASES
+]
+_HANDWRITTEN += [
+    _layout_spec(f"layout thresholds: {name}",
+                 dict(parameters, expected_regions=_LAYOUT_VALID))
+    for name, parameters in _LAYOUT_THRESHOLD_CASES
+]
+_HANDWRITTEN += [
+    _layout_spec("layout without a detector", {"expected_regions": _LAYOUT_VALID},
+                 detector=False),
+    _layout_spec("layout with a detector and broken regions",
+                 {"expected_regions": "not json"}),
+    ("layout with a transitive detector",
+     [("folder_source", {}), ("model_inference", {}),
+      ("detection_counter", {"classes": "person"}),
+      ("layout_check", {"expected_regions": _LAYOUT_VALID})],
+     [(0, 1, "in"), (1, 2, "in"), (2, 3, "in")]),
+    ("layout beside an unconnected detector",
+     [("folder_source", {}), ("model_inference", {}),
+      ("layout_check", {"expected_regions": _LAYOUT_VALID}),
+      ("layout_check", {"expected_regions": "{}"})],
+     [(0, 2, "in"), (3, 2, "in")]),
+]
+
 
 def _handwritten_graph(spec):
     _name, node_specs, edges = spec
@@ -358,7 +501,7 @@ def inline_parity_corpus(graph_count: int = 250):
         entries.append({"name": name, "graph": definition,
                         "findings": findings})
     catalog = [_catalog_entry(descriptor_to_wire(get_node_type(type_id)))
-               for type_id in _ALL_TYPES]
+               for type_id in _CATALOG_TYPES]
     return {"generatedFrom": "workflow_core/validator/checks.py",
             "mirroredCodes": list(MIRRORED_CODES), "catalog": catalog,
             "entries": entries}
