@@ -79,6 +79,10 @@ For anomaly-style classification name the "normal" category first; the Marketpla
 
 Check the summary: backend, name, **Source Images**, the **Labeling Output** location (`s3://<bucket>/labeled/`), task type, label set, team, instruction length, example counts, auto-labeling model and skip-verification state. Click **Create Job**. The job appears in the list as **Pending**, then **In Progress** once the tasks (and pre-labels, if enabled) exist. Each team member gets the job in **My Labeling Tasks** and an email notification if the Portal has an SES sender configured.
 
+### One instance-labeling job for several image variants
+
+An instance-labeling job can feed several image variants with identical geometry, for example the colour originals and grayscale copies of the same photos: label the originals once, then rewrite the output manifest's `source-ref` prefix with `datasets/rewrite_manifest_source_refs.py` to get a manifest for each variant. The team of an **InstanceSegmentation** job needs at least one DataLabeler member (4.6). For a layout-check use case ([8.9](08-workflows.md#89-worked-example-car-assembly-check)), the instructions define each class by the piece's shape, and the labelers label misplaced pieces where they lie, give a missing piece no polygon and outline a partly hidden piece on its visible part.
+
 ## 4.3 Create a labeling job (SageMaker Ground Truth)
 
 ![Ground Truth backend](images/04-labeling-create-step1-groundtruth.png)

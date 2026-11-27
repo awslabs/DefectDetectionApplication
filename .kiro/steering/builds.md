@@ -31,6 +31,16 @@ NEXT_PATCH`. The target (JP5 vs JP6 vs JP7) is derived from the component name
 by `build-custom.sh`. `run_jp_builds.sh` automates the swap (e.g.
 `TARGETS="7" ./run_jp_builds.sh`).
 
+The published version defaults to the latest registered version + 1
+(`NEXT_PATCH`); `COMPONENT_VERSION_OVERRIDE=<N.N.N>` on the publish run
+(`SKIP_BUILD=1`) of `gdk-component-build-and-publish.sh` publishes at that
+version on the ECR + S3 path (the only path that honours it, and the one every
+LocalServer takes, its artifacts exceeding 2 GB) to lift an account's lineage
+above a floor that is a fixed literal, while a per-deployment floor (Layout
+Check, RF-DETR-Seg) is set to the published version instead; the script does
+not validate the value (`N.N.N`, above the latest registered version, not yet
+published).
+
 - Build only (no AWS creds needed): `gdk component build`.
 - `gdk-config.json` is a build artifact excluded from commits; swapping it per
   target is fine, but restore it when done.
