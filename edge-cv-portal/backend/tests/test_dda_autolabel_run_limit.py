@@ -24,6 +24,15 @@ test_dda_autolabel_worker.py):
   the next run, and Grounded-SAM records follow the same limit.
 - **Records that cannot be sent back** are labeled in the same run: no
   queue URL, an entry SQS reports as failed, a send that raises.
+- **The queue's 3 receives across copies** (TestReceiveCapAcrossCopies):
+  a copy carries the receives of the record so far, and with a value
+  saved a record received more than 3 times across its copies is
+  reported as a batch item failure, neither labeled nor sent back. A
+  simulated queue with its redrive shows that a record that keeps failing
+  is labeled 3 times and then dead-letters, and that records sent back
+  after a killed run are all labeled, at most K per run.
+- **The re-queue SQS client** (TestRequeueClient): against a hung
+  endpoint it makes 2 attempts, then the run labels the records itself.
 - **The run log line** the deploy check looks for.
 - **A Hypothesis property** over the saved value and the record count:
   the first min(K, n) records are processed in order and the rest are
@@ -37,11 +46,12 @@ import json
 import logging
 import sys
 import uuid
+from collections import Counter
 from decimal import Decimal
 
 import boto3
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -61,6 +71,10 @@ SETTING_KEY = "autolabel.images_per_run"
 LABELS = ["normal", "anomaly"]
 BEDROCK_MODEL = "bedrock:test-model-id"
 NORMAL = '{"label": "normal"}'
+# The message attribute a copy sent back carries, and the queue's
+# maxReceiveCount (compute-stack.ts).
+PRIOR_RECEIVES = "autolabel_prior_receives"
+MAX_RECEIVES = 3
 
 
 # ------------------------------------------------------------- fake clients
@@ -140,20 +154,26 @@ class RunLimitEnv(AutolabelEnv):
         self.settings_table.delete_item(Key={"setting_key": SETTING_KEY})
 
     # ------------------------------------------------------------ queue
-    def drain(self):
-        """Receive and delete every message on the queue; their bodies."""
-        bodies = []
+    def receive_all(self):
+        """Receive and delete every message on the queue, with its
+        message attributes."""
+        received = []
         while True:
             messages = self.sqs.receive_message(
                 QueueUrl=self.queue_url, MaxNumberOfMessages=10,
-                WaitTimeSeconds=0).get("Messages", [])
+                WaitTimeSeconds=0,
+                MessageAttributeNames=["All"]).get("Messages", [])
             if not messages:
-                return bodies
+                return received
             for message in messages:
-                bodies.append(message["Body"])
+                received.append(message)
                 self.sqs.delete_message(
                     QueueUrl=self.queue_url,
                     ReceiptHandle=message["ReceiptHandle"])
+
+    def drain(self):
+        """Receive and delete every message on the queue; their bodies."""
+        return [message["Body"] for message in self.receive_all()]
 
     def use_requeue(self, fake):
         self.monkeypatch.setattr(self.worker, "requeue_sqs_client", fake)
@@ -196,6 +216,76 @@ class RunLimitEnv(AutolabelEnv):
             records = self.as_records(self.drain())
         return runs
 
+    # -------------------------------------------------- receive counts
+    @staticmethod
+    def with_receives(record, receives, prior=None):
+        """`record` at its `receives`-th receive, as the event source
+        mapping hands it over; with `prior`, a copy carrying that many
+        receives of its earlier copies."""
+        received = dict(record)
+        received["attributes"] = {**record.get("attributes", {}),
+                                  "ApproximateReceiveCount": str(receives)}
+        if prior is not None:
+            received["messageAttributes"] = {PRIOR_RECEIVES: {
+                "stringValue": str(prior), "stringListValues": [],
+                "binaryListValues": [], "dataType": "Number"}}
+        return received
+
+    @staticmethod
+    def lambda_record(message):
+        """The event record the event source mapping makes of a message
+        received from the queue (camelCase message attributes)."""
+        return {
+            "messageId": message["MessageId"],
+            "body": message["Body"],
+            "messageAttributes": {
+                name: {"stringValue": value.get("StringValue"),
+                       "stringListValues": [], "binaryListValues": [],
+                       "dataType": value["DataType"]}
+                for name, value in message.get(
+                    "MessageAttributes", {}).items()},
+        }
+
+    def simulate_queue(self, records, receives=0, max_runs=60):
+        """Feed `records` through runs the way the queue, its event source
+        mapping and its redrive policy would, until the queue is empty.
+
+        Each run receives up to 5 messages, and each receive is counted.
+        SQS deletes what the run does not report as failed. A copy the run
+        sent back joins the queue at 0 receives with its message
+        attributes; a reported record comes back after them with its
+        count. A message already received MAX_RECEIVES times moves to the
+        dead-letter queue instead of being received again. `receives` is
+        the count the records start with (1: a run that had received them
+        was killed).
+
+        Returns the bodies moved to the dead-letter queue and, per run, the
+        number of records it received and the number it sent back."""
+        queue = [(record, receives) for record in records]
+        dead_lettered, runs = [], []
+        while queue:
+            assert len(runs) < max_runs, "the queue never emptied"
+            batch = []
+            while queue and len(batch) < 5:
+                record, count = queue.pop(0)
+                if count >= MAX_RECEIVES:
+                    dead_lettered.append(record["body"])
+                else:
+                    batch.append((record, count + 1))
+            if not batch:
+                continue
+            result = self.run([self.with_receives(record, count)
+                               for record, count in batch])
+            failed = {item["itemIdentifier"]
+                      for item in result["batchItemFailures"]}
+            copies = self.receive_all()
+            runs.append((len(batch), len(copies)))
+            queue.extend((self.lambda_record(message), 0)
+                         for message in copies)
+            queue.extend((record, count) for record, count in batch
+                         if record["messageId"] in failed)
+        return dead_lettered, runs
+
 
 @pytest.fixture
 def env(aws_stack, worker, monkeypatch):
@@ -218,8 +308,11 @@ class TestNothingSaved:
     """With nothing usable saved a run labels every record of its batch
     and sends nothing back to the queue, as before the setting existed."""
 
-    def _assert_every_record_processed(self, env):
+    def _assert_every_record_processed(self, env, receives=None, prior=None):
         job_id, task_ids, records = env.make_batch(5)
+        if receives is not None:
+            records = [env.with_receives(record, receives, prior)
+                       for record in records]
         bedrock, _ = env.use_bedrock(replies=['{"label": "normal"}'])
 
         result = env.run(records)
@@ -247,6 +340,12 @@ class TestNothingSaved:
     def test_stored_value_the_worker_ignores(self, env, stored):
         env.save(stored)
         self._assert_every_record_processed(env)
+
+    def test_receives_carried_by_copies_are_ignored(self, env):
+        """Copies sent back while a value was saved, received 4 times
+        across their copies, are labeled like any record once nothing is
+        saved: the worker's cap applies only while a value is saved."""
+        self._assert_every_record_processed(env, receives=2, prior=2)
 
 
 # ---------------------------------------------------------------- saved limit
@@ -378,11 +477,15 @@ class TestRecordsNotSentBack:
         assert env.run(records) == {"batchItemFailures": []}
 
         # One call with records 2 and 3, numbered from 0 among the
-        # records sent back.
+        # records sent back; first receives, so they carry 0 receives.
+        carried = {PRIOR_RECEIVES: {"DataType": "Number",
+                                    "StringValue": "0"}}
         assert fake.calls == [{
             "QueueUrl": env.queue_url,
-            "Entries": [{"Id": "0", "MessageBody": records[1]["body"]},
-                        {"Id": "1", "MessageBody": records[2]["body"]}],
+            "Entries": [{"Id": "0", "MessageBody": records[1]["body"],
+                         "MessageAttributes": carried},
+                        {"Id": "1", "MessageBody": records[2]["body"],
+                         "MessageAttributes": carried}],
         }]
         # Record 3 failed to send, so this run labels it; record 2 was
         # sent back and waits for another run.
@@ -403,6 +506,168 @@ class TestRecordsNotSentBack:
         assert len(fake.calls) == 1
         assert env.statuses(job_id, task_ids) == ["Available"] * 3
         assert len(bedrock.calls) == 3
+
+
+# ----------------------------------------------- receive cap across copies
+
+class TestReceiveCapAcrossCopies:
+    """A copy sent back starts at 0 receives, so it carries the receives
+    of the record so far. With a value saved, a run holds each record to
+    the queue's 3 receives across its copies."""
+
+    def test_copies_carry_the_receives_so_far(self, env):
+        env.save(1)
+        _, _, records = env.make_batch(4)
+        env.use_bedrock(replies=[NORMAL])
+        sent_back = [
+            records[1],                                 # 1st receive
+            env.with_receives(records[2], 2),           # 2nd receive
+            env.with_receives(records[3], 2, prior=1),  # a copy, 2nd receive
+        ]
+
+        assert env.run([records[0]] + sent_back) == {"batchItemFailures": []}
+
+        # The receive that sends a record back does not count.
+        carried = {}
+        for message in env.receive_all():
+            attribute = message["MessageAttributes"][PRIOR_RECEIVES]
+            carried[message["Body"]] = (attribute["DataType"],
+                                        attribute["StringValue"])
+        assert carried == {sent_back[0]["body"]: ("Number", "0"),
+                           sent_back[1]["body"]: ("Number", "1"),
+                           sent_back[2]["body"]: ("Number", "2")}
+
+    @pytest.mark.parametrize("receives, prior, labeled", [
+        (3, None, True),
+        (1, 2, True),
+        (2, 1, True),
+        (2, 2, False),
+        (3, 1, False),
+    ], ids=["original-receive-3", "prior-2-receive-1", "prior-1-receive-2",
+            "prior-2-receive-2", "prior-1-receive-3"])
+    def test_cap_counts_the_receives_of_earlier_copies(
+            self, env, receives, prior, labeled):
+        env.save(1)
+        job_id, task_ids, records = env.make_batch(1)
+        bedrock, _ = env.use_bedrock(replies=[NORMAL])
+        record = env.with_receives(records[0], receives, prior)
+
+        result = env.run([record])
+
+        if labeled:
+            assert result == {"batchItemFailures": []}
+            assert env.statuses(job_id, task_ids) == ["Available"]
+            assert len(bedrock.calls) == 1
+        else:
+            # Past the cap: reported so that SQS dead-letters it after the
+            # copy's own receives, and not labeled again.
+            assert result == {"batchItemFailures": [
+                {"itemIdentifier": record["messageId"]}]}
+            assert env.statuses(job_id, task_ids) == ["Pending"]
+            assert bedrock.calls == []
+        assert env.drain() == []
+
+    def test_a_record_past_the_cap_takes_no_slot_and_is_not_sent_back(
+            self, env, caplog):
+        env.save(1)
+        job_id, task_ids, records = env.make_batch(3)
+        bedrock, _ = env.use_bedrock(replies=[NORMAL])
+        past_cap = env.with_receives(records[0], 2, prior=2)
+
+        result = env.run([past_cap] + records[1:])
+
+        assert result == {"batchItemFailures": [
+            {"itemIdentifier": past_cap["messageId"]}]}
+        # Record 2 gets the run's one slot and record 3 is sent back; the
+        # record past the cap is neither labeled nor sent back.
+        assert env.statuses(job_id, task_ids) == [
+            "Pending", "Available", "Pending"]
+        assert len(bedrock.calls) == 1
+        assert env.drain() == [records[2]["body"]]
+        assert any(past_cap["messageId"] in message
+                   and "received 4 times" in message
+                   for message in caplog.messages)
+
+    def test_a_record_that_keeps_failing_is_labeled_3_times_then_dead_letters(
+            self, env):
+        """A pre-label write that fails after the model call is a batch
+        item failure for the bedrock: family. With 1 saved, the records
+        keep landing beyond the first of their batch and are sent back, yet
+        each is labeled 3 times, as without the send-back, and then moves
+        to the dead-letter queue."""
+        env.save(1)
+        job_id, task_ids, records = env.make_batch(5)
+        bedrock, _ = env.use_bedrock(replies=[NORMAL])
+        attempts = []
+
+        def failing_write(usecase_id, job_id, task_id, prelabel):
+            attempts.append(task_id)
+            raise RuntimeError("simulated pre-label write failure")
+
+        env.monkeypatch.setattr(env.worker, "_write_prelabel", failing_write)
+
+        dead_lettered, _ = env.simulate_queue(records)
+
+        assert Counter(attempts) == {task_id: MAX_RECEIVES
+                                     for task_id in task_ids}
+        assert len(bedrock.calls) == 5 * MAX_RECEIVES
+        assert sorted(dead_lettered) == sorted(
+            record["body"] for record in records)
+        assert env.statuses(job_id, task_ids) == ["Pending"] * 5
+
+    def test_records_sent_back_after_a_killed_run_are_all_labeled(self, env):
+        """A run killed by its timeout leaves its records at 1 receive.
+        With 1 saved, each next run labels one record and sends the others
+        back with that receive carried; none reaches the cap or the
+        dead-letter queue."""
+        env.save(1)
+        job_id, task_ids, records = env.make_batch(5)
+        bedrock, _ = env.use_bedrock(replies=[NORMAL])
+
+        dead_lettered, runs = env.simulate_queue(records, receives=1)
+
+        assert dead_lettered == []
+        assert env.statuses(job_id, task_ids) == ["Available"] * 5
+        assert len(bedrock.calls) == 5
+        # No run labels more than the saved 1.
+        assert [received - sent_back for received, sent_back in runs] == (
+            [1] * 5)
+
+
+# --------------------------------------------------------- re-queue client
+
+class TestRequeueClient:
+    """The re-queue SQS client gives up quickly, so a hung SQS endpoint
+    cannot use up the run before the run labels the records itself."""
+
+    def test_a_hung_endpoint_gets_one_retry_then_the_run_labels_the_records(
+            self, env):
+        env.save(1)
+        job_id, task_ids, records = env.make_batch(3)
+        bedrock, _ = env.use_bedrock(replies=[NORMAL])
+        # The worker's own client, not the test seam.
+        env.monkeypatch.setattr(env.worker, "requeue_sqs_client", None)
+        env.monkeypatch.setattr(env.worker, "_cached_requeue_sqs_client",
+                                None)
+        client = env.worker._get_requeue_sqs_client()
+        attempts = []
+
+        def hang(request, **kwargs):
+            attempts.append(request.url)
+            raise ReadTimeoutError(endpoint_url=request.url)
+
+        client.meta.events.register("before-send.sqs.SendMessageBatch", hang)
+
+        assert env.run(records) == {"batchItemFailures": []}
+
+        # 2 attempts of at most 5 s to connect and 10 s to read; botocore's
+        # default retry policy makes 5.
+        assert len(attempts) == 2
+        assert (client.meta.config.connect_timeout,
+                client.meta.config.read_timeout) == (5, 10)
+        assert env.statuses(job_id, task_ids) == ["Available"] * 3
+        assert len(bedrock.calls) == 3
+        assert env.drain() == []
 
 
 # ------------------------------------------------------------ run log line

@@ -89,11 +89,17 @@ settings table, see autolabel_settings.py). With N saved and more than
 N records, it first sends records N+1 onwards back to its own queue
 (AUTOLABEL_QUEUE_URL) as new messages with the body unchanged, then
 labels the first N plus any record it could not send back. A copy sent
-back is visible at once and starts at 0 receives; the run reports the
-original as done. With nothing saved, an unreadable item, or a value
-that is not a whole number from 1 to 5, every record is processed, as
-before the setting existed. One log line per run reports the value
-used and the record counts.
+back is visible at once; the run reports the original as done. SQS
+counts receives per message, so each copy carries the receives of the
+record so far in the message attribute `autolabel_prior_receives`
+(every receive except the ones that sent it back). While a value is
+saved, a record received more than the queue's 3 times across its
+copies is not labeled again: the run reports it as a batch item
+failure, so it reaches the dead-letter queue as it would without the
+send-back. With nothing saved, an unreadable item, or a value that is
+not a whole number from 1 to 5, every record is processed, as before
+the setting existed. One log line per run reports the value used and
+the record counts.
 
 Requirements: 8.2, 8.5, 8.6, 9.4, 9.10, 12.1, 12.2
 """
@@ -1227,6 +1233,18 @@ def _resolve_skip_verification_counters(job_id: str) -> None:
 # Images per run (Settings → Auto-Labeling)
 # ---------------------------------------------------------------------------
 
+# The queue's maxReceiveCount (dda-portal-autolabel-queue in
+# compute-stack.ts): SQS moves a message to the dead-letter queue instead
+# of receiving it a 4th time.
+QUEUE_MAX_RECEIVE_COUNT = 3
+
+# SQS counts receives per message, so a copy sent back starts at 0. This
+# message attribute on the copy carries the receives of the record so far
+# that count toward QUEUE_MAX_RECEIVE_COUNT: every receive except the ones
+# that sent the record back. The distributor's messages do not have it.
+PRIOR_RECEIVES_ATTRIBUTE = 'autolabel_prior_receives'
+
+
 def _images_per_run() -> Tuple[Optional[int], str]:
     """The saved Images per worker run, read once at the start of a run.
 
@@ -1259,16 +1277,61 @@ def _images_per_run() -> Tuple[Optional[int], str]:
     return limit, 'settings'
 
 
+def _receives(record: Dict) -> int:
+    """How often the record has been received, this receive included: its
+    own ApproximateReceiveCount plus the receives its earlier copies carried
+    over in PRIOR_RECEIVES_ATTRIBUTE (0 on the distributor's messages)."""
+    try:
+        own = max(int(record['attributes']['ApproximateReceiveCount']), 1)
+    except (KeyError, TypeError, ValueError):
+        own = 1
+    try:
+        prior = max(int(record['messageAttributes']
+                        [PRIOR_RECEIVES_ATTRIBUTE]['stringValue']), 0)
+    except (KeyError, TypeError, ValueError):
+        prior = 0
+    return own + prior
+
+
+def _split_over_receive_cap(
+        records: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """Split a run's records into the ones it may label or send back and
+    the ones received more than QUEUE_MAX_RECEIVE_COUNT times across their
+    copies. The run reports the latter as batch item failures without
+    labeling them, so SQS moves them to the dead-letter queue after their
+    own receives, as it would have without the send-back."""
+    within, over = [], []
+    for record in records:
+        receives = _receives(record)
+        if receives > QUEUE_MAX_RECEIVE_COUNT:
+            logger.warning(
+                'Auto-label message %s has been received %d times across '
+                'its copies, more than the queue allows (%d); reporting it '
+                'as a batch item failure without labeling it',
+                record.get('messageId'), receives, QUEUE_MAX_RECEIVE_COUNT)
+            over.append(record)
+        else:
+            within.append(record)
+    return within, over
+
+
 def _get_requeue_sqs_client():
     """SQS client for sending records back to the queue. The short
-    timeouts keep a slow SQS call from using up the run."""
+    timeouts and the single retry keep a slow or hung SQS endpoint from
+    using up the run: 2 attempts of at most 5 s to connect and 10 s to
+    read, about 20 s against a hung endpoint, where botocore's default of
+    5 attempts takes about 65 s. Then the run labels the records itself."""
     global _cached_requeue_sqs_client
     if requeue_sqs_client is not None:
         return requeue_sqs_client
     if _cached_requeue_sqs_client is None:
         _cached_requeue_sqs_client = boto3.client(
             'sqs',
-            config=BotoConfig(connect_timeout=5, read_timeout=10),
+            config=BotoConfig(
+                connect_timeout=5,
+                read_timeout=10,
+                retries={'max_attempts': 1},
+            ),
         )
     return _cached_requeue_sqs_client
 
@@ -1276,12 +1339,13 @@ def _get_requeue_sqs_client():
 def _requeue_records(records: List[Dict]) -> List[Dict]:
     """Send each record's body back to the queue as a new message.
 
-    A copy sent back is visible at once and starts at 0 receives; the
-    original is deleted when the run reports it as done. Returns, in
-    order, the records that were not sent back, which the run processes
-    itself: every record when no queue URL is configured, a record with a
-    missing or empty body, a record whose entry SQS reports as failed, and
-    every record of a call that raised.
+    A copy sent back is visible at once and starts at 0 receives, so it
+    carries the record's receives so far, without this one, in
+    PRIOR_RECEIVES_ATTRIBUTE. The original is deleted when the run
+    reports it as done. Returns, in order, the records that were not sent
+    back, which the run processes itself: every record when no queue URL
+    is configured, a record with a missing or empty body, a record whose
+    entry SQS reports as failed, and every record of a call that raised.
     """
     if not records:
         return []
@@ -1305,7 +1369,11 @@ def _requeue_records(records: List[Dict]) -> List[Dict]:
             response = _get_requeue_sqs_client().send_message_batch(
                 QueueUrl=AUTOLABEL_QUEUE_URL,
                 Entries=[{'Id': str(index),
-                          'MessageBody': records[index]['body']}
+                          'MessageBody': records[index]['body'],
+                          'MessageAttributes': {PRIOR_RECEIVES_ATTRIBUTE: {
+                              'DataType': 'Number',
+                              'StringValue': str(
+                                  _receives(records[index]) - 1)}}}
                          for index in chunk],
             )
         except Exception as exc:  # noqa: BLE001 — process them in this run
@@ -1411,7 +1479,10 @@ def handler(event, context):
     the first N plus any record it could not send back. With nothing
     usable saved every record is processed, as before the setting
     existed. Records sent back are not batch item failures: the run
-    reports them as done, so SQS deletes the originals.
+    reports them as done, so SQS deletes the originals. While a value is
+    saved, a record received more than QUEUE_MAX_RECEIVE_COUNT times
+    across its copies is neither labeled nor sent back: it is reported as
+    a batch item failure (see _split_over_receive_cap).
     """
     # One Model_Token_Limits read per invocation: the memo is dropped
     # here so this batch resolves against one self-consistent mapping
@@ -1420,20 +1491,26 @@ def handler(event, context):
     _reset_model_token_limits_cache()
     records = list((event or {}).get('Records', []))
     limit, source = _images_per_run()
-    if limit is not None and len(records) > limit:
-        later = records[limit:]
+    candidates, over_cap = records, []
+    if limit is not None:
+        # Copies sent back start at 0 receives: hold each record to the
+        # queue's cap across its copies.
+        candidates, over_cap = _split_over_receive_cap(records)
+    if limit is not None and len(candidates) > limit:
+        later = candidates[limit:]
         kept = _requeue_records(later)
-        to_process = records[:limit] + kept
+        to_process = candidates[:limit] + kept
         requeued = len(later) - len(kept)
     else:
-        to_process = records
+        to_process = candidates
         requeued = 0
     logger.info(
         'Auto-label images per run: %s (%s); records %d, processed %d, '
         're-queued %d', limit if limit is not None else 'none', source,
         len(records), len(to_process), requeued)
 
-    batch_item_failures = []
+    batch_item_failures = [{'itemIdentifier': record['messageId']}
+                           for record in over_cap if record.get('messageId')]
     for record in to_process:
         message_id = record.get('messageId')
         try:

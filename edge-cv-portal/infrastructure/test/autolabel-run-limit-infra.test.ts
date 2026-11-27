@@ -16,7 +16,10 @@
  *   backend/functions/autolabel_settings.py, read from that file, so saving
  *   the highest value stays the same as nothing saved.
  * - (d) Unchanged: the worker's 300 s timeout, and the queue's 300 s
- *   visibility timeout and 3 receives before the DLQ.
+ *   visibility timeout and 3 receives before the DLQ. 3 is
+ *   QUEUE_MAX_RECEIVE_COUNT of backend/functions/dda_autolabel_worker.py,
+ *   read from that file: the worker holds a record it sends back to the
+ *   same 3 receives across its copies.
  * - (e) Exactly two functions carry AUTOLABEL_QUEUE_URL: the Task Distributor
  *   (dda_labeling_worker) and the auto-label worker.
  *
@@ -35,6 +38,7 @@ import { StorageStack } from '../lib/storage-stack';
 const TRUSTED_USECASE_ACCOUNT = '111111111111';
 const AUTOLABEL_QUEUE_NAME = 'dda-portal-autolabel-queue';
 const AUTOLABEL_SETTINGS_PY = path.join(__dirname, '../../backend/functions/autolabel_settings.py');
+const AUTOLABEL_WORKER_PY = path.join(__dirname, '../../backend/functions/dda_autolabel_worker.py');
 
 // Synthesized once: the ComputeStack stages Lambda/layer assets and runs the
 // quick-setup bundle packaging script at synth time, which is expensive.
@@ -136,6 +140,14 @@ function maxImagesPerRun(): number {
   return Number(match![1]);
 }
 
+/** QUEUE_MAX_RECEIVE_COUNT as dda_autolabel_worker.py defines it. */
+function workerQueueMaxReceiveCount(): number {
+  const source = fs.readFileSync(AUTOLABEL_WORKER_PY, 'utf8');
+  const match = source.match(/^QUEUE_MAX_RECEIVE_COUNT\s*=\s*(\d+)\b/m);
+  expect(match).not.toBeNull();
+  return Number(match![1]);
+}
+
 describe('DdaAutolabelWorker can send records back to its own queue (Images per worker run)', () => {
   test('(a) AUTOLABEL_QUEUE_URL is the URL of dda-portal-autolabel-queue', () => {
     const [queueId] = autolabelQueue();
@@ -173,12 +185,15 @@ describe('the worker, its queue and its event source are otherwise unchanged', (
     expect(properties.FunctionResponseTypes).toEqual(['ReportBatchItemFailures']);
   });
 
-  test('(d) the worker Timeout stays 300; the queue VisibilityTimeout stays 300 and maxReceiveCount 3', () => {
+  test('(d) the worker Timeout stays 300; the queue VisibilityTimeout stays 300 and maxReceiveCount 3 (QUEUE_MAX_RECEIVE_COUNT)', () => {
     const [, fn] = lambdaByHandler('dda_autolabel_worker.handler');
     expect(fn.Properties.Timeout).toBe(300);
     const [, queue] = autolabelQueue();
     expect(queue.Properties.VisibilityTimeout).toBe(300);
     expect(queue.Properties.RedrivePolicy.maxReceiveCount).toBe(3);
+    // The worker holds a record it sends back to the queue's cap across
+    // its copies: the two must not drift apart.
+    expect(queue.Properties.RedrivePolicy.maxReceiveCount).toBe(workerQueueMaxReceiveCount());
   });
 
   test('(e) exactly two functions carry AUTOLABEL_QUEUE_URL: the distributor and the auto-label worker', () => {
