@@ -81,6 +81,20 @@ infrastructure errors (e.g. a DynamoDB write failure) surface the
 record's messageId in `batchItemFailures` so SQS redrive semantics
 apply to that record alone.
 
+Images per worker run (Settings → Auto-Labeling): the queue hands a
+run up to 5 records, which it labels one after the other within its
+300 s timeout. At the start of every run the worker reads the saved
+Images per worker run (`autolabel.images_per_run` in the portal
+settings table, see autolabel_settings.py). With N saved and more than
+N records, it first sends records N+1 onwards back to its own queue
+(AUTOLABEL_QUEUE_URL) as new messages with the body unchanged, then
+labels the first N plus any record it could not send back. A copy sent
+back is visible at once and starts at 0 receives; the run reports the
+original as done. With nothing saved, an unreadable item, or a value
+that is not a whole number from 1 to 5, every record is processed, as
+before the setting existed. One log line per run reports the value
+used and the record counts.
+
 Requirements: 8.2, 8.5, 8.6, 9.4, 9.10, 12.1, 12.2
 """
 import json
@@ -130,6 +144,13 @@ from dda_llm_request import (
     resolve_model_image_limit,
     select_few_shot_examples,
 )
+# Images per worker run (Settings → Auto-Labeling): the settings key and the
+# rule for a stored value, shared with the Settings API in data_accounts.py
+# (same functions bundle, so it is imported directly).
+from autolabel_settings import (
+    IMAGES_PER_RUN_SETTING_KEY,
+    parse_stored_images_per_run,
+)
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -147,6 +168,10 @@ GROUNDED_SAM_WORKER_FUNCTION_NAME = os.environ.get(
 # the same table bedrock_common already reads the Bedrock_Configuration
 # from (llm-model-token-and-image-sizing Req 1.6, 1.8).
 SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
+# This worker's own queue (dda-portal-autolabel-queue). The records of a run
+# beyond the saved Images per worker run (Settings → Auto-Labeling) go back
+# to it for another run; unset means every record is processed.
+AUTOLABEL_QUEUE_URL = os.environ.get('AUTOLABEL_QUEUE_URL', '')
 
 jobs_table = dynamodb.Table(LABELING_JOBS_TABLE)
 tasks_table = dynamodb.Table(LABELING_TASKS_TABLE)
@@ -204,6 +229,12 @@ _cached_sam_lambda_client = None
 # for synchronous Grounded-SAM worker invocations.
 grounded_sam_lambda_client = None
 _cached_grounded_sam_lambda_client = None
+
+# Test injection point: when set, used instead of a boto3 SQS client for
+# sending the records beyond the saved Images per worker run back to the
+# queue.
+requeue_sqs_client = None
+_cached_requeue_sqs_client = None
 
 
 class MalformedMessage(Exception):
@@ -1193,6 +1224,112 @@ def _resolve_skip_verification_counters(job_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Images per run (Settings → Auto-Labeling)
+# ---------------------------------------------------------------------------
+
+def _images_per_run() -> Tuple[Optional[int], str]:
+    """The saved Images per worker run, read once at the start of a run.
+
+    Returns (N, 'settings') for a saved whole number from 1 to 5.
+    Otherwise returns (None, 'default'), meaning every record of the
+    batch is processed, as before the setting existed: the settings table
+    is not configured, the item is absent, the read fails, or the stored
+    value is not a whole number from 1 to 5.
+    """
+    if not SETTINGS_TABLE:
+        return None, 'default'
+    try:
+        response = dynamodb.Table(SETTINGS_TABLE).get_item(
+            Key={'setting_key': IMAGES_PER_RUN_SETTING_KEY}
+        )
+    except Exception as exc:  # ClientError, table missing, throttling
+        logger.warning('Could not read the images per run setting; '
+                       'processing every record: %s', exc)
+        return None, 'default'
+
+    item = response.get('Item')
+    if not item:
+        return None, 'default'
+    limit = parse_stored_images_per_run(item.get('value'))
+    if limit is None:
+        logger.warning('Ignoring the stored images per run %r: not a whole '
+                       'number in the allowed range; processing every '
+                       'record', item.get('value'))
+        return None, 'default'
+    return limit, 'settings'
+
+
+def _get_requeue_sqs_client():
+    """SQS client for sending records back to the queue. The short
+    timeouts keep a slow SQS call from using up the run."""
+    global _cached_requeue_sqs_client
+    if requeue_sqs_client is not None:
+        return requeue_sqs_client
+    if _cached_requeue_sqs_client is None:
+        _cached_requeue_sqs_client = boto3.client(
+            'sqs',
+            config=BotoConfig(connect_timeout=5, read_timeout=10),
+        )
+    return _cached_requeue_sqs_client
+
+
+def _requeue_records(records: List[Dict]) -> List[Dict]:
+    """Send each record's body back to the queue as a new message.
+
+    A copy sent back is visible at once and starts at 0 receives; the
+    original is deleted when the run reports it as done. Returns, in
+    order, the records that were not sent back, which the run processes
+    itself: every record when no queue URL is configured, a record with a
+    missing or empty body, a record whose entry SQS reports as failed, and
+    every record of a call that raised.
+    """
+    if not records:
+        return []
+    if not AUTOLABEL_QUEUE_URL:
+        logger.warning('AUTOLABEL_QUEUE_URL is not configured; processing '
+                       'all %d records beyond the images per run in this '
+                       'run', len(records))
+        return list(records)
+
+    not_sent = set()
+    sendable = []
+    for index, record in enumerate(records):
+        if record.get('body'):
+            sendable.append(index)
+        else:
+            not_sent.add(index)
+
+    for start in range(0, len(sendable), 10):  # SQS batch limit: 10
+        chunk = sendable[start:start + 10]
+        try:
+            response = _get_requeue_sqs_client().send_message_batch(
+                QueueUrl=AUTOLABEL_QUEUE_URL,
+                Entries=[{'Id': str(index),
+                          'MessageBody': records[index]['body']}
+                         for index in chunk],
+            )
+        except Exception as exc:  # noqa: BLE001 — process them in this run
+            logger.warning('Could not send %d records back to the queue; '
+                           'processing them in this run: %s',
+                           len(chunk), exc)
+            not_sent.update(chunk)
+            continue
+        failed = {entry.get('Id'): entry
+                  for entry in (response.get('Failed') or [])}
+        for index in chunk:
+            if str(index) in failed:
+                logger.warning(
+                    'Could not send auto-label message %s back to the '
+                    'queue (%s); processing it in this run',
+                    records[index].get('messageId'),
+                    failed[str(index)].get('Code'))
+                not_sent.add(index)
+
+    return [record for index, record in enumerate(records)
+            if index in not_sent]
+
+
+# ---------------------------------------------------------------------------
 # Record processing
 # ---------------------------------------------------------------------------
 
@@ -1267,14 +1404,37 @@ def handler(event, context):
     failure retries only the affected record; generation failures are
     absorbed per record (marked Failed on the task) and malformed
     messages are logged and dropped — neither poisons the batch.
+
+    Images per worker run (Settings → Auto-Labeling) is read once per
+    run. With N saved and more than N records, records N+1 onwards are
+    first sent back to the queue as new messages; the run then processes
+    the first N plus any record it could not send back. With nothing
+    usable saved every record is processed, as before the setting
+    existed. Records sent back are not batch item failures: the run
+    reports them as done, so SQS deletes the originals.
     """
     # One Model_Token_Limits read per invocation: the memo is dropped
     # here so this batch resolves against one self-consistent mapping
     # and a warm container never serves a stale one
     # (llm-model-token-and-image-sizing Req 1.6, 1.8).
     _reset_model_token_limits_cache()
+    records = list((event or {}).get('Records', []))
+    limit, source = _images_per_run()
+    if limit is not None and len(records) > limit:
+        later = records[limit:]
+        kept = _requeue_records(later)
+        to_process = records[:limit] + kept
+        requeued = len(later) - len(kept)
+    else:
+        to_process = records
+        requeued = 0
+    logger.info(
+        'Auto-label images per run: %s (%s); records %d, processed %d, '
+        're-queued %d', limit if limit is not None else 'none', source,
+        len(records), len(to_process), requeued)
+
     batch_item_failures = []
-    for record in (event or {}).get('Records', []):
+    for record in to_process:
         message_id = record.get('messageId')
         try:
             message = _parse_record(record)
