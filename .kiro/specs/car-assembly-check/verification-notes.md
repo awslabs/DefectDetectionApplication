@@ -164,3 +164,86 @@ No output value of any stack changed. Every output of every stack, before and af
 ### Undo
 
 There is no one-command rollback. The 'before' snapshot (`state-18-2/snapshot-before/`; the templates and resource lists are under `/home/ubuntu/dda-tmp/car-assembly-live-18-19/snapshot-before/`) is the basis for change sets that would restore the previous templates, and the old asset zips are still in the bootstrap bucket. That needs its own go.
+
+## Sandbox image
+
+Task 18.3: the cloud test sandbox image is built from `<DEPLOY_COMMIT>` and pushed to the demo account. As in "Portal deploy #1", a relative evidence path is in the run directory, and `live-log.md` lists every command.
+
+### Result
+
+- **Repository:** `326334468650.dkr.ecr.us-west-2.amazonaws.com/dda-workflow-test-sandbox`, the repository of the demo account's test-runner stack (326334468650, us-west-2).
+- **Digest** (`<OWNER: image digest>`): `sha256:0a8177eaa723ebb2df3e141c56e03341737c6287746d2b7a0acab1400ad10924`. Its local image id is `sha256:4319a8415d7896d7bde5e7e3efe952b2aa04df9e8016ca521fe251d6db9b0a03`.
+- **Tags:** `main-16f3e8ab`, pushed at 2026-11-27 23:21:56Z, and `latest`, set by the server-side retag at 23:22:00Z.
+- **Source commit:** `16f3e8ab391a3d184530c8ae9fb01057b6fe6f04` (`<DEPLOY_COMMIT>`, 18.1), in the detached worktree `.worktrees/car-assembly-check-sandbox-16f3e8ab`. Its `git status --porcelain` was empty before and after the build.
+- **Date:** 2026-11-27. Built 23:11:13–23:11:17Z, pushed and retagged 23:21:47–23:22:03Z.
+- **The tag the Portal pulls:** `latest`. At `16f3e8ab`, neither `cdk.json` nor the deploy scripts set `testSandboxImageTag`, and the code default is `latest` (`test-runner-stack.ts:75`, `node-designer-stack.ts:1177`). Both deployed task definitions pull `…/dda-workflow-test-sandbox:latest` on X86_64: `EdgeCVPortalTestRunnerStackTestSandboxTaskDefinition44315046:2` (workflow test runs) and `EdgeCVPortalNodeDesignerStackSimulatorTaskDefinitionFAE45D8A:1` (plugin simulations). No CDK deploy was needed.
+
+### Inputs at `16f3e8ab`, re-read
+
+- **`test-sandbox/Dockerfile`:** `COPY … workflow_core` at `:218`, `COPY … harness` at `:221`, `ENV PYTHONPATH=/opt/harness` at `:223` and `CMD ["/opt/dda/harness-venv/bin/python", "-m", "harness"]` at `:228`. These are the same lines as at `268dc5f5` and `e7547824`.
+- **`harness/bindings.py`:** `:285-288` define `LAYOUT_CHECK_BINDING = "layout_check"` and add it to `SCENE_ANALYTICS_BINDINGS`.
+- **`test-sandbox/README.md`:** "Build and push" is at `:186-253` and "Build gotchas" at `:255`.
+- **What changed since the previous image's source `e7547824`:** the image inputs differ only in five `workflow_core` files and in `harness/bindings.py`:
+  - `analytics/__init__.py`;
+  - `analytics/layout.py`, which is new;
+  - `catalog/nodes.py`;
+  - `validator/__init__.py`;
+  - `validator/checks.py`.
+
+  Two other changed files are under `test-sandbox/tests/`, which the Dockerfile does not copy.
+- **Staged, git-ignored:** the DDA plugin set (README "Staging the DDA plugins"), 58 files copied from the main checkout. Their sha256 equals the set the previous image was built with. `dda_triton_resources/` was used as committed.
+
+### Build
+
+- **Command,** from `edge-cv-portal/` of the build worktree (the task's command, plus `--progress=plain` for the log): `docker build --progress=plain --platform linux/amd64 -f test-sandbox/Dockerfile -t 326334468650.dkr.ecr.us-west-2.amazonaws.com/dda-workflow-test-sandbox:main-16f3e8ab .` -> rc 0.
+- **Build steps:** steps 1–17 of 20 came from the local cache of the `e7547824` build. The two `COPY` steps for `workflow_core` and `harness` were built, and nothing was pulled.
+- **Layers:** 18 of the 20 layers equal those of the previous image. Layer 18, `workflow_core`, is 657 kB, and layer 19, `harness`, is 172 kB.
+- **Image:** linux/amd64, 7,678,708,940 bytes, `Cmd ["/opt/dda/harness-venv/bin/python","-m","harness"]`.
+- **Deviation, the build host:** the task names a native x86_64 host. This build ran on the run's arm64 host under qemu, as the owner decided (plan D4 (a)). The previous image, which passed a Portal test run on Fargate, was built the same way.
+- **Deviation, no prune:** no `docker system prune` ran. It would have removed other sessions' images and cache, and 1.8 TB was free.
+
+### Checks before pushing
+
+Each check ran as `docker run --rm --platform linux/amd64 --pull=never --network none … main-16f3e8ab`, and all exited 0:
+
+| Check | Output |
+|---|---|
+| README step 2: `--entrypoint python3 … -c "import sklearn; print('sklearn', sklearn.__version__)"` | `sklearn 1.3.2` |
+| README step 2: `--entrypoint /opt/dda/harness-venv/bin/python … -c "import sys, PIL; print('harness', sys.version.split()[0], 'Pillow', PIL.__version__)"` | `harness 3.11.18 Pillow 13.0.0` |
+| The task's check, through the interpreter the `CMD` uses: `--entrypoint /opt/dda/harness-venv/bin/python … -c "from workflow_core.analytics import layout; from harness import bindings; assert 'layout_check' in bindings.SCENE_ANALYTICS_BINDINGS; print('layout_check ok')"` | `layout_check ok` |
+
+### Push and retag
+
+These ran on the owner's go, relayed by the parent session.
+
+- **Right before the push:** `describe-images` showed one image, `sha256:3813e4ebdb57f890db64857348d355242febe1e3fc485b03e6c3710a64985d0d`, tagged `latest` and `main-e7547824`. That image was built from `e7547824` and pushed 02:18:02Z. So `main-16f3e8ab` did not exist, and `latest` was on `3813e4eb…`. Either finding the other way would have stopped the step. No test-runner execution and no sandbox task was running.
+- **Login:** the ECR login token was kept in a temporary docker client config, which was logged out and deleted after the push. The shared docker client configs were not changed.
+- **Push:** `docker push …:main-16f3e8ab` uploaded 2 layers, and the other 15 distinct layers already existed. The digest is `sha256:0a8177ea…`.
+- **Read-back:** `batch-get-image` returned a single-platform `application/vnd.docker.distribution.manifest.v2+json` manifest. The sha256 of its bytes equals the digest, and its config is the local image id.
+- **Retag:** `aws ecr put-image --image-tag latest --image-manifest file://…/manifest.json --image-digest sha256:0a8177ea…` (the README's server-side retag).
+- **Verification:** `aws ecr describe-images --image-ids imageTag=latest` returns `sha256:0a8177eaa723ebb2df3e141c56e03341737c6287746d2b7a0acab1400ad10924`, tags `latest` and `main-16f3e8ab`. The previous image `3813e4eb…` keeps only the tag `main-e7547824`.
+
+### Scan on push
+
+The registry's scanning configuration is `BASIC` with no rules, and the repository has `scanOnPush: true`.
+
+| Image | Scan status | Completed | CRITICAL | HIGH | MEDIUM | LOW | UNDEFINED |
+|---|---|---|---|---|---|---|---|
+| `0a8177ea…` (new, `latest`) | `COMPLETE` | 2026-11-27 23:23:08Z | 57 | 460 | 362 | 52 | 24 |
+| `3813e4eb…` (previous) | `COMPLETE` | 2026-11-27 02:22:14Z | 57 | 452 | 318 | 36 | 24 |
+
+All 887 findings of the previous image are in the new list. The 68 extra findings are on OS packages that come from the 18 unchanged layers:
+- `binutils`, `libbinutils`, `libctf0` and `libctf-nobfd0` `2.38-4ubuntu2.12`, 16 findings each;
+- `libtiff5` and `tiff` `4.3.0-6ubuntu0.13`, 2 findings each.
+
+The two new layers hold only Python sources. The extra findings therefore come from the scanner's newer vulnerability data, not from this change. The findings are recorded and were not acted on (`state-18-3/scan/compare.txt`).
+
+### Effect and undo
+
+- **Effect:** every workflow test run and plugin simulation started after 23:22:00Z pulls this image. Its harness keeps `layout_check` bindings instead of dropping them, as the third check above shows. Whether a cloud test run produces the `layout` section is read in 20.3, which comes only after this task.
+- **Undo** (not run; needs its own go): put `latest` back on the previous image through its remaining tag:
+  ```bash
+  M=$(aws ecr batch-get-image --profile dda-usw2 --region us-west-2 --repository-name dda-workflow-test-sandbox --image-ids imageTag=main-e7547824 --query 'images[0].imageManifest' --output text)
+  aws ecr put-image --profile dda-usw2 --region us-west-2 --repository-name dda-workflow-test-sandbox --image-tag latest --image-manifest "$M" --image-digest sha256:3813e4ebdb57f890db64857348d355242febe1e3fc485b03e6c3710a64985d0d
+  ```
+- **Coordination:** another session has local, unpushed sandbox images built from a tree that predates PR #174. The owner will ask that session to rebuild from `main` at or after `16f3e8ab` before it moves `latest`. An image without PR #174 would drop the `layout_check` binding again.
