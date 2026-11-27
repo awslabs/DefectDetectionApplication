@@ -3748,6 +3748,135 @@
     ],
     "type_id": "inference_filter"
   },
+  "layout_check": {
+    "category": "post_processing",
+    "display_name": "Layout Check",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "layout_check",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "layout_check",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "layout_check",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "layout_check",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "layout_check",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "layout_check",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "layout_check",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 2
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Where each class must lie when correctly placed: a JSON object mapping a detection label to a closed polygon of 3 to 64 [x, y] points in normalized frame coordinates (0 to 1), one entry per class to check (1 to 10). A run passes when every listed class is detected exactly once and its mask overlaps its polygon with IoU >= min_iou. The verdict is written to the run metadata as layout.<nodeId>.pass with a per-class layout.<nodeId>.pieces.<label>.status; a downstream condition reads it by dotted path, e.g. layout.<nodeId>.pass == false.",
+        "examples": [
+          "{\"roof\": [[0.3, 0.2], [0.7, 0.2], [0.7, 0.45], [0.3, 0.45]]}"
+        ],
+        "multiline": true,
+        "name": "expected_regions",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.01
+        },
+        "default": 0.7,
+        "depends_on": null,
+        "description": "Minimum IoU between a class's mask and its polygon for the piece to count as correctly placed (0.01 to 1), e.g. 0.7. Calibrate it from known-good runs; see the user guide.",
+        "examples": [
+          0.7,
+          0.6
+        ],
+        "multiline": false,
+        "name": "min_iou",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.0
+        },
+        "default": 0.5,
+        "depends_on": null,
+        "description": "Ignore detections whose confidence is below this value (0 to 1), e.g. 0.5.",
+        "examples": [
+          0.5
+        ],
+        "multiline": false,
+        "name": "min_confidence",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 0.5,
+          "min": 0.0
+        },
+        "default": 0.1,
+        "depends_on": null,
+        "description": "Ignore a detection lying outside the car outline (the union of the expected regions): a detection counts only if at least this fraction of its mask lies inside it (0 to 0.5), e.g. 0.1. Ignored detections are listed under layout.<nodeId>.ignored and never fail the check; 0 counts every detection.",
+        "examples": [
+          0.1,
+          0.0
+        ],
+        "multiline": false,
+        "name": "min_outline_overlap",
+        "param_type": "float",
+        "required": false
+      }
+    ],
+    "type_id": "layout_check"
+  },
   "llm_inference": {
     "category": "inference",
     "display_name": "VLM/LLM Inference",

@@ -35,7 +35,10 @@ import {
   dataPlaneGrant,
   detectorExportImage as resolveDetectorExportImage,
   groundedSamWorkerEnabled,
+  parseLayoutCheckFloor,
+  parseMinVersionsFloor,
   portalRegistryEnforced,
+  RFDETR_SEG_FLOOR_SSM_PARAMETER,
   rfDetrSegEnabled,
 } from './context-helpers';
 import { PYTHON_CONTAINER_ASSET_EXCLUDES } from './container-asset-excludes';
@@ -856,13 +859,42 @@ export class ComputeStack extends cdk.Stack {
     // unverified and Seg workflows are refused for that architecture until a
     // device verifies it. arm64_cpu has no Portal build target. Both are
     // listed as unverified in tests/test_rfdetr_seg_feature_floor_coverage.py.
-    const rfDetrSegFeatureFloorEnvironment = {
+    // This literal is the committed default: a deployment that sets the
+    // rfdetrSegMinLocalServerVersions context key (car-assembly-check design
+    // §7, DD9; default env RFDETR_SEG_FLOOR, then SSM
+    // /dda-portal/rfdetr-seg-min-local-server-versions) carries that map
+    // instead, and an explicit {} refuses Seg on that deployment.
+    const rfDetrSegFeatureFloorDefault = {
       WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
         arm64_jp5: '1.0.62',
         arm64_jp6: '1.0.85',
         x86_64: '1.0.56',
         x86_64_nvidia: '1.0.56',
       }),
+    };
+    const configuredSegFloor = parseMinVersionsFloor(
+      'rfdetrSegMinLocalServerVersions',
+      RFDETR_SEG_FLOOR_SSM_PARAMETER,
+      this.node.tryGetContext('rfdetrSegMinLocalServerVersions'),
+    );
+    const rfDetrSegFeatureFloorEnvironment =
+      configuredSegFloor === undefined
+        ? rfDetrSegFeatureFloorDefault
+        : { WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify(configuredSegFloor) };
+    // The Layout_Check FEATURE floor (car-assembly-check Requirement 9.3,
+    // design §7, DD9): per arch, the first LocalServer build whose
+    // scene-analytics pass evaluates layout_check bindings. Greengrass
+    // versions are per account, so the value is per-deployment configuration
+    // (-c layoutCheckMinLocalServerVersions, default env LAYOUT_CHECK_FLOOR,
+    // then SSM /dda-portal/layout-check-min-local-server-versions) and there
+    // is no literal here. Absent or blank is {}, which FAILS CLOSED: a
+    // workflow with a layout_check node is refused for every arch with
+    // LAYOUT_CHECK_UNSUPPORTED_ARCH. Carried by the same two Lambdas as the
+    // Seg floor.
+    const layoutCheckFeatureFloorEnvironment = {
+      WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify(
+        parseLayoutCheckFloor(this.node.tryGetContext('layoutCheckMinLocalServerVersions')),
+      ),
     };
 
     // Per-model Model_Image_Limit overrides for `llm:` auto-label requests
@@ -1362,6 +1394,7 @@ export class ComputeStack extends cdk.Stack {
         ...lambdaEnvironment,
         ...streamCameraFeatureFloorEnvironment,
         ...rfDetrSegFeatureFloorEnvironment,
+        ...layoutCheckFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-04-deployments',
       },
       // workflow_core: the manual-override path of validate_camera_bindings
@@ -3383,6 +3416,7 @@ export class ComputeStack extends cdk.Stack {
         ...lambdaEnvironment,
         ...streamCameraFeatureFloorEnvironment,
         ...rfDetrSegFeatureFloorEnvironment,
+        ...layoutCheckFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-25-workflow-packaging',
       },
       layers: [sharedLayer, workflowCoreLayer],

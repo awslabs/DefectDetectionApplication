@@ -269,6 +269,24 @@ STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
 RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
     'WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS')
 
+#: The Layout_Check FEATURE floor (car-assembly-check Requirement 9.3,
+#: design §7, DD9): the minimum LocalServer version per architecture whose
+#: scene-analytics pass evaluates ``layout_check`` executor bindings. An
+#: older LocalServer ignores the binding, so a workflow with a
+#: ``layout_check`` node would run without its verdict; such a workflow must
+#: never resolve a floor below this one.
+#:
+#: Fourth floor beside the lineage, stream and Seg floors, same ``{arch:
+#: version}`` shape and env-map discipline. The value is per-deployment
+#: configuration (compute-stack.ts reads the ``layoutCheckMinLocalServer
+#: Versions`` CDK context, defaulting to the ``LAYOUT_CHECK_FLOOR`` shell
+#: variable and then the SSM parameter), and absent configuration is the
+#: empty map, which FAILS CLOSED: a workflow with a ``layout_check`` node is
+#: rejected with LAYOUT_CHECK_UNSUPPORTED_ARCH for every architecture.
+#: Its shape is pinned by test_layout_check_feature_floor_coverage.py.
+LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
+    'WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS')
+
 
 def _version_sort_key(version) -> tuple:
     """Comparison key for a plain ``N.N.N`` floor — the same digit-wise
@@ -285,7 +303,8 @@ def _max_version(*versions):
 
 
 def min_local_server_version_for(arch, stream_features: bool = False,
-                                 rfdetr_seg: bool = False):
+                                 rfdetr_seg: bool = False,
+                                 layout_check: bool = False):
     """The minimum LocalServer version for a Workflow_Component targeting
     ``arch``: the per-arch entry when mapped; for a KNOWN arch missing
     from a configured (non-empty) map, the safe per-lineage floor
@@ -318,7 +337,16 @@ def min_local_server_version_for(arch, stream_features: bool = False,
     ``rfdetr_seg_arch_gate_findings`` gate rejects such a request with
     RFDETR_SEG_UNSUPPORTED_ARCH first. ``rfdetr_seg=False`` (the default)
     changes nothing, so a workflow without a Seg model resolves
-    byte-identically (Requirement 17.1)."""
+    byte-identically (Requirement 17.1).
+
+    ``layout_check=True`` (the workflow contains a ``layout_check`` node,
+    car-assembly-check Requirement 9.3, design §7) raises the result to the
+    Layout_Check feature floor LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS[arch]
+    the same way — ``max(lineage, stream, seg, layout_check)`` — with the
+    backstop PackagingError('layout-check-feature-floor/<arch>') for an
+    architecture absent from that map (``layout_check_arch_gate_findings``
+    rejects such a request first). ``layout_check=False`` (the default)
+    changes nothing."""
     if arch and arch in MIN_LOCAL_SERVER_VERSIONS:
         resolved = MIN_LOCAL_SERVER_VERSIONS[arch]
     # ARCH_TO_LOCAL_SERVER_COMPONENT is defined below; module-level name
@@ -361,11 +389,24 @@ def min_local_server_version_for(arch, stream_features: bool = False,
                 f"({GATE_RFDETR_SEG_ARCH_UNSUPPORTED}). Supported architectures: "
                 f"{', '.join(sorted(RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS)) or 'none'}")
         resolved = _max_version(resolved, seg_floor)
+    if layout_check:
+        layout_floor = LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS.get(arch)
+        if layout_floor is None:
+            raise PackagingError(
+                f"layout-check-feature-floor/{arch}",
+                f"This workflow uses a {LAYOUT_CHECK_TYPE_ID} node, which "
+                f"requires a LocalServer build that supports it, but "
+                f"architecture '{arch}' has no entry in "
+                f"WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS "
+                f"({GATE_LAYOUT_CHECK_ARCH_UNSUPPORTED}). Supported architectures: "
+                f"{', '.join(sorted(LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS)) or 'none'}")
+        resolved = _max_version(resolved, layout_floor)
     return resolved
 
 
 def min_local_server_versions_map(stream_features: bool = False,
-                                  rfdetr_seg: bool = False) -> Dict[str, str]:
+                                  rfdetr_seg: bool = False,
+                                  layout_check: bool = False) -> Dict[str, str]:
     """The full per-arch floor map stamped into manifest.json as
     ``minLocalServerVersions`` — the map a variant-aware device reads IN
     PREFERENCE to the scalar (``discovery.validate_artifact`` selects the
@@ -391,7 +432,11 @@ def min_local_server_versions_map(stream_features: bool = False,
     closes. Architectures outside the Seg map keep their value (the
     handler's gate has already rejected the request if the package's own
     arch is one of them). ``rfdetr_seg=False`` (the default) changes
-    nothing (Requirement 17.1)."""
+    nothing (Requirement 17.1).
+
+    ``layout_check=True`` (car-assembly-check Requirement 9.3) raises every
+    Layout_Check-floor architecture's entry the same way, for the same
+    reason; ``layout_check=False`` (the default) changes nothing."""
     effective = dict(MIN_LOCAL_SERVER_VERSIONS)
     if stream_features:
         for arch in STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS:
@@ -400,6 +445,11 @@ def min_local_server_versions_map(stream_features: bool = False,
     if rfdetr_seg:
         for arch in RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS:
             raised = min_local_server_version_for(arch, rfdetr_seg=True)
+            effective[arch] = (_max_version(effective[arch], raised)
+                               if arch in effective else raised)
+    if layout_check:
+        for arch in LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS:
+            raised = min_local_server_version_for(arch, layout_check=True)
             effective[arch] = (_max_version(effective[arch], raised)
                                if arch in effective else raised)
     return effective
@@ -976,6 +1026,13 @@ GATE_STREAM_ARCH_UNSUPPORTED = 'STREAM_CAMERAS_UNSUPPORTED_ARCH'
 #: on an architecture the Seg feature floor map does not cover
 #: (rfdetr-seg-support Requirement 14.8, design DD8).
 GATE_RFDETR_SEG_ARCH_UNSUPPORTED = 'RFDETR_SEG_UNSUPPORTED_ARCH'
+#: Packaging gate code for a workflow with a ``layout_check`` node on an
+#: architecture the Layout_Check feature floor map does not cover
+#: (car-assembly-check Requirement 9.3, design §7).
+GATE_LAYOUT_CHECK_ARCH_UNSUPPORTED = 'LAYOUT_CHECK_UNSUPPORTED_ARCH'
+#: The node type the Layout_Check floor keys on. Deliberately NOT a member of
+#: STREAM_FEATURE_TYPE_IDS: it has its own floor.
+LAYOUT_CHECK_TYPE_ID = 'layout_check'
 #: The detection arch a model record carries under ``detection`` when it is
 #: an RF-DETR-Seg model (trained, converted or imported through the Seg
 #: paths of rfdetr-seg-support); the Seg floor's discriminator.
@@ -1097,6 +1154,62 @@ def rfdetr_seg_arch_gate_findings(seg_models: List[str],
                         f"version: {', '.join(supported) or 'none'}"),
             'arch': arch,
             'models': list(seg_models),
+        })
+    return findings
+
+
+def _node_ids_of_type(graph_document: Dict, type_id: str) -> List[str]:
+    """Ids of the Workflow_Definition's nodes of ``type_id``, in definition
+    order (the ``gather_llm_inference_node_ids`` reading of the raw
+    definition document)."""
+    node_ids: List[str] = []
+    for node in (graph_document or {}).get('nodes') or []:
+        if isinstance(node, dict) and node.get('type') == type_id:
+            node_id = node.get('id')
+            if isinstance(node_id, str):
+                node_ids.append(node_id)
+    return node_ids
+
+
+def _has_node_type(graph_document: Dict, type_id: str) -> bool:
+    """Whether the Workflow_Definition has at least one node of ``type_id``."""
+    return bool(_node_ids_of_type(graph_document, type_id))
+
+
+def layout_check_arch_gate_findings(graph_document: Dict,
+                                    requested_archs) -> List[Dict]:
+    """The Layout_Check feature-floor architecture gate (car-assembly-check
+    Requirement 9.3, design §7): one finding ``{code:
+    'LAYOUT_CHECK_UNSUPPORTED_ARCH', arch, nodeIds}`` per requested
+    architecture missing from LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS, when
+    the definition has a ``layout_check`` node. Empty for a workflow without
+    one (whatever the floor map holds), and empty when every requested
+    architecture is covered. Twin of ``rfdetr_seg_arch_gate_findings``,
+    evaluated by the handler after the Seg gate and before any version item
+    is written, so the request is rejected with the complete finding list
+    and no component version is registered. An unmapped architecture has no
+    required version of its own, so the message lists each mapped
+    architecture with its floor version (or 'none'). The empty map — no
+    floor configured for this deployment — rejects every architecture."""
+    node_ids = _node_ids_of_type(graph_document, LAYOUT_CHECK_TYPE_ID)
+    if not node_ids:
+        return []
+    supported = ', '.join(
+        f"{arch} >= {LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS[arch]}"
+        for arch in sorted(LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS)) or 'none'
+    findings: List[Dict] = []
+    for arch in requested_archs:
+        if arch in LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS:
+            continue
+        findings.append({
+            'code': GATE_LAYOUT_CHECK_ARCH_UNSUPPORTED,
+            'message': (f"Architecture '{arch}' has no LocalServer version "
+                        f"known to support {LAYOUT_CHECK_TYPE_ID} nodes, so "
+                        f"node(s) {', '.join(node_ids)} cannot be packaged "
+                        f"for it. Architectures with a supporting LocalServer "
+                        f"version: {supported}"),
+            'arch': arch,
+            'nodeIds': list(node_ids),
         })
     return findings
 
@@ -2205,7 +2318,8 @@ def _model_arch_contradiction_guard(greengrass, resolved: Dict[str, Any],
 
 
 def local_server_component_dependencies(archs, stream_features: bool = False,
-                                        rfdetr_seg: bool = False) -> Dict:
+                                        rfdetr_seg: bool = False,
+                                        layout_check: bool = False) -> Dict:
     """The HARD LocalServer ComponentDependencies entry for the selected
     architectures — emitted ONLY when they collapse to exactly one distinct
     LocalServer variant (edge-deploy-reliability Defect F, 2.15/2.16/2.17).
@@ -2235,6 +2349,10 @@ def local_server_component_dependencies(archs, stream_features: bool = False,
     floor to ``max(lineage, stream, seg)`` the same way, through
     ``min_local_server_version_for``; the default False leaves every
     workflow without a Seg model unchanged (Requirement 17.1).
+    ``layout_check=True`` (the workflow has a ``layout_check`` node,
+    car-assembly-check Requirement 9.3) raises each arch's floor to
+    ``max(lineage, stream, seg, layout_check)`` likewise; the default False
+    leaves every other workflow unchanged.
 
     Multiple distinct variants: return {} and log a warning naming the
     omitted variants. Greengrass ComponentDependencies is recipe-GLOBAL,
@@ -2266,7 +2384,8 @@ def local_server_component_dependencies(archs, stream_features: bool = False,
                 f"{', '.join(sorted(ARCH_TO_LOCAL_SERVER_COMPONENT))}")
         variant_floors.setdefault(component_name, []).append(
             min_local_server_version_for(arch, stream_features=stream_features,
-                                         rfdetr_seg=rfdetr_seg))
+                                         rfdetr_seg=rfdetr_seg,
+                                         layout_check=layout_check))
     if not variant_floors:
         return {}
     if len(variant_floors) > 1:
@@ -2402,7 +2521,8 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
                    component_version: Optional[str] = None,
                    workflow_name: Optional[str] = None,
                    subscribed_topics: Optional[List[str]] = None,
-                   stream_features: bool = False, rfdetr_seg: bool = False, *,
+                   stream_features: bool = False, rfdetr_seg: bool = False,
+                   layout_check: bool = False, *,
                    reference_files: Optional[Sequence[PackagedReference]] = None) -> Dict:
     """manifest.json content: what WorkflowWatcher needs to register the
     workflow and what the deployment compatibility check reads (8.4).
@@ -2429,6 +2549,10 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
     ``min_local_server_versions_map``, so the flag has to travel through
     it or the map the device prefers would never see the Seg floor.
     False (the default) stamps both exactly as before (Requirement 17.1).
+    ``layout_check`` (car-assembly-check Requirement 9.3): the workflow has
+    a ``layout_check`` node, so both floors are raised further to the
+    Layout_Check feature floor, through the same two calls; False (the
+    default) stamps both exactly as before.
 
     ``reference_files``: the uploaded reference files the package carries,
     recorded as ``referenceFiles`` {"references/{name}": {sha256, bytes}} for
@@ -2450,7 +2574,8 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
         # Arch-scoped minimum: this package targets `arch`, so the scalar is
         # the minimum for that variant's lineage (backward-compatible field).
         'minLocalServerVersion': min_local_server_version_for(
-            arch, stream_features=stream_features, rfdetr_seg=rfdetr_seg),
+            arch, stream_features=stream_features, rfdetr_seg=rfdetr_seg,
+            layout_check=layout_check),
         # Full per-arch map so a variant-aware device selects the floor for
         # its own arch rather than comparing across incomparable lineages.
         # Raised together with the scalar for a stream/analytics workflow:
@@ -2458,7 +2583,8 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
         # unraised map would re-open the very bypass the feature floor
         # closes (Requirement 9.7).
         'minLocalServerVersions': min_local_server_versions_map(
-            stream_features=stream_features, rfdetr_seg=rfdetr_seg),
+            stream_features=stream_features, rfdetr_seg=rfdetr_seg,
+            layout_check=layout_check),
         'pluginDependencies': gst_plugins,
         'pythonDependencies': python_packages,
         'pluginChecksums': dict(plugin_checksums or {}),
@@ -3057,6 +3183,19 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 {'findings': seg_findings, 'version': version,
                  'architectures': architectures})
         has_rfdetr_seg = bool(seg_models)
+        # Layout_Check feature floor (car-assembly-check Requirement 9.3,
+        # design §7): the same gate for a workflow with a layout_check node,
+        # after the Seg gate and before anything is registered. A workflow
+        # without one contributes zero findings and keeps its floors.
+        layout_findings = layout_check_arch_gate_findings(definition_dict,
+                                                          architectures)
+        if layout_findings:
+            return error_response(
+                409, GATE_LAYOUT_CHECK_ARCH_UNSUPPORTED,
+                layout_findings[0]['message'],
+                {'findings': layout_findings, 'version': version,
+                 'architectures': architectures})
+        has_layout_check = _has_node_type(definition_dict, LAYOUT_CHECK_TYPE_ID)
         resolved_models = resolve_model_components(model_references,
                                                    usecase_id, architectures,
                                                    records=records)
@@ -3065,7 +3204,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
             **model_component_dependencies(resolved_models),
             **local_server_component_dependencies(
                 architectures, stream_features=stream_features,
-                rfdetr_seg=has_rfdetr_seg),
+                rfdetr_seg=has_rfdetr_seg, layout_check=has_layout_check),
         }
 
         # Verify every custom Plugin_Artifact per selected architecture
@@ -3131,6 +3270,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 subscribed_topics=subscribed_topics,
                 stream_features=stream_features,
                 rfdetr_seg=has_rfdetr_seg,
+                layout_check=has_layout_check,
                 reference_files=reference_files)
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
             build_arch_zip(zip_path, arch, manifest, packaged_definition_json,
@@ -3232,6 +3372,10 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # Seg device contract is rejected before submission. Unconditional for
     # the same reason as has_stream_features: re-packaging a version whose
     # model is no longer a Seg model clears a stale True.
+    # The version-item Layout_Check discriminator (car-assembly-check
+    # Requirement 9.3, design §7), written the same way and for the same
+    # reason: has_layout_check activates the Deployment_Service's
+    # Layout_Check feature-floor gate for this workflow component.
     update_expression = ('SET component_arn = :arn, component_version = :cv, '
                          'compiled_arch_keys = :keys, '
                          'plugin_components = :pc, '
@@ -3240,6 +3384,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                          'has_llm_inference = :hli, '
                          'has_stream_features = :hsf, '
                          'has_rfdetr_seg_model = :hrs, '
+                         'has_layout_check = :hlc, '
                          'packaged_architectures = :pa, '
                          'packaged_at = :at, packaged_by = :by')
     update_values = {
@@ -3252,6 +3397,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         ':hli': bool(llm_node_ids),
         ':hsf': stream_features,
         ':hrs': has_rfdetr_seg,
+        ':hlc': has_layout_check,
         ':pa': architectures,
         ':at': now_ms(),
         ':by': user['user_id']

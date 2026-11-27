@@ -300,6 +300,50 @@ describe('RF-DETR-Seg feature floor (Requirement 14.8)', () => {
       x86_64_nvidia: '1.0.0',
     });
   });
+
+  // The per-deployment key (car-assembly-check task 12.5; design §7, DD9):
+  // `rfdetrSegMinLocalServerVersions` replaces the literal above on a
+  // deployment that sets it; absent or blank keeps the literal.
+  describe('rfdetrSegMinLocalServerVersions (car-assembly-check 12.5)', () => {
+    const CONTEXT_KEY = 'rfdetrSegMinLocalServerVersions';
+    const CONFIGURED = { arm64_jp5: '1.0.4' };
+    const EXPECTED: Record<string, Record<string, string>> = {
+      blank: DEPLOYED_FLOOR,
+      emptyMap: {},
+      string: CONFIGURED,
+      object: CONFIGURED,
+    };
+    let configured: Record<string, Fixture>;
+    beforeAll(() => {
+      configured = {
+        blank: synthesize({ [CONTEXT_KEY]: '' }, false),
+        emptyMap: synthesize({ [CONTEXT_KEY]: '{}' }, false),
+        string: synthesize({ [CONTEXT_KEY]: JSON.stringify(CONFIGURED) }, false),
+        object: synthesize({ [CONTEXT_KEY]: CONFIGURED }, false),
+      };
+    }, 900_000);
+
+    test.each(Object.keys(EXPECTED))('%s context: exactly the two floor handlers carry the expected map', (name) => {
+      for (const handler of FLOOR_HANDLERS) {
+        const raw = variablesOf(lambdaWithHandler(configured[name].computeTemplate, handler))[FLOOR_ENV];
+        expect(JSON.parse(raw)).toEqual(EXPECTED[name]);
+      }
+      const carriers = [configured[name].computeTemplate, ...configured[name].nestedTemplates]
+        .flatMap(functionsOf)
+        .filter((fn: any) => variablesOf(fn)[FLOOR_ENV] !== undefined)
+        .map((fn: any) => fn.Properties.Handler)
+        .sort();
+      expect(carriers).toEqual([...FLOOR_HANDLERS].sort());
+    });
+
+    test.each([['{not json'], ['{"arm64_jp9":"1.0.0"}'], ['{"arm64_jp5":"1.0"}']])(
+      'a malformed value %p fails the synth naming the key',
+      (value) => {
+        expect(() => synthesize({ [CONTEXT_KEY]: value }, false)).toThrow(/rfdetrSegMinLocalServerVersions/);
+      },
+      300_000,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

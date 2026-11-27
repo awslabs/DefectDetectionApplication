@@ -163,6 +163,12 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: ``reference_payload_path`` and ``allowed_uri_prefixes``. Only that entry
 #: was regenerated per the same maintenance path; ONLY those fields moved,
 #: and every other recording, ``mqtt_publish`` included, is untouched.
+#:
+#: The car-assembly-check feature appended one descriptor
+#: (``layout_check``) after ``s3_upload``. Only that entry was added to the
+#: recording per the same maintenance path; every other recording,
+#: ``mqtt_publish`` included, is untouched, and the additivity is pinned by
+#: ``test_catalog_layout_check.py``.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",

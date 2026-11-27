@@ -24,6 +24,7 @@ import {
   maskToImageData,
 } from "../instanceDetections";
 import type { InstanceDetectionEntry } from "../instanceDetections";
+import { instanceKey } from "../layoutVerdicts";
 
 /** Segment ids of the layer's display toggle. */
 export const MASKS_AND_BOXES_ID = "masks";
@@ -36,6 +37,72 @@ export const MASK_ALPHA = 0.4;
 
 /** Header of the container the pages put the layer in. */
 export const INSTANCE_MASKS_HEADER = "Instance masks";
+
+/**
+ * Layout Check styling (car-assembly-check Requirement 7.1, design DD8,
+ * DD23): a flagged ("misplaced") instance is painted in its own colour,
+ * the others dimmed when asked, and an instance the check ignored (outside
+ * the car outline) in a neutral grey at reduced opacity.
+ */
+export const MISPLACED_COLOR: [number, number, number] = [236, 0, 140];
+export const MISPLACED_ALPHA = 0.6;
+export const DIMMED_ALPHA = 0.15;
+export const MUTED_COLOR: [number, number, number] = [128, 128, 128];
+export const MUTED_ALPHA = 0.2;
+/** Stroke of the dashed Expected_Region outlines. */
+export const OUTLINE_COLOR = "rgb(255, 196, 0)";
+
+/** Which instances (by `instanceKey`) to highlight, and whether to dim the rest. */
+export interface InstanceHighlight {
+  keys: Set<string>;
+  dimOthers: boolean;
+}
+
+/** A labelled polygon in frame pixels. */
+export interface InstanceOutline {
+  label: string;
+  points: [number, number][];
+}
+
+/** The optional Layout Check styling of {@link paintInstances}. */
+export interface PaintStyle {
+  highlight?: InstanceHighlight;
+  muted?: Set<string>;
+}
+
+type EntryLook = "plain" | "highlighted" | "dimmed" | "muted";
+
+/** The key of an entry with a complete numeric box, else null. */
+function entryKey(entry: InstanceDetectionEntry): string | null {
+  const box = entry.bounding_box;
+  if (
+    !Array.isArray(box) ||
+    box.length !== 4 ||
+    !box.every((value) => typeof value === "number" && Number.isFinite(value))
+  ) {
+    return null;
+  }
+  return instanceKey({ classLabel: entry.class_label, box });
+}
+
+function entryLook(entry: InstanceDetectionEntry, style: PaintStyle | undefined): EntryLook {
+  if (!style) {
+    return "plain";
+  }
+  const key = entryKey(entry);
+  if (key !== null && style.muted?.has(key)) {
+    return "muted";
+  }
+  if (key !== null && style.highlight?.keys.has(key)) {
+    return "highlighted";
+  }
+  return style.highlight?.dimOthers ? "dimmed" : "plain";
+}
+
+/** Highlighted masks are painted last, so they show on top. */
+function lookRank(look: EntryLook): number {
+  return look === "highlighted" ? 1 : 0;
+}
 
 /** The painting the layer did, for the summary line and the tests. */
 export interface PaintSummary {
@@ -54,6 +121,8 @@ export interface PaintSummary {
  * does), one translucent colour per class, then every complete box with its
  * label above it. Masks are skipped when `showMasks` is false or an entry
  * carries none (a truncated or detection-only entry keeps its box).
+ * `style` (optional) applies the Layout Check's highlight, dimming and
+ * muting; without it the painting is exactly the plain one.
  */
 export function paintInstances(
   ctx: CanvasRenderingContext2D,
@@ -61,6 +130,7 @@ export function paintInstances(
   width: number,
   height: number,
   showMasks: boolean,
+  style?: PaintStyle,
 ): PaintSummary {
   const summary: PaintSummary = { masksPainted: 0, masksSkipped: 0, boxesDrawn: 0 };
   ctx.clearRect(0, 0, width, height);
@@ -75,7 +145,11 @@ export function paintInstances(
     const ordered = instances
       .filter(hasMask)
       .slice()
-      .sort((a, b) => (a.confidence ?? 0) - (b.confidence ?? 0));
+      .sort(
+        (a, b) =>
+          lookRank(entryLook(a, style)) - lookRank(entryLook(b, style)) ||
+          (a.confidence ?? 0) - (b.confidence ?? 0),
+      );
     for (const entry of ordered) {
       let bits: Uint8Array;
       try {
@@ -84,8 +158,19 @@ export function paintInstances(
         summary.masksSkipped += 1;
         continue;
       }
-      const [r, g, b] = instanceColor(entry);
-      const pixels = maskToImageData(bits, width, height, [r, g, b, alpha]);
+      const look = entryLook(entry, style);
+      let [r, g, b] = instanceColor(entry);
+      let entryAlpha = alpha;
+      if (look === "highlighted") {
+        [r, g, b] = MISPLACED_COLOR;
+        entryAlpha = Math.round(MISPLACED_ALPHA * 255);
+      } else if (look === "muted") {
+        [r, g, b] = MUTED_COLOR;
+        entryAlpha = Math.round(MUTED_ALPHA * 255);
+      } else if (look === "dimmed") {
+        entryAlpha = Math.round(DIMMED_ALPHA * 255);
+      }
+      const pixels = maskToImageData(bits, width, height, [r, g, b, entryAlpha]);
       for (let i = 0, n = bits.length; i < n; i++) {
         if (bits[i]) {
           const offset = i * 4;
@@ -116,13 +201,22 @@ export function paintInstances(
       continue;
     }
     const [xMin, yMin, xMax, yMax] = box;
+    const look = entryLook(entry, style);
     const [r, g, b] = instanceColor(entry);
-    ctx.strokeStyle = `rgb(${r}, ${g}, ${b})`;
+    let color = `rgb(${r}, ${g}, ${b})`;
+    if (look === "highlighted") {
+      color = `rgb(${MISPLACED_COLOR.join(", ")})`;
+    } else if (look === "muted") {
+      color = `rgba(${MUTED_COLOR.join(", ")}, 0.5)`;
+    } else if (look === "dimmed") {
+      color = `rgba(${r}, ${g}, ${b}, 0.4)`;
+    }
+    ctx.strokeStyle = color;
     ctx.strokeRect(xMin, yMin, xMax - xMin, yMax - yMin);
     const label = `${entry.class_label || entry.class_index || "object"} ${Math.round(
       (entry.confidence ?? 0) * 100,
     )}%`;
-    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.fillStyle = color;
     ctx.fillText(label, xMin, Math.max(fontSize, yMin - lineWidth));
     summary.boxesDrawn += 1;
   }
@@ -146,20 +240,84 @@ export function instanceSummary(instances: InstanceDetectionEntry[]): string {
 }
 
 /**
+ * Dashed, labelled polygons over the frame: an SVG whose view box is the
+ * frame, stretched with the displayed image, so the outlines scale with it.
+ */
+function OutlineOverlay({
+  outlines,
+  width,
+  height,
+}: {
+  outlines: InstanceOutline[];
+  width: number;
+  height: number;
+}): JSX.Element {
+  const fontSize = Math.max(10, Math.round(Math.min(width, height) / 45));
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      style={{
+        position: "absolute",
+        left: 0,
+        top: 0,
+        width: "100%",
+        height: "100%",
+        pointerEvents: "none",
+      }}
+      data-testid="instance-outlines"
+    >
+      {outlines.map((outline, index) => {
+        const count = Math.max(1, outline.points.length);
+        const cx = outline.points.reduce((sum, [x]) => sum + x, 0) / count;
+        const cy = outline.points.reduce((sum, [, y]) => sum + y, 0) / count;
+        return (
+          <g key={`${outline.label}-${index}`} data-testid={`instance-outline-${outline.label}`}>
+            <polygon
+              points={outline.points.map(([x, y]) => `${x},${y}`).join(" ")}
+              fill="none"
+              stroke={OUTLINE_COLOR}
+              strokeWidth={2}
+              strokeDasharray="6 4"
+              vectorEffect="non-scaling-stroke"
+            />
+            <text x={cx} y={cy} fill={OUTLINE_COLOR} fontSize={fontSize} textAnchor="middle">
+              {outline.label}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/**
  * The run's instance masks and boxes drawn over the output frame
  * (rfdetr-seg-support Requirement 10.6, DD14): a canvas the size of the
  * frame, scaled with the image, with the masks under the boxes and a
  * `Masks + boxes | Boxes` toggle. Entries without a `mask_rle` (truncated
  * at the device's ceiling, or plain detections) draw their box only.
+ *
+ * car-assembly-check Requirement 7.1 adds three optional props: `highlight`
+ * (the flagged instances in the "misplaced" colour, the others dimmed when
+ * `dimOthers`), `outlines` (dashed, labelled Expected_Region polygons in
+ * frame pixels) and `muted` (instances drawn in a neutral grey). Without
+ * them the layer renders as before.
  */
 export default function InstanceMaskLayer({
   imageSrc,
   instances,
   alt,
+  highlight,
+  outlines,
+  muted,
 }: {
   imageSrc: string;
   instances: InstanceDetectionEntry[];
   alt?: string;
+  highlight?: InstanceHighlight;
+  outlines?: InstanceOutline[];
+  muted?: Set<string>;
 }): JSX.Element {
   const [mode, setMode] = React.useState<string>(MASKS_AND_BOXES_ID);
   const [frameSize, setFrameSize] = React.useState<{ width: number; height: number } | null>(
@@ -178,8 +336,16 @@ export default function InstanceMaskLayer({
     if (!ctx) {
       return;
     }
-    paintInstances(ctx, instances, frameSize.width, frameSize.height, mode === MASKS_AND_BOXES_ID);
-  }, [instances, mode, frameSize]);
+    const style = highlight || muted ? { highlight, muted } : undefined;
+    paintInstances(
+      ctx,
+      instances,
+      frameSize.width,
+      frameSize.height,
+      mode === MASKS_AND_BOXES_ID,
+      style,
+    );
+  }, [instances, mode, frameSize, highlight, muted]);
 
   return (
     <SpaceBetween size="s">
@@ -217,6 +383,9 @@ export default function InstanceMaskLayer({
           }}
           data-testid="instance-mask-canvas"
         />
+        {frameSize && outlines && outlines.length > 0 && (
+          <OutlineOverlay outlines={outlines} width={frameSize.width} height={frameSize.height} />
+        )}
       </div>
       <Box variant="small" data-testid="instance-layer-summary">
         {instanceSummary(instances)}

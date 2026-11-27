@@ -567,6 +567,25 @@ class TestHandlerPackagesStreamFreeWorkflowsUnchanged:
         item = harness.version_item()
         assert item.get("has_binding_points") in (False, None)
 
+    def test_workflow_without_layout_check_is_unaffected_by_its_floor(
+            self, env, packaging, monkeypatch, floors):
+        # Validates: car-assembly-check Requirement 9.3 (task 12.3 negative case)
+        # Negative case: a Layout_Check floor configured high never reaches
+        # a workflow without a layout_check node, and its version item reads
+        # has_layout_check False.
+        arch_floor_map = {"arm64_jp6": "1.1.0"}
+        floors(arch_floor_map, {})
+        monkeypatch.setattr(packaging, "LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS",
+                            {arch: HIGH_FEATURE_FLOOR for arch in ARCHS})
+        harness = BindingPointsEnv(env, packaging, monkeypatch,
+                                   icam_definition())
+        status, payload = harness.package(["arm64_jp6"])
+        assert status == 201, payload
+        manifest = json.loads(self._manifest(harness, "arm64_jp6"))
+        assert manifest["minLocalServerVersion"] == "1.1.0"
+        assert manifest["minLocalServerVersions"] == arch_floor_map
+        assert harness.version_item()["has_layout_check"] is False
+
     def test_single_arch_recipe_dependency_floor_is_unraised(
             self, env, packaging, monkeypatch, floors):
         # Validates: Requirement 18.1

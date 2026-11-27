@@ -1288,6 +1288,8 @@ ONNXRUNTIME_GPU=0 ./gdk-component-build-and-publish.sh aarch64 6   # JP6; use 5 
 The CPU images (x86_64, arm64 CPU) are CPU-only regardless. The engine auto-selects TensorRT → CUDA → CPU
 providers at load, so the same package runs on either a GPU or CPU image.
 
+The script publishes the next patch version of the component (the latest registered version + 1); `COMPONENT_VERSION_OVERRIDE=<N.N.N>` on the publish run (`SKIP_BUILD=1`) publishes at exactly that version instead, on the ECR + S3 publish path that every LocalServer takes (its artifacts exceed 2 GB) and the only path that honours the variable, which is the way to lift an account's component lineage above a feature floor that is a fixed literal, while a per-deployment floor (Layout Check and RF-DETR-Seg, [13.4](docs/user-guide/13-deployments.md#134-revise-a-deployment)) is set to the published version instead; the script does not validate the value, so check that it is `N.N.N`, above the latest registered version and not yet published.
+
 ## Using LLMs (vLLM)
 
 > **User guide:** [7.3 Manual import and LLM registration](docs/user-guide/07-models.md#73-manual-import-and-llm-registration)

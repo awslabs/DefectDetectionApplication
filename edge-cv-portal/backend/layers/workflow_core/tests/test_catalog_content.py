@@ -959,6 +959,10 @@ class TestCatalogCoverage:
         # appended last. Its descriptor content and the additivity of the
         # append are pinned by test_catalog_s3_upload.py.
         "s3_upload",
+        # car-assembly-check: the Layout Check node appended last
+        # (Requirement 5.1). Its descriptor content and the additivity of
+        # the append are pinned by test_catalog_layout_check.py.
+        "layout_check",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):

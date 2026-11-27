@@ -289,6 +289,15 @@ WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
 # every device, which is the intended pre-enablement state.
 WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
     'WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS')
+# The Layout_Check FEATURE floor (car-assembly-check Requirement 9.3, design
+# §7): the minimum LocalServer version per architecture whose scene-analytics
+# pass evaluates layout_check bindings. Read from the SAME environment map the
+# Component_Packager reads (workflow_packaging.LAYOUT_CHECK_MIN_LOCAL_SERVER_
+# VERSIONS), per-deployment configuration set by compute-stack.ts on both
+# Lambdas, and like the Seg floor NOT passed through _fill_missing_arch_floors:
+# an arch with no entry FAILS CLOSED (reject), and so does the empty map.
+WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
+    'WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS')
 
 # Minimum Greengrass Nucleus version required for DDA components
 # Nucleus is already installed on the device — we don't pin versions in deployments.
@@ -3534,11 +3543,24 @@ def rfdetr_seg_feature_floor_for(arch):
     return WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS.get(arch)
 
 
+def layout_check_feature_floor_for(arch):
+    """The Layout_Check FEATURE floor for ``arch``, or None when that
+    architecture has no LocalServer build known to evaluate layout_check
+    nodes (car-assembly-check Requirement 9.3, design §7).
+
+    None is a rejection, never a pass, for the reason stream_feature_floor_
+    for gives. Mirrors the packager's min_local_server_version_for(arch,
+    layout_check=True), which raises PackagingError in the same situation.
+    """
+    return WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS.get(arch)
+
+
 def check_local_server_compatibility(greengrass_client, thing_names,
                                      min_local_server_version,
                                      min_versions_by_arch=None,
                                      stream_features=False,
-                                     rfdetr_seg=False):
+                                     rfdetr_seg=False,
+                                     layout_check=False):
     """
     Pre-submit compatibility check (Requirement 8.4): compare each target
     device's installed LocalServer component version against the
@@ -3583,6 +3605,14 @@ def check_local_server_compatibility(greengrass_client, thing_names,
     with a reason naming the architecture — also under a per-version
     override. ``rfdetr_seg=False`` (the default) changes nothing, so every
     workflow without a Seg model is gated exactly as before (17.1).
+    ``layout_check=True`` (the workflow has a ``layout_check`` node — the
+    packager records this on the version item as ``has_layout_check``,
+    car-assembly-check Requirement 9.3, design §7) applies the Layout_Check
+    feature floor (WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS) by the
+    same rule: raised to the maximum, a device whose arch carries no entry
+    rejected outright, also under a per-version override, and a device
+    below the floor rejected with the installed and required versions.
+    ``layout_check=False`` (the default) changes nothing.
     """
     incompatible = []
     by_arch = min_versions_by_arch or {}
@@ -3652,6 +3682,26 @@ def check_local_server_compatibility(greengrass_client, thing_names,
                 })
                 continue
             effective_min = max(effective_min, seg_floor, key=_version_key)
+        if layout_check:
+            layout_floor = layout_check_feature_floor_for(arch)
+            if layout_floor is None:
+                # No build of this lineage evaluates layout_check: there is
+                # no version to name, so the reason names the arch.
+                incompatible.append({
+                    'device': thing_name,
+                    'local_server_version': installed,
+                    'min_local_server_version': None,
+                    'reason': (
+                        'This workflow uses a layout_check node, which '
+                        'requires a LocalServer build that supports it; '
+                        'no supported LocalServer version is configured '
+                        'for this device'
+                        + (f" (architecture '{arch}')" if arch else
+                           ' (its LocalServer architecture could not be '
+                           'determined)'))
+                })
+                continue
+            effective_min = max(effective_min, layout_floor, key=_version_key)
         if _version_key(installed) < _version_key(effective_min):
             incompatible.append({
                 'device': thing_name,
@@ -4675,11 +4725,17 @@ def create_workflow_deployment(body, user):
         # Absent/false (every workflow without a Seg model) resolves the
         # gate exactly as before (Requirement 17.1).
         rfdetr_seg = bool(version_item.get('has_rfdetr_seg_model'))
+        # Layout_Check feature floor (car-assembly-check Requirement 9.3,
+        # design §7): the packager records has_layout_check when the
+        # definition has a layout_check node, and the same rule applies.
+        # Absent/false (every other workflow) resolves exactly as before.
+        layout_check = bool(version_item.get('has_layout_check'))
         resolved_devices = resolve_target_thing_names(
             iot_client, target_devices, target_thing_group)
         incompatible = check_local_server_compatibility(
             greengrass_client, resolved_devices, min_local_server, by_arch,
-            stream_features=stream_features, rfdetr_seg=rfdetr_seg)
+            stream_features=stream_features, rfdetr_seg=rfdetr_seg,
+            layout_check=layout_check)
         if incompatible:
             details = {
                 'workflow_id': workflow_id,
@@ -4704,6 +4760,12 @@ def create_workflow_deployment(body, user):
                 details['rfdetr_seg_model'] = True
                 details['rfdetr_seg_min_local_server_versions'] = dict(
                     WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS)
+            if layout_check:
+                # Likewise only for a workflow with a layout_check node
+                # (car-assembly-check 9.3): the configured Layout_Check floor.
+                details['layout_check'] = True
+                details['layout_check_min_local_server_versions'] = dict(
+                    WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS)
             return _workflow_error(
                 409, 'INCOMPATIBLE_LOCAL_SERVER',
                 'One or more target devices do not have a LocalServer '

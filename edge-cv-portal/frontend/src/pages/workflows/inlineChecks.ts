@@ -18,6 +18,8 @@
  * | V12   | a continuous stream node has no trigger activation     |
  * | V13   | scene analytics zone / label parameters parse          |
  * | W3    | a counter / association node has a detector upstream   |
+ * | V14   | layout check regions parse, thresholds in range        |
+ * | W4    | a layout check node has a detector upstream            |
  */
 
 import {
@@ -25,8 +27,9 @@ import {
   MAX_REQUIRED_CLASSES,
   parseLabelList,
   parseZone,
+  pythonJsonLoads,
 } from './sceneConfig';
-import { checkStreamUrl, schemesForNodeType, STREAM_SOURCE_TYPES } from './streamUrl';
+import { checkStreamUrl, pyStrip, schemesForNodeType, STREAM_SOURCE_TYPES } from './streamUrl';
 import {
   ERROR_DUPLICATE_KEY,
   ERROR_EMPTY_FIELD_PATH,
@@ -74,6 +77,8 @@ export const CODE_V11_STREAM_URL = 'V11_STREAM_URL';
 export const CODE_V12_CONTINUOUS_ACTIVATION = 'V12_CONTINUOUS_ACTIVATION';
 export const CODE_V13_ANALYTICS_CONFIG_INVALID = 'V13_ANALYTICS_CONFIG_INVALID';
 export const CODE_W3_ANALYTICS_NO_DETECTOR = 'W3_ANALYTICS_NO_DETECTOR';
+export const CODE_V14_LAYOUT_CONFIG_INVALID = 'V14_LAYOUT_CONFIG_INVALID';
+export const CODE_W4_LAYOUT_NO_DETECTOR = 'W4_LAYOUT_NO_DETECTOR';
 
 /** The graph slice the inline checks operate on. */
 export interface GraphLike {
@@ -877,14 +882,427 @@ export function checkW3AnalyticsNoDetector(graph: GraphLike): ValidationFinding[
   return findings;
 }
 
+// --------------------------------------------------------------------------
+// Layout Check rules (car-assembly-check Requirement 5.6; mirrors backend
+// V14 and W4)
+// --------------------------------------------------------------------------
+
+/** The Layout Check node type and the parameter V14 parses on it. */
+const TYPE_LAYOUT_CHECK = 'layout_check';
+const LAYOUT_REGIONS_PARAMETER = 'expected_regions';
+
+/** The bounds of `analytics.layout.parse_expected_regions`. */
+const MIN_REGION_VERTICES = 3;
+const MAX_REGION_VERTICES = 64;
+const MAX_REGIONS = 10;
+const MIN_REGION_AREA = 0.005;
+const MAX_REGION_LABEL_LENGTH = 64;
+
+/** The relative touching slack of `analytics.scene._point_on_segment`. */
+const GEOMETRY_TOLERANCE = 1e-9;
+
+/**
+ * Ring edges whose bounding boxes are farther apart than this cannot meet
+ * (`analytics.layout._BOX_MARGIN`); such a pair skips the predicate.
+ */
+const REGION_BOX_MARGIN = 1e-6;
+
+/**
+ * The thresholds V14 range-checks when numeric, with their inclusive
+ * bounds and problem sentence (backend `_LAYOUT_RANGE_PARAMETERS`).
+ */
+const LAYOUT_RANGE_PARAMETERS: ReadonlyArray<[string, number, number, string]> = [
+  ['min_iou', 0.01, 1.0, 'The value must be between 0.01 and 1.'],
+  ['min_confidence', 0.0, 1.0, 'The value must be between 0 and 1.'],
+  ['min_outline_overlap', 0.0, 0.5, 'The value must be between 0 and 0.5.'],
+];
+
+/**
+ * A decimal number as text (backend `_LAYOUT_NUMBER_TEXT`): ASCII digits
+ * with an optional sign, fraction and exponent, which `Number()` and
+ * Python's `float()` read to the same double.
+ */
+const LAYOUT_NUMBER_TEXT_RE = /^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+
+/** One Expected_Region vertex, `[x, y]` in normalized coordinates. */
+export type RegionPoint = [number, number];
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBlank(value: unknown): boolean {
+  return value === null || value === undefined || (typeof value === 'string' && pyStrip(value) === '');
+}
+
+function regionPair(entry: unknown): RegionPoint | null {
+  if (!Array.isArray(entry) || entry.length !== 2) {
+    return null;
+  }
+  const [x, y] = entry as unknown[];
+  return isFiniteNumber(x) && isFiniteNumber(y) ? [x, y] : null;
+}
+
+/** `points` without consecutive duplicates, read as a closed ring. */
+function distinctRing(points: RegionPoint[]): RegionPoint[] {
+  const same = (a: RegionPoint, b: RegionPoint): boolean => a[0] === b[0] && a[1] === b[1];
+  const ring: RegionPoint[] = [];
+  for (const point of points) {
+    if (ring.length === 0 || !same(ring[ring.length - 1], point)) {
+      ring.push(point);
+    }
+  }
+  while (ring.length > 1 && same(ring[ring.length - 1], ring[0])) {
+    ring.pop();
+  }
+  return ring;
+}
+
+/** The signed shoelace area of the closed ring. */
+function ringArea(ring: RegionPoint[]): number {
+  let total = 0.0;
+  for (let index = 0; index < ring.length; index += 1) {
+    const [x0, y0] = ring[index];
+    const [x1, y1] = ring[(index + 1) % ring.length];
+    total += x0 * y1 - x1 * y0;
+  }
+  return total / 2.0;
+}
+
+/** Port of `analytics.scene._cross`. */
+function cross(origin: RegionPoint, first: RegionPoint, second: RegionPoint): number {
+  return (
+    (first[0] - origin[0]) * (second[1] - origin[1]) -
+    (first[1] - origin[1]) * (second[0] - origin[0])
+  );
+}
+
+/** Port of `analytics.scene._point_on_segment`. */
+function pointOnSegment(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number
+): boolean {
+  const crossValue = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1);
+  const slack =
+    GEOMETRY_TOLERANCE *
+    (1.0 + Math.abs(x2 - x1) + Math.abs(y2 - y1) + Math.abs(px - x1) + Math.abs(py - y1));
+  if (Math.abs(crossValue) > slack) {
+    return false;
+  }
+  return (
+    Math.min(x1, x2) - slack <= px &&
+    px <= Math.max(x1, x2) + slack &&
+    Math.min(y1, y2) - slack <= py &&
+    py <= Math.max(y1, y2) + slack
+  );
+}
+
+/** Port of `analytics.scene._segments_intersect` (touching included). */
+function segmentsIntersect(a: RegionPoint, b: RegionPoint, c: RegionPoint, d: RegionPoint): boolean {
+  const d1 = cross(c, d, a);
+  const d2 = cross(c, d, b);
+  const d3 = cross(a, b, c);
+  const d4 = cross(a, b, d);
+  if (d1 > 0 !== d2 > 0 && d3 > 0 !== d4 > 0) {
+    return true;
+  }
+  return (
+    pointOnSegment(a[0], a[1], c[0], c[1], d[0], d[1]) ||
+    pointOnSegment(b[0], b[1], c[0], c[1], d[0], d[1]) ||
+    pointOnSegment(c[0], c[1], a[0], a[1], b[0], b[1]) ||
+    pointOnSegment(d[0], d[1], a[0], a[1], b[0], b[1])
+  );
+}
+
+/** Whether no two non-adjacent edges of the closed ring intersect. */
+function ringIsSimple(ring: RegionPoint[]): boolean {
+  const count = ring.length;
+  const edges = ring.map((start, index) => {
+    const end = ring[(index + 1) % count];
+    return {
+      start,
+      end,
+      left: Math.min(start[0], end[0]),
+      right: Math.max(start[0], end[0]),
+      top: Math.min(start[1], end[1]),
+      bottom: Math.max(start[1], end[1]),
+    };
+  });
+  for (let first = 0; first < count; first += 1) {
+    const a = edges[first];
+    for (let second = first + 2; second < count; second += 1) {
+      if (first === 0 && second === count - 1) {
+        continue; // the closing edge is adjacent to the first one
+      }
+      const b = edges[second];
+      if (
+        b.left > a.right + REGION_BOX_MARGIN ||
+        a.left > b.right + REGION_BOX_MARGIN ||
+        b.top > a.bottom + REGION_BOX_MARGIN ||
+        a.top > b.bottom + REGION_BOX_MARGIN
+      ) {
+        continue;
+      }
+      if (segmentsIntersect(a.start, a.end, b.start, b.end)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** One region's ring without duplicate vertices, or its problems. */
+function regionRing(label: string, polygon: unknown): [RegionPoint[] | null, string[]] {
+  const name = `Region '${label}'`;
+  if (!Array.isArray(polygon)) {
+    return [null, [`${name}: the polygon must be a list of [x, y] points.`]];
+  }
+  const problems: string[] = [];
+  const points: RegionPoint[] = [];
+  polygon.forEach((entry: unknown, index: number) => {
+    const position = index + 1;
+    const point = regionPair(entry);
+    if (point === null) {
+      problems.push(`${name}: point ${position} must be a pair of numbers [x, y].`);
+      return;
+    }
+    const [x, y] = point;
+    if (!(x >= 0 && x <= 1)) {
+      problems.push(`${name}: point ${position} x coordinate must be between 0 and 1.`);
+      return;
+    }
+    if (!(y >= 0 && y <= 1)) {
+      problems.push(`${name}: point ${position} y coordinate must be between 0 and 1.`);
+      return;
+    }
+    points.push(point);
+  });
+  if (problems.length > 0) {
+    return [null, problems];
+  }
+  const ring = distinctRing(points);
+  if (ring.length < MIN_REGION_VERTICES || ring.length > MAX_REGION_VERTICES) {
+    return [
+      null,
+      [
+        `${name}: the polygon must have between ${MIN_REGION_VERTICES} and ` +
+          `${MAX_REGION_VERTICES} distinct points; this one has ${ring.length}.`,
+      ],
+    ];
+  }
+  if (Math.abs(ringArea(ring)) < MIN_REGION_AREA) {
+    problems.push(`${name}: the polygon must cover at least 0.5% of the frame.`);
+  }
+  if (!ringIsSimple(ring)) {
+    problems.push(`${name}: the polygon crosses itself; no two of its edges may intersect.`);
+  }
+  return problems.length > 0 ? [null, problems] : [ring, []];
+}
+
+/**
+ * TypeScript port of `parse_expected_regions` in
+ * `workflow_core/analytics/layout.py`: the same rules, in the same order,
+ * with the same problem sentences, so the inline V14 marker shows what the
+ * backend reports. Accepts the parameter as written (a JSON string, read
+ * the way Python's `json.loads` reads it) or an already-parsed object.
+ * Returns `[regions, []]` (labels stripped, duplicate vertices dropped
+ * cyclically) or `[null, problems]`.
+ *
+ * Parity is exact for every string value; the one divergence is the
+ * order of the problems when labels are integer-like (`"1"`), which a
+ * JavaScript object lists before the others.
+ */
+export function parseExpectedRegions(text: unknown): [Map<string, RegionPoint[]> | null, string[]] {
+  if (isBlank(text)) {
+    return [null, ['No expected regions are set.']];
+  }
+  let raw: unknown = text;
+  if (typeof text === 'string') {
+    try {
+      raw = pythonJsonLoads(text);
+    } catch {
+      return [null, ['Expected regions are not valid JSON.']];
+    }
+  }
+  if (!isJsonObject(raw)) {
+    return [
+      null,
+      [
+        'Expected regions must be a JSON object that maps each class label to a ' +
+          'polygon of [x, y] points.',
+      ],
+    ];
+  }
+  const keys = Object.keys(raw);
+  if (keys.length < 1 || keys.length > MAX_REGIONS) {
+    return [
+      null,
+      [
+        `Expected regions must name between 1 and ${MAX_REGIONS} classes; this value ` +
+          `names ${keys.length}.`,
+      ],
+    ];
+  }
+  const problems: string[] = [];
+  const regions = new Map<string, RegionPoint[]>();
+  const seen = new Set<string>();
+  keys.forEach((key, index) => {
+    const position = index + 1;
+    const label = pyStrip(key);
+    if (label === '') {
+      problems.push(`Region ${position}: the class label is empty.`);
+      return;
+    }
+    if (Array.from(label).length > MAX_REGION_LABEL_LENGTH) {
+      problems.push(
+        `Region ${position}: the class label is longer than ${MAX_REGION_LABEL_LENGTH} characters.`
+      );
+      return;
+    }
+    if (seen.has(label)) {
+      problems.push(
+        `Region ${position}: the class label '${label}' is already used by an earlier region.`
+      );
+      return;
+    }
+    seen.add(label);
+    const [ring, ringProblems] = regionRing(label, raw[key]);
+    if (ring === null) {
+      problems.push(...ringProblems);
+      return;
+    }
+    regions.set(label, ring);
+  });
+  return problems.length > 0 ? [null, problems] : [regions, []];
+}
+
+/** A number or a decimal number text as a finite number, else null. */
+function layoutNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string') {
+    const text = pyStrip(value);
+    if (!LAYOUT_NUMBER_TEXT_RE.test(text)) {
+      return null;
+    }
+    const number = Number(text);
+    return Number.isFinite(number) ? number : null;
+  }
+  return null;
+}
+
+/**
+ * Mirror of validator check V14: on `layout_check` nodes only, a
+ * non-blank `expected_regions` that fails `parseExpectedRegions` becomes
+ * one finding carrying every problem (a blank value is V4's concern), and
+ * each numeric threshold outside its range becomes one finding.
+ */
+export function checkV14LayoutConfig(
+  graph: GraphLike,
+  catalog: NodeTypeDescriptor[]
+): ValidationFinding[] {
+  const typed = typedNodes(graph, catalog);
+  const findings: ValidationFinding[] = [];
+  const finding = (nodeId: string, name: string, problems: string[]): ValidationFinding => ({
+    severity: SEVERITY_ERROR,
+    code: CODE_V14_LAYOUT_CONFIG_INVALID,
+    message: `Node '${nodeId}': parameter '${name}': ${problems.join(' ')}`,
+    nodeId,
+    connectionId: null,
+  });
+  for (const node of graph.nodes) {
+    if (node.type !== TYPE_LAYOUT_CHECK) {
+      continue;
+    }
+    const descriptor = typed.get(node.id);
+    const regions = parameterValue(node, descriptor, LAYOUT_REGIONS_PARAMETER);
+    if (!isBlank(regions)) {
+      const [, problems] = parseExpectedRegions(regions);
+      if (problems.length > 0) {
+        findings.push(finding(node.id, LAYOUT_REGIONS_PARAMETER, problems));
+      }
+    }
+    for (const [name, minimum, maximum, problem] of LAYOUT_RANGE_PARAMETERS) {
+      const number = layoutNumber(parameterValue(node, descriptor, name));
+      if (number !== null && !(minimum <= number && number <= maximum)) {
+        findings.push(finding(node.id, name, [problem]));
+      }
+    }
+  }
+  return findings;
+}
+
+/**
+ * Mirror of validator check W4: a `layout_check` node with no
+ * `model_inference` node transitively upstream gets one warning. The W3
+ * walk over its own consumer type; `DETECTION_CONSUMER_TYPES` (W3) is
+ * unchanged.
+ */
+export function checkW4LayoutNoDetector(graph: GraphLike): ValidationFinding[] {
+  const known = new Set(graph.nodes.map((node) => node.id));
+  const predecessors = new Map<string, string[]>();
+  for (const id of known) {
+    predecessors.set(id, []);
+  }
+  for (const connection of graph.connections) {
+    if (known.has(connection.from.node) && known.has(connection.to.node)) {
+      predecessors.get(connection.to.node)!.push(connection.from.node);
+    }
+  }
+  const nodeTypes = new Map(graph.nodes.map((node) => [node.id, node.type]));
+
+  const hasDetectorUpstream = (nodeId: string): boolean => {
+    const visited = new Set([nodeId]);
+    const frontier = [...(predecessors.get(nodeId) ?? [])];
+    while (frontier.length > 0) {
+      const current = frontier.pop()!;
+      if (visited.has(current)) {
+        continue;
+      }
+      visited.add(current);
+      if (nodeTypes.get(current) === TYPE_MODEL_INFERENCE) {
+        return true;
+      }
+      frontier.push(...(predecessors.get(current) ?? []));
+    }
+    return false;
+  };
+
+  const findings: ValidationFinding[] = [];
+  for (const node of graph.nodes) {
+    if (node.type !== TYPE_LAYOUT_CHECK || hasDetectorUpstream(node.id)) {
+      continue;
+    }
+    findings.push({
+      severity: SEVERITY_WARNING,
+      code: CODE_W4_LAYOUT_NO_DETECTOR,
+      message:
+        `Node '${node.id}': no '${TYPE_MODEL_INFERENCE}' node is upstream of this ` +
+        `'${node.type}' node, so no instance masks will exist for it to check at runtime`,
+      nodeId: node.id,
+      connectionId: null,
+    });
+  }
+  return findings;
+}
+
 /**
  * Run the inline mirror checks (V4 + V5 + V7 + V7-coexistence + V8 + V9
- * + V10 + V11 + V12 + V13 + W3) and return every
+ * + V10 + V11 + V12 + V13 + W3 + V14 + W4) and return every
  * finding, each with the associated node or connection identifier. The
  * canvas turns these into inline validation markers (Requirements 1.9,
  * 1.10, 5.5; trigger-activation-runtime Requirement 4.5;
  * workflow-manager-gaps Requirements 6.3, 6.7; rtsp-rtmp-stream-cameras
- * Requirement 2.6).
+ * Requirement 2.6; car-assembly-check Requirement 5.6).
  */
 export function runInlineChecks(
   graph: GraphLike,
@@ -902,5 +1320,7 @@ export function runInlineChecks(
     ...checkV12ContinuousActivation(graph, catalog),
     ...checkV13AnalyticsConfig(graph, catalog),
     ...checkW3AnalyticsNoDetector(graph),
+    ...checkV14LayoutConfig(graph, catalog),
+    ...checkW4LayoutNoDetector(graph),
   ];
 }

@@ -353,6 +353,131 @@ export function detectorExportImageDefault(
 }
 
 // ---------------------------------------------------------------------------
+// Per-deployment LocalServer feature floors (car-assembly-check design §7,
+// DD9). Greengrass component versions are per account, so a floor is
+// configuration of the deployment, not a literal of the tree: each floor is a
+// CDK context key whose default comes from a shell variable, then an SSM
+// parameter, and whose value is a {workflow_core arch id: 'N.N.N'} map.
+// ---------------------------------------------------------------------------
+
+/** The workflow_core arch ids a floor map may name (the packager's
+ *  ARCH_TO_LOCAL_SERVER_COMPONENT keys; pinned by the backend test
+ *  test_layout_check_feature_floor_coverage.py). */
+export const MIN_VERSIONS_FLOOR_ARCHES = [
+  'arm64_cpu',
+  'arm64_jp5',
+  'arm64_jp6',
+  'arm64_jp7',
+  'x86_64',
+  'x86_64_nvidia',
+];
+
+/** SSM parameter bin/app.ts falls back to for `layoutCheckMinLocalServerVersions`. */
+export const LAYOUT_CHECK_FLOOR_SSM_PARAMETER = '/dda-portal/layout-check-min-local-server-versions';
+
+/** SSM parameter bin/app.ts falls back to for `rfdetrSegMinLocalServerVersions`. */
+export const RFDETR_SEG_FLOOR_SSM_PARAMETER = '/dda-portal/rfdetr-seg-min-local-server-versions';
+
+/**
+ * The default context value of a per-deployment floor key: the shell variable
+ * `envVar` first, else the SSM parameter `ssmParameter`, else undefined (the
+ * {@link detectorExportImageDefault} shape: trimmed; a blank value, a failed
+ * read and the CLI's literal `None` count as no value). bin/app.ts's
+ * `readSsmParameter` reads the parameter in
+ * `CDK_DEFAULT_REGION || AWS_REGION || AWS_DEFAULT_REGION || 'us-east-1'`, so
+ * the fallback is the deploying account's parameter in the region the deploy
+ * resolves. The value is not validated here: {@link parseMinVersionsFloor}
+ * validates whichever source wins.
+ */
+export function minVersionsFloorDefault(
+  envVar: string,
+  ssmParameter: string,
+  env: Record<string, string | undefined>,
+  readSsmParameter: (name: string) => string | undefined,
+): string | undefined {
+  const fromEnv = (env[envVar] ?? '').trim();
+  if (fromEnv) return fromEnv;
+  let fromSsm = '';
+  try {
+    fromSsm = (readSsmParameter(ssmParameter) ?? '').trim();
+  } catch {
+    return undefined;
+  }
+  return fromSsm && fromSsm !== 'None' ? fromSsm : undefined;
+}
+
+/**
+ * Validates a per-deployment floor context value. `undefined`, `null` and a
+ * string that is blank after trim() are absent (undefined). Any other string
+ * is JSON text and an object is taken as is; the result must be a JSON object
+ * whose every key is one of {@link MIN_VERSIONS_FLOOR_ARCHES} and every value
+ * matches `N.N.N`. Anything else throws, naming the context key, the
+ * offending entry and the SSM parameter, so a malformed floor fails the
+ * synth instead of silently failing closed or open.
+ */
+export function parseMinVersionsFloor(
+  contextKey: string,
+  ssmParameter: string,
+  value: unknown,
+): Record<string, string> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string' && value.trim().length === 0) return undefined;
+  const fail = (entry: string): never => {
+    throw new Error(
+      `${contextKey} must be a JSON object of {arch: 'N.N.N'} with arch one of ` +
+        `${MIN_VERSIONS_FLOOR_ARCHES.join(', ')} (set with -c ${contextKey}=... or the ` +
+        `SSM parameter ${ssmParameter}); offending entry: ${entry}`,
+    );
+  };
+  let parsed: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return fail(value);
+    }
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return fail(typeof value === 'string' ? value : JSON.stringify(value));
+  }
+  const floor: Record<string, string> = {};
+  for (const [arch, version] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!MIN_VERSIONS_FLOOR_ARCHES.includes(arch)) fail(`${arch}: ${JSON.stringify(version)}`);
+    if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) {
+      fail(`${arch}: ${JSON.stringify(version)}`);
+    }
+    floor[arch] = version as string;
+  }
+  return floor;
+}
+
+/** The default `layoutCheckMinLocalServerVersions` context: env
+ *  `LAYOUT_CHECK_FLOOR` (distinct from the Lambda variable, so a developer's
+ *  shell cannot leak into the infra tests), then
+ *  {@link LAYOUT_CHECK_FLOOR_SSM_PARAMETER}. */
+export function layoutCheckFloorDefault(
+  env: Record<string, string | undefined>,
+  readSsmParameter: (name: string) => string | undefined,
+): string | undefined {
+  return minVersionsFloorDefault('LAYOUT_CHECK_FLOOR', LAYOUT_CHECK_FLOOR_SSM_PARAMETER, env, readSsmParameter);
+}
+
+/** The Layout_Check floor map; absent (or blank) is `{}`: no floor, so the
+ *  packager and the deployment gate refuse every Layout_Check workflow. */
+export function parseLayoutCheckFloor(value: unknown): Record<string, string> {
+  return parseMinVersionsFloor('layoutCheckMinLocalServerVersions', LAYOUT_CHECK_FLOOR_SSM_PARAMETER, value) ?? {};
+}
+
+/** The default `rfdetrSegMinLocalServerVersions` context: env
+ *  `RFDETR_SEG_FLOOR`, then {@link RFDETR_SEG_FLOOR_SSM_PARAMETER}. */
+export function rfDetrSegFloorDefault(
+  env: Record<string, string | undefined>,
+  readSsmParameter: (name: string) => string | undefined,
+): string | undefined {
+  return minVersionsFloorDefault('RFDETR_SEG_FLOOR', RFDETR_SEG_FLOOR_SSM_PARAMETER, env, readSsmParameter);
+}
+
+// ---------------------------------------------------------------------------
 // S3 data-plane scoping of the portal Lambda roles
 // (portal-authorization-and-iam-scoping, design I5 "Design D5-B").
 //

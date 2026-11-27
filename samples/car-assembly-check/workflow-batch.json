@@ -1,0 +1,187 @@
+{
+  "schemaVersion": 1,
+  "nodes": [
+    {
+      "id": "source",
+      "type": "folder_source",
+      "position": {
+        "x": 0,
+        "y": 100
+      },
+      "parameters": {
+        "location": "/aws_dda/batch-input/",
+        "file_pattern": "*.jpg"
+      }
+    },
+    {
+      "id": "gray",
+      "type": "custom_python_preprocess",
+      "position": {
+        "x": 220,
+        "y": 100
+      },
+      "parameters": {
+        "code": "# ITU-R 601-2 luma (0.299 R + 0.587 G + 0.114 B), the weights Pillow's mode \"L\"\n# used for the training set. Paste into a custom_python_preprocess node's \"code\";\n# requirements empty, wall_clock_limit_s default. The bridge pins frames to RGB,\n# so only the RGB branch runs on a device; the others keep the handler honest.\ndef process_frame(frame, metadata):\n    fmt = (metadata.get(\"frame\") or {}).get(\"format\")\n    if fmt == \"GRAY8\":\n        return None  # already single-channel: pass through\n    if fmt == \"RGB\":\n        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)\n        return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)\n    if fmt == \"BGR\":\n        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)\n        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)\n    raise ValueError(\"grayscale handler: unsupported frame format %r\" % (fmt,))\n",
+        "requirements": "",
+        "wall_clock_limit_s": 10
+      }
+    },
+    {
+      "id": "model",
+      "type": "model_inference",
+      "position": {
+        "x": 440,
+        "y": 100
+      },
+      "parameters": {
+        "modelName": "car-assembly-seg-gray",
+        "detection_sort_order": "left_to_right"
+      }
+    },
+    {
+      "id": "capture",
+      "type": "capture",
+      "position": {
+        "x": 660,
+        "y": 0
+      },
+      "parameters": {
+        "output_path": "/aws_dda/captures",
+        "interval": 0,
+        "quality": 100
+      }
+    },
+    {
+      "id": "layout",
+      "type": "layout_check",
+      "position": {
+        "x": 660,
+        "y": 200
+      },
+      "parameters": {
+        "expected_regions": "<REPLACE: expected_regions JSON from layout_reference.py (6.2)>",
+        "min_iou": "<REPLACE: calibrated min_iou (6.2)>",
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      }
+    },
+    {
+      "id": "verdict",
+      "type": "conditional",
+      "position": {
+        "x": 880,
+        "y": 200
+      },
+      "parameters": {
+        "condition": "layout.layout.pass == true"
+      }
+    },
+    {
+      "id": "accept",
+      "type": "mqtt_publish",
+      "position": {
+        "x": 1100,
+        "y": 120
+      },
+      "parameters": {
+        "topic": "dda/car-assembly/pass",
+        "greengrass": true,
+        "payload_format": "json",
+        "payload_template": "{\"pass\": \"{layout.layout.pass}\", \"front_fender\": \"{layout.layout.pieces.front_fender.status}\", \"rear_fender\": \"{layout.layout.pieces.rear_fender.status}\", \"roof\": \"{layout.layout.pieces.roof.status}\", \"flagged\": \"{layout.layout.flagged}\", \"sent_at\": \"{now_iso}\"}"
+      }
+    },
+    {
+      "id": "reject",
+      "type": "mqtt_publish",
+      "position": {
+        "x": 1100,
+        "y": 280
+      },
+      "parameters": {
+        "topic": "dda/car-assembly/fail",
+        "greengrass": true,
+        "payload_format": "json",
+        "payload_template": "{\"pass\": \"{layout.layout.pass}\", \"front_fender\": \"{layout.layout.pieces.front_fender.status}\", \"rear_fender\": \"{layout.layout.pieces.rear_fender.status}\", \"roof\": \"{layout.layout.pieces.roof.status}\", \"flagged\": \"{layout.layout.flagged}\", \"sent_at\": \"{now_iso}\"}"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "id": "c1",
+      "from": {
+        "node": "source",
+        "port": "out"
+      },
+      "to": {
+        "node": "gray",
+        "port": "in"
+      }
+    },
+    {
+      "id": "c2",
+      "from": {
+        "node": "gray",
+        "port": "out"
+      },
+      "to": {
+        "node": "model",
+        "port": "in"
+      }
+    },
+    {
+      "id": "c3",
+      "from": {
+        "node": "model",
+        "port": "out"
+      },
+      "to": {
+        "node": "capture",
+        "port": "in"
+      }
+    },
+    {
+      "id": "c4",
+      "from": {
+        "node": "model",
+        "port": "out"
+      },
+      "to": {
+        "node": "layout",
+        "port": "in"
+      }
+    },
+    {
+      "id": "c5",
+      "from": {
+        "node": "layout",
+        "port": "out"
+      },
+      "to": {
+        "node": "verdict",
+        "port": "in"
+      }
+    },
+    {
+      "id": "c6",
+      "from": {
+        "node": "verdict",
+        "port": "true"
+      },
+      "to": {
+        "node": "accept",
+        "port": "in"
+      }
+    },
+    {
+      "id": "c7",
+      "from": {
+        "node": "verdict",
+        "port": "false"
+      },
+      "to": {
+        "node": "reject",
+        "port": "in"
+      }
+    }
+  ]
+}

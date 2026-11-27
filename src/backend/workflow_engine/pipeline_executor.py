@@ -3919,7 +3919,7 @@ class WorkflowExecutor:
                 ) or scene_analytics.frame_dimensions(tag_values.get("frame"))
             scene_analytics.apply_scene_analytics(
                 document, tag_values, frame_size=frame_size,
-                collector=collector,
+                collector=collector, output_dir=output_dir, capture_id=capture_id,
             )
         except Exception:  # noqa: BLE001 - contained per 13.7
             logger.exception(

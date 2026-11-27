@@ -101,6 +101,7 @@ Every trigger-driven input also has concurrency settings: `concurrency_policy` (
 | **Conditional** | Routes each result to its `true` or `false` output. | `condition`. |
 | **Metadata** | Attaches values from the trigger payload (dotted paths such as `order.id`) and static JSON to the result. | `mappings`, `static_json`. |
 | **Detection Counter** | Counts detections per class, optionally inside a `zone`. | `classes`, `min_confidence`, `zone`, `zone_rule` (`center` or `overlap`). |
+| **Layout Check** | Checks that each listed class is detected exactly once in its own region of the frame, from the instance masks of an instance-segmentation model (RF-DETR-Seg). A class is `ok` when its mask overlaps its region with an IoU of at least `min_iou`, otherwise `misplaced`; `missing` when it is not detected and `duplicate` when it is detected more than once. The verdict is written to the run metadata under `layout.<nodeId>`: `pass`, `pieces.<class>.status` and `pieces.<class>.iou`, `flagged` (the detection ids of misplaced and duplicate pieces), `unexpected_classes` (detected labels that are not listed) and `ignored` (detections outside the car outline, see `min_outline_overlap`). A later node reads it by dotted path, for example `layout.<nodeId>.pass == false`. Gating (`conditional`, `inference_filter`) reaches executor bindings (`mqtt_publish`, `digital_output`, `s3_upload`, …), not `capture`, which is written during the pipeline; keep exactly one `capture` on the frame path. The Portal packages and deploys the node only for a LocalServer at or above the Layout Check floor ([13.4](13-deployments.md#134-revise-a-deployment)). Worked example: [8.9](#89-worked-example-car-assembly-check). | `expected_regions` (a JSON object mapping each class label to a closed polygon of 3 to 64 `[x, y]` points in normalized frame coordinates, 1 to 10 classes), `min_iou` (0.01–1, default 0.7; calibrate it), `min_confidence` (0.5), `min_outline_overlap` (0–0.5, default 0.1: a detection with less of its mask inside the union of the regions is ignored; 0 counts every detection). |
 | **Object Association** | Checks that every subject detection (for example `person`) has the required classes overlapping it (`hardhat, vest`). | `subject_class`, `required_classes`, `min_overlap`, `min_confidence`, `zone`. |
 | **Event Gate** | Turns per-run verdicts into events with hysteresis: active after `activate_after` consecutive true runs, cleared after `clear_after` false ones. | `condition`, `activate_after`, `clear_after`, `emit` (`on_activate`, `on_change`, `while_active`), `repeat_interval_ms`. |
 | **Custom Python** | Your own code on the metadata (or frames/events; the port types are configurable). | `code`, `requirements`, `input_port_type`, `output_port_type`, `wall_clock_limit_s` (seconds one handler call may take, 1–120, default 10; raise it when the code calls a cloud service). |
@@ -198,3 +199,75 @@ Click **Run test** (the workflow must be saved first). **Test run progress** str
 ## 8.8 Worked example: blue plate detector
 
 The `blue-plate-detector` workflow in the screenshots is the minimal production shape: **Aravis Camera Source** (the station's Basler camera, bound to a Jetson device) → **Model Inference** (`yolo-world-blue-plate`, detections sorted left to right) → **MQTT Publish** (topic `factory/line1/inspection`, payload `{inference_json}`, on completion). A richer variant adds an **MQTT Subscribe** trigger on the camera's `activation` port so the PLC starts each run, a **Conditional** on `is_anomalous` and a **Digital Output** pulse on the `true` branch, and a **Capture to File System** node on the frames for an audit trail.
+]633;E;cat /tmp/feat005_89_head.md;ee18f483-f536-45f8-8063-65475d68da3d]633;C
+## 8.9 Worked example: car assembly check
+
+A station checks whether the three pieces of a toy car (`front_fender`, `rear_fender`, `roof`) sit in their pockets. An RF-DETR-Seg model finds each piece's mask and a **Layout Check** node gives a verdict per piece and for the whole frame. The scripts are in `datasets/` (run with `python3` on a workstation; only the reference capture needs OpenCV) and `samples/car-assembly-check/` (the workflows, the grayscale handler and the device batch driver; its `README.md` has the node tables).
+
+### Triage and labeling
+
+1. **Triage the images first.** The Triage_File (`placement-triage.csv`, eleven columns) records for every image whether it is correct, which pieces are misplaced or missing, the per-class piece counts, any occluder (a hand) and any stray piece outside the car. It is the ground truth: it decides which images may feed the reference (the Known_Good_Set) and which validate the verdict (the Fail_Set must fail). `python3 datasets/assembly_triage.py --triage placement-triage.csv` prints the Known_Good, Fail_Set and Occluded_Correct sets and exits 1 if it lists any problem.
+2. **Label by shape**, as an instance-segmentation job ([4.2](04-labeling.md#42-create-a-labeling-job-dda-data-labeling-system)). The instructions define each class by the piece's shape, not by the pocket it sits in, so a wrong-placement photo is labeled as a further example of the same classes. Policy: one polygon per visible piece, a misplaced piece labeled where it lies, a missing piece not labeled; a piece partly hidden by a hand is outlined on its visible part with the hand excluded; a stray piece outside the car outline is left unlabeled; an empty tray is submitted with zero instances.
+3. **Check the labels against the triage.** `python3 datasets/check_assembly_manifests.py --labeled output.manifest --triage placement-triage.csv` compares each image's per-class instance counts with the triage's counts and checks the manifest's shape.
+
+### Manifests and training
+
+1. **Derive the grayscale manifest** from the labeled one: the geometry is identical, only the image prefix changes. `python3 datasets/rewrite_manifest_source_refs.py --manifest output.manifest --out gray.manifest --from-prefix s3://<bucket>/assembly-photos/ --to-prefix s3://<bucket>/<grayscale prefix>/ --verify-dir <local grayscale folder>` rewrites only the `source-ref` prefix and writes nothing if any line is refused.
+2. `python3 datasets/check_assembly_manifests.py --labeled output.manifest --derived gray.manifest --triage placement-triage.csv --images-mono <local grayscale folder>` checks that the two manifests are identical apart from the prefix and replays the training converter's split.
+3. **Train both variants** with the same settings, one per manifest: **RF-DETR (Roboflow) → Instance Segmentation (masks + boxes)** ([6](06-training.md)). Package each model for instance output ([7](07-models.md)).
+
+### Reference and calibration
+
+1. **Capture the reference** (the `expected_regions` value) from one image that the triage confirms correct: `python3 datasets/layout_reference.py --manifest output.manifest --source-ref s3://<bucket>/assembly-photos/<image>.jpg --triage placement-triage.csv --out expected_regions.json`. It turns each label's mask into a polygon of at most 64 vertices (raster IoU at least 0.98 with the mask) and refuses an image whose triage row is not Known_Good.
+2. **Calibrate `min_iou` from the labels:** `python3 datasets/layout_reference.py --calibrate output.manifest --regions expected_regions.json --triage placement-triage.csv [--test-files test.txt]`. It prints each label's IoU distribution over the Known_Good_Set and `recommended_min_iou`, and checks that every Fail_Set image fails with the pieces its triage row names flagged or missing (exit 1 when one does not).
+
+### The workflow
+
+Create the workflow from `samples/car-assembly-check/workflow.json` (the `definition` body of `POST /workflows`) and fill its two placeholders with `expected_regions.json` and the calibrated `min_iou`. Shape: source → **Grayscale_Node** (`custom_python_preprocess`) → **Model Inference** → one unconditional **Capture to File System**, and **Layout Check** (`layout`) → **Conditional** `layout.layout.pass == true` → **MQTT Publish** to `dda/car-assembly/pass` or `dda/car-assembly/fail`.
+
+The grayscale model was trained on grayscale images, so the Grayscale_Node sits immediately upstream of Model Inference (downstream of any `rotate`), with `requirements` empty and `wall_clock_limit_s` 10. Its `code`, pasted unchanged from `samples/car-assembly-check/grayscale_handler.py`:
+
+```python
+# ITU-R 601-2 luma (0.299 R + 0.587 G + 0.114 B), the weights Pillow's mode "L"
+# used for the training set. Paste into a custom_python_preprocess node's "code";
+# requirements empty, wall_clock_limit_s default. The bridge pins frames to RGB,
+# so only the RGB branch runs on a device; the others keep the handler honest.
+def process_frame(frame, metadata):
+    fmt = (metadata.get("frame") or {}).get("format")
+    if fmt == "GRAY8":
+        return None  # already single-channel: pass through
+    if fmt == "RGB":
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+    if fmt == "BGR":
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    raise ValueError("grayscale handler: unsupported frame format %r" % (fmt,))
+```
+
+- **Orientation.** The model must see frames in the orientation of the training photos. A production camera mounted like the camera that took them (whose frames are upside down relative to the training images) needs a `rotate` node with `method = rotate-180` between the camera and the Grayscale_Node. The pinned Static_Image_Camera image is already in that orientation, so the sample workflows carry no `rotate`. A wrong orientation shows as every piece `misplaced` with similar low scores.
+- **The outline rule.** A detected piece with less than `min_outline_overlap` (default 0.10) of its mask inside the car outline, the union of the expected regions, is ignored: it is listed under `layout.<nodeId>.ignored`, never counted and never flagged. A spare piece in frame therefore never fails a correct build, while a piece set down outside the outline instead of in its pocket leaves its class `missing` and the image fails. `0` turns the rule off.
+- **A hand over the car is not detected** by this check: a hand is not a class, and a piece it hides counts as `missing` or is judged on its visible part. Use a station interlock to stop a run while a hand is in the frame.
+
+### Deploy, batch run and the verdict
+
+1. Package and deploy the workflow ([8.5](#85-validate-and-package), [13](13-deployments.md)); the device's LocalServer must be at or above the Layout Check floor.
+2. **Batch run on the device host** with the `folder_source` form `workflow-batch.json`: `python3 batch_run.py --registration-id <id> --workflow-id <id> --folder /aws_dda/batch-input --images ./originals --triage placement-triage.csv --expect-local-server-version <version> --out gray.json` runs one image at a time and writes a Result_Export.
+3. **Recalibrate from predicted masks:** `python3 datasets/layout_reference.py --calibrate --results gray.json --local-server-version <version> --regions expected_regions.json --triage placement-triage.csv`, set the new `min_iou` in a new workflow version and re-run the batch. Repeat the batch run after any change to the model, the reference, the resolution or the LocalServer build.
+4. **Read the verdict on the device:** the HMI's run results (a Layout Check section with a row per piece and the misplaced pieces highlighted on the frame), `GET /workflows/executions/{id}/metadata` (`layout.layout`), the node status, and the MQTT topics. The Portal Results tab shows a verdict for workflow-engine runs only once `results-tab-workflow-runs` is deployed on the Portal and on the device and its `WorkflowRunUpload` switch is on; until then read the verdict on the device.
+
+### Grayscale or colour: the A/B comparison
+
+Fix the winning criterion before reading any number. Run the colour variant from `workflow-color.json` with the same `folder_source` substitution; its batch run doubles as its predicted-mask calibration. Then `python3 datasets/compare_variants.py --gray-meta <gray training_metadata.json> --color-meta <colour training_metadata.json> --gray-results gray.json --color-results color.json --labeled output.manifest --regions expected_regions.json --triage placement-triage.csv --gray-min-iou <v> --color-min-iou <v> --local-server-version <version> --out ab.md` writes the comparison table. Bind the winner in the production workflow version.
+
+Switching **from grayscale to colour**: remove the Grayscale_Node and connect the source (or its `rotate`) to Model Inference; set `modelName` to the colour model; set the colour variant's own calibrated `min_iou`; the camera must deliver colour frames; keep `expected_regions` (the reference does not depend on the variant).
+
+Switching **from colour to grayscale**: insert the Grayscale_Node immediately upstream of Model Inference and downstream of any `rotate`, with the handler pasted unchanged; set `modelName` to the grayscale model; set the grayscale variant's own calibrated `min_iou`; keep `expected_regions`.
+
+Either way, save a new version, deploy it and make a batch run before recording results.
+
+### When the setup changes
+
+- **Camera or fixture moved:** the reference assumes the framing of the images it was captured from. Recapture it, recalibrate and deploy a new version. Every piece `misplaced` with similar scores is the sign; check the orientation first.
+- **A new camera:** before any verdict from it is recorded, make one known-good run (exactly one instance of each class, each of the right class). If it passes with every IoU in the known-good predicted-mask range, keep the reference; otherwise recapture it from that run (`layout_reference.py --overlay <saved overlay body> --metadata <saved metadata body> --out expected_regions.json`). Then repeat the predicted-mask calibration on that camera's captures, recorded with a capture-only workflow written at that time (camera → `rotate` as the mounting requires → one `capture`).
+- **Too slow:** if the Layout Check takes longer than its budget on the device (200 ms for three pieces at 4608 × 3288), the fallback is a numpy path on the device behind the same scoring function, pinned output-identical to the pure path. If the Grayscale_Node is too slow (median above 500 ms), feed it the whole field of view downscaled at the same aspect ratio, never a `crop`; the reference stands, but repeat the batch run and the predicted-mask calibration at the new resolution.
