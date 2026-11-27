@@ -203,11 +203,16 @@ class TestS3UploadMappings:
 
 class TestS3UploadCatalogPositionAndBaseline:
     def test_appended_last(self):
+        # s3_upload was appended after every descriptor that predates it;
+        # later additive features (car-assembly-check's layout_check) may
+        # only append *after* it, so the durable assertion is positional
+        # (the test_catalog_modbus_write.py conversion): s3_upload keeps
+        # its place right after the 31 pre-s3_upload descriptors.
         order = [d.type_id for d in NODE_CATALOG]
-        assert order[-1] == "s3_upload"
+        assert order.index("s3_upload") == 31
         assert order.count("s3_upload") == 1
         # The descriptor right before it is the last pre-existing one.
-        assert order[-2] == "event_gate"
+        assert order[30] == "event_gate"
 
     def test_baseline_delta_scoped_to_the_new_descriptor(self):
         with open(os.path.join(_HERE, "catalog_baseline.json"),

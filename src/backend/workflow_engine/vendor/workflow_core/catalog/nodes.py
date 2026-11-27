@@ -3033,6 +3033,67 @@ EVENT_GATE = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Layout check node type (additive — car-assembly-check Requirement 5.1) —
+# executor-level post-processing over a run's instance masks: each
+# configured class's mask is compared with the polygon where that class
+# must lie, and the verdict is written to the run metadata under
+# layout.<nodeId>.
+#
+# An architecture-independent executor binding with no GStreamer element:
+# the shared implementation lives in ``workflow_core.analytics.layout`` and
+# runs identically on the device and in the test sandbox. Its condition
+# example lives in the ``expected_regions`` description (the event_gate
+# precedent above); CONDITION_EXAMPLES and CONDITION_LANGUAGE_DESCRIPTION
+# are unchanged.
+# --------------------------------------------------------------------------
+
+LAYOUT_CHECK = NodeTypeDescriptor(
+    type_id="layout_check",
+    category=CATEGORY_POST_PROCESSING,
+    display_name="Layout Check",
+    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
+    parameters=[
+        ParameterDescriptor("expected_regions", "string", required=True, default=None,
+                            constraints={"min_length": 2},
+                            description="Where each class must lie when correctly placed: a JSON "
+                                        "object mapping a detection label to a closed polygon of 3 "
+                                        "to 64 [x, y] points in normalized frame coordinates (0 to "
+                                        "1), one entry per class to check (1 to 10). A run passes "
+                                        "when every listed class is detected exactly once and its "
+                                        "mask overlaps its polygon with IoU >= min_iou. The verdict "
+                                        "is written to the run metadata as layout.<nodeId>.pass "
+                                        "with a per-class layout.<nodeId>.pieces.<label>.status; "
+                                        "a downstream condition reads it by dotted path, e.g. "
+                                        "layout.<nodeId>.pass == false.",
+                            examples=['{"roof": [[0.3, 0.2], [0.7, 0.2], [0.7, 0.45], [0.3, 0.45]]}'],
+                            multiline=True),
+        ParameterDescriptor("min_iou", "float", required=False, default=0.7,
+                            constraints={"min": 0.01, "max": 1.0},
+                            description="Minimum IoU between a class's mask and its polygon for the "
+                                        "piece to count as correctly placed (0.01 to 1), e.g. 0.7. "
+                                        "Calibrate it from known-good runs; see the user guide.",
+                            examples=[0.7, 0.6]),
+        ParameterDescriptor("min_confidence", "float", required=False, default=0.5,
+                            constraints={"min": 0.0, "max": 1.0},
+                            description="Ignore detections whose confidence is below this value "
+                                        "(0 to 1), e.g. 0.5.",
+                            examples=[0.5]),
+        ParameterDescriptor("min_outline_overlap", "float", required=False, default=0.1,
+                            constraints={"min": 0.0, "max": 0.5},
+                            description="Ignore a detection lying outside the car outline (the "
+                                        "union of the expected regions): a detection counts only "
+                                        "if at least this fraction of its mask lies inside it (0 "
+                                        "to 0.5), e.g. 0.1. Ignored detections are listed under "
+                                        "layout.<nodeId>.ignored and never fail the check; 0 "
+                                        "counts every detection.",
+                            examples=[0.1, 0.0]),
+    ],
+    mappings=_same_on_all_archs(executor_binding="layout_check"),
+    hardware_dependent=False,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -3087,6 +3148,9 @@ NODE_CATALOG = (
     # Appended (additive — s3 upload output node): every pre-existing
     # descriptor keeps its position and content.
     S3_UPLOAD,
+    # Appended (additive — car-assembly-check Requirement 5.1): every
+    # pre-existing descriptor keeps its position and content.
+    LAYOUT_CHECK,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}
