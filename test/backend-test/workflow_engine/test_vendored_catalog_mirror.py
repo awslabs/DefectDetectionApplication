@@ -70,6 +70,8 @@ MIRRORED_PACKAGE_FILENAMES = ("anomaly_invocation.py",)
 #     event-gate automaton. The device and the Portal's cloud test sandbox must
 #     produce identical metadata for identical inputs (Requirements 13.9, 14.6,
 #     15.6), which only holds while both trees run the same code.
+#     ``analytics/layout.py`` holds the Layout Check rules on the same terms
+#     (car-assembly-check Requirements 5.7, 12.2).
 #   * ``validator/checks.py`` and ``validator/__init__.py`` — the validator
 #     rules (the generalized V7 plus V11, V12, V13 and W3) and the codes they
 #     are re-exported under. The device re-validates a compiled document, so a
@@ -89,6 +91,7 @@ MIRRORED_SHARED_MODULE_RELPATHS = (
     "stream_url.py",
     "analytics/__init__.py",
     "analytics/scene.py",
+    "analytics/layout.py",
     "validator/checks.py",
     "validator/__init__.py",
     "compiler/compiler.py",
