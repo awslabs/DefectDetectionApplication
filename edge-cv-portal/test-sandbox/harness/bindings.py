@@ -19,6 +19,13 @@ The three Scene_Analytics_Nodes (rtsp-rtmp-stream-cameras Requirements
 associations first, over the run's Detection_List, then event gates over
 the full metadata, then filters, conditionals and recorders. A test run
 is one run, so every event gate starts inactive.
+
+The Layout Check (``layout_check``, car-assembly-check Requirement 5.7)
+runs in the same pass as the counters through
+``workflow_core.analytics.layout``. The simulated detections are the
+Detection_List in built form, so each is mapped to the raw form the check
+reads (:func:`_raw_form`); without ``mask_rle`` a configured class's entry
+is ``misplaced`` and the outcome a warning.
 """
 
 import re
@@ -269,13 +276,16 @@ def evaluate_condition(condition: str, metadata: Dict[str, Any]) -> bool:
 # a completed node with the outcome in its output.
 # ---------------------------------------------------------------------------
 
-#: Binding ids of the three Scene_Analytics_Nodes: the catalog maps each
-#: node type to the executor binding of the same name.
+#: Binding ids of the three Scene_Analytics_Nodes and the Layout Check:
+#: the catalog maps each node type to the executor binding of the same
+#: name.
 DETECTION_COUNTER_BINDING = "detection_counter"
 OBJECT_ASSOCIATION_BINDING = "object_association"
 EVENT_GATE_BINDING = "event_gate"
+LAYOUT_CHECK_BINDING = "layout_check"
 SCENE_ANALYTICS_BINDINGS = (DETECTION_COUNTER_BINDING,
-                            OBJECT_ASSOCIATION_BINDING, EVENT_GATE_BINDING)
+                            OBJECT_ASSOCIATION_BINDING, EVENT_GATE_BINDING,
+                            LAYOUT_CHECK_BINDING)
 
 #: Run metadata keys: the Detection_List and frame size the analytics
 #: read, and the sections they merge into (Requirements 13.3, 14.4, 15.4).
@@ -284,6 +294,7 @@ FRAME_KEY = "frame"
 COUNTER_KEY = "counter"
 ASSOCIATION_KEY = "association"
 EVENT_KEY = "event"
+LAYOUT_KEY = "layout"
 
 #: The analytics outcome that gates downstream nodes (Requirement 13.6);
 #: ``ok`` and ``warning`` do not.
@@ -298,6 +309,98 @@ def _scene_module():
     except ImportError:
         return None
     return scene
+
+
+def _layout_module():
+    """``workflow_core.analytics.layout``, or None when it is not
+    importable (the guard of :func:`_scene_module`)."""
+    try:
+        from workflow_core.analytics import layout
+    except ImportError:
+        return None
+    return layout
+
+
+def _raw_form(entry: Any) -> Any:
+    """A simulated built-form Detection_List entry (``id``, ``label``,
+    ``confidence``, ``x_min`` .. ``y_max``) as the raw entry the Layout
+    Check reads (``id``, ``class_label``, ``confidence``,
+    ``bounding_box``), passing ``mask_rle``, ``mask_area`` and
+    ``mask_truncated`` through. An entry already in raw form, or not a
+    mapping, is returned as is."""
+    if not isinstance(entry, dict) or "class_label" in entry or "bounding_box" in entry:
+        return entry
+    raw = {
+        "id": entry.get("id"),
+        "class_label": entry.get("label"),
+        "confidence": entry.get("confidence"),
+        "bounding_box": [entry.get("x_min"), entry.get("y_min"),
+                         entry.get("x_max"), entry.get("y_max")],
+    }
+    for key in ("mask_rle", "mask_area", "mask_truncated"):
+        if key in entry:
+            raw[key] = entry[key]
+    return raw
+
+
+def _layout_pieces_text(node_metadata: Dict[str, Any]) -> str:
+    """The pieces that are not ``ok``, worded as the device's node status
+    (``rear_fender misplaced (IoU 0.12), roof missing``)."""
+    parts = []
+    for label, piece in (node_metadata.get("pieces") or {}).items():
+        status = piece.get("status") if isinstance(piece, dict) else None
+        if status is None or status == "ok":
+            continue
+        found = [detection for detection in piece.get("detections") or []
+                 if isinstance(detection, dict)]
+        text = "{0} {1}".format(label, status)
+        if status == "duplicate":
+            text += " ({0})".format(len(found))
+        elif status == "misplaced" and piece.get("iou") is not None:
+            text += " (IoU {0:.2f})".format(piece["iou"])
+        elif status == "misplaced":
+            unmasked = [str(detection["id"]) for detection in found
+                        if detection.get("iou") is None
+                        and detection.get("id") is not None]
+            text += (" (no mask: {0})".format(", ".join(unmasked))
+                     if unmasked else " (no mask)")
+        parts.append(text)
+    return ", ".join(parts)
+
+
+def _layout_detail(outcome: Dict[str, Any], node_metadata: Dict[str, Any],
+                   failure_text: Optional[str]) -> str:
+    """The Layout Check's status text in the device's wording: ``PASS`` /
+    ``FAIL: ...`` with ``; ignored outside the car outline: <class> (<n>)``
+    appended; for a warning ``no detections to check``, ``frame size
+    unknown`` or the verdict naming a mask-less detection, then the other
+    problems; for an error ``expected_regions: <problems>``."""
+    problems = [str(problem) for problem in outcome.get("problems") or ()]
+    if outcome.get("outcome") == ANALYTICS_OUTCOME_ERROR:
+        return failure_text or "; ".join(problems) or "the node could not be evaluated"
+    counts: Dict[str, int] = {}
+    for entry in node_metadata.get("ignored") or []:
+        if isinstance(entry, dict):
+            label = str(entry.get("class_label"))
+            counts[label] = counts.get(label, 0) + 1
+    suffix = ("; ignored outside the car outline: {0}".format(", ".join(
+        "{0} ({1})".format(label, counts[label]) for label in sorted(counts)))
+        if counts else "")
+    pieces = _layout_pieces_text(node_metadata)
+    if node_metadata.get("pass") is True:
+        verdict = "PASS"
+    else:
+        verdict = "FAIL: {0}".format(pieces) if pieces else "FAIL"
+    if outcome.get("outcome") != "warning":
+        return verdict + suffix
+    unknown = [problem for problem in problems
+               if problem in ("no detections to check", "frame size unknown")]
+    parts = list(unknown)
+    if not unknown and pieces:
+        parts.append(verdict)
+    parts.extend(problem for problem in problems
+                 if problem not in unknown and " has no usable mask: " not in problem)
+    return ("; ".join(parts) if parts else verdict) + suffix
 
 
 @dataclass
@@ -392,7 +495,8 @@ def run_scene_analytics(bindings: List[Dict], metadata: Dict[str, Any], *,
                         frame_size: Any = None,
                         states: Optional[Dict[str, Any]] = None,
                         now_ms: int = 0,
-                        store: Optional[ResultsStore] = None) -> SceneAnalyticsRun:
+                        store: Optional[ResultsStore] = None,
+                        detections_configured: bool = True) -> SceneAnalyticsRun:
     """Run a document's Scene_Analytics_Nodes over one run.
 
     ``metadata`` is the run metadata, carrying the Detection_List under
@@ -402,10 +506,13 @@ def run_scene_analytics(bindings: List[Dict], metadata: Dict[str, Any], *,
     every gate starts inactive (Requirement 15.6), and the parity test
     carries the returned ``states`` from run to run. ``store`` records each
     node's outcome as a completed node; it is optional so the logic can be
-    exercised on its own.
+    exercised on its own. ``detections_configured`` is False when the test
+    run configured no simulated detections: a layout check then reports
+    "no detections to check", as the device does without a capture
+    record, while counters count the empty Detection_List.
     """
     run_metadata = dict(metadata)
-    for key in (COUNTER_KEY, ASSOCIATION_KEY, EVENT_KEY):
+    for key in (COUNTER_KEY, ASSOCIATION_KEY, EVENT_KEY, LAYOUT_KEY):
         if isinstance(run_metadata.get(key), dict):
             run_metadata[key] = dict(run_metadata[key])
     result = SceneAnalyticsRun(metadata=run_metadata,
@@ -415,7 +522,8 @@ def run_scene_analytics(bindings: List[Dict], metadata: Dict[str, Any], *,
     if not ordered:
         return result
     _scene = _scene_module()
-    if _scene is None:
+    _layout = _layout_module()
+    if _scene is None or _layout is None:
         # The image always vendors workflow_core; a missing module is a
         # packaging defect, reported on each node rather than hidden.
         for binding in ordered:
@@ -447,6 +555,46 @@ def run_scene_analytics(bindings: List[Dict], metadata: Dict[str, Any], *,
                 zone_rule=parameters.get("zone_rule", _scene.DEFAULT_ZONE_RULE),
                 frame_size=frame_size)
             section = COUNTER_KEY
+        elif kind == LAYOUT_CHECK_BINDING:
+            # Simulated entries are built-form with ids: mapped, not joined.
+            entries = ([_raw_form(entry) for entry in detections]
+                       if detections_configured and isinstance(detections, list)
+                       else None)
+            regions, parse_problems = _layout.parse_expected_regions(
+                parameters.get("expected_regions"))
+            outcome = _layout.check_layout(
+                entries, frame_size, regions,
+                min_iou=parameters.get("min_iou", _layout.DEFAULT_MIN_IOU),
+                min_confidence=parameters.get("min_confidence",
+                                              _layout.DEFAULT_MIN_CONFIDENCE),
+                min_outline_overlap=parameters.get(
+                    "min_outline_overlap", _layout.DEFAULT_MIN_OUTLINE_OVERLAP))
+            failure_text = None
+            if regions is None:
+                outcome["problems"] = (list(parse_problems)
+                                       + list(outcome.get("problems") or ()))
+                outcome["outcome"] = ANALYTICS_OUTCOME_ERROR
+                failure_text = "expected_regions: {0}".format(
+                    "; ".join(parse_problems or outcome["problems"]))
+            node_metadata = _layout.run_metadata(outcome)
+            _section(run_metadata, LAYOUT_KEY)[node_id] = node_metadata
+            result.outcomes[node_id] = outcome["outcome"]
+            if store is not None:
+                store.add_output(node_id, {
+                    "type": "scene_analytics",
+                    "binding": kind,
+                    "outcome": outcome["outcome"],
+                    "problems": list(outcome["problems"]),
+                    "detail": _layout_detail(outcome, node_metadata, failure_text),
+                    "metadata": node_metadata,
+                }, flush=False)
+                if outcome["outcome"] == ANALYTICS_OUTCOME_ERROR:
+                    store.set_error(node_id, _layout_detail(outcome, node_metadata,
+                                                            failure_text),
+                                    code="ANALYTICS_CONFIG_INVALID", flush=False)
+                else:
+                    store.set_status(node_id, "completed", flush=False)
+            continue
         else:
             outcome = _scene.associate(
                 detections,
@@ -557,6 +705,8 @@ def execute_bindings(bindings: List[Dict], metadata: Dict[str, Any],
     filter_outcomes: Dict[str, Optional[bool]] = {}
     if has_scene_analytics(bindings):
         metadata = dict(metadata)
+        configured = (isinstance(detections, (list, tuple))
+                      or isinstance(metadata.get(DETECTIONS_KEY), list))
         if isinstance(detections, (list, tuple)):
             metadata[DETECTIONS_KEY] = list(detections)
         elif not isinstance(metadata.get(DETECTIONS_KEY), list):
@@ -566,7 +716,8 @@ def execute_bindings(bindings: List[Dict], metadata: Dict[str, Any],
             metadata[FRAME_KEY] = frame
         analytics = run_scene_analytics(
             bindings, metadata, frame_size=frame,
-            now_ms=_now_ms() if now_ms is None else now_ms, store=store)
+            now_ms=_now_ms() if now_ms is None else now_ms, store=store,
+            detections_configured=configured)
         metadata = analytics.metadata
         filter_outcomes.update(analytics.gating_outcomes())
         store.flush()
