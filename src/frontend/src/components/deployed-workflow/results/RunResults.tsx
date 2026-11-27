@@ -56,12 +56,19 @@ import { runDetections } from "../detections";
 import { hasMask, normalizeDetectionEntries } from "../instanceDetections";
 import InstanceMaskLayer, { INSTANCE_MASKS_HEADER } from "./InstanceMaskLayer";
 import {
+  failedPieceOutlines,
+  flaggedInstanceKeys,
+  ignoredInstanceKeys,
+  readLayoutSections,
+} from "../layoutVerdicts";
+import {
   hasSceneAnalytics,
   runSceneAnalytics,
   violatingDetectionIds,
 } from "../sceneAnalytics";
 import DetectedObjectsTable from "./DetectedObjectsTable";
 import SceneAnalyticsSections from "./SceneAnalyticsSections";
+import LayoutSections from "./LayoutSections";
 
 /** Overlay toggle labels for a server-rendered overlay image (R1.3). */
 export const BOUNDING_BOXES_TOGGLE_LABEL = "Show bounding boxes";
@@ -305,6 +312,13 @@ function NodeSection({
  * rtsp-rtmp-stream-cameras Requirement 16.3 adds a section per detection
  * counter, object association and event gate in the run metadata, and marks
  * the detections an association found in violation in that table.
+ *
+ * car-assembly-check Requirement 7.1 adds a section per Layout Check node
+ * after those, and on the instance layer the flagged instances of a failing
+ * check in the "misplaced" colour with the other instances dimmed, the
+ * Expected_Region outlines of its pieces that are not ok, and the instances
+ * any check ignored (outside the car outline) muted. A run without a
+ * `layout` section renders as before.
  */
 export default function RunResults(): JSX.Element {
   const { executionId = "" } = useParams();
@@ -367,10 +381,32 @@ export default function RunResults(): JSX.Element {
     () => violatingDetectionIds(analytics),
     [analytics],
   );
+  // Layout Check verdicts (car-assembly-check Requirement 7.1).
+  const layoutSections = useMemo(
+    () => readLayoutSections(metadataQuery.data),
+    [metadataQuery.data],
+  );
+  const showLayout = layoutSections.length > 0;
+  const layoutFailed = layoutSections.some((section) => !section.pass);
+  const layoutMaskProps = useMemo(() => {
+    if (!showLayout) {
+      return {};
+    }
+    const muted = ignoredInstanceKeys(layoutSections);
+    return {
+      ...(layoutFailed
+        ? {
+            highlight: { keys: flaggedInstanceKeys(layoutSections), dimOthers: true },
+            outlines: failedPieceOutlines(layoutSections),
+          }
+        : {}),
+      ...(muted.size > 0 ? { muted } : {}),
+    };
+  }, [layoutSections, showLayout, layoutFailed]);
   const nodeStatusQuery = useQuery({
     queryKey: ["getWorkflowExecutionNodeStatus", executionId],
     queryFn: () => getWorkflowExecutionNodeStatus(executionId),
-    enabled: showAnalytics,
+    enabled: showAnalytics || showLayout,
   });
   const detectionsSection =
     detections !== null ? (
@@ -381,6 +417,9 @@ export default function RunResults(): JSX.Element {
       analytics={analytics}
       nodeStatus={nodeStatusQuery.data}
     />
+  ) : null;
+  const layoutSection = showLayout ? (
+    <LayoutSections sections={layoutSections} nodeStatus={nodeStatusQuery.data} />
   ) : null;
 
   const header = <Header variant="h1">Run results</Header>;
@@ -396,6 +435,7 @@ export default function RunResults(): JSX.Element {
         </Container>
         {detectionsSection}
         {analyticsSection}
+        {layoutSection}
       </SpaceBetween>
     </ContentLayout>
   );
@@ -507,11 +547,12 @@ export default function RunResults(): JSX.Element {
             header={<Header variant="h2">{INSTANCE_MASKS_HEADER}</Header>}
             data-testid="instance-masks-container"
           >
-            <InstanceMaskLayer imageSrc={imageSrc} instances={instances} />
+            <InstanceMaskLayer imageSrc={imageSrc} instances={instances} {...layoutMaskProps} />
           </Container>
         )}
         {detectionsSection}
         {analyticsSection}
+        {layoutSection}
         {nodeGroups.map((group) => (
           <NodeSection
             key={group.nodeId}
