@@ -20,6 +20,14 @@ stored item shape matches exactly what workflow_generator.py reads:
     {setting_key: 'bedrock_configuration',
      value: {model_id, region, max_tokens, temperature, top_p,
              timeout_seconds}}
+
+Images per auto-label worker run (Settings -> Auto-Labeling):
+the same carrier with the reserved id 'autolabel-configuration',
+PortalAdmin only. GET /data-accounts/autolabel-configuration returns the
+saved value (null when nothing is saved) with the default and the bounds;
+PUT saves a whole number from 1 to 5, or clears it with null. The stored
+item is what dda_autolabel_worker reads at the start of every run:
+    {setting_key: 'autolabel.images_per_run', value: <whole number 1-5>}
 """
 import json
 import math
@@ -54,6 +62,15 @@ from dda_llm_request import (
 # bundle), so the settings API shows the default the Bedrock callers use
 # and leaves an unchanged default unstored.
 from bedrock_common import default_max_tokens
+# Images per auto-label worker run (Settings -> Auto-Labeling): the key, the
+# bounds and the rules dda_autolabel_worker applies (autolabel_settings is in
+# the same Lambda bundle), so this API stores only what the worker uses and
+# shows what the worker reads.
+from autolabel_settings import (
+    DEFAULT_IMAGES_PER_RUN, IMAGES_PER_RUN_ERROR, IMAGES_PER_RUN_SETTING_KEY,
+    MAX_IMAGES_PER_RUN, MIN_IMAGES_PER_RUN,
+    parse_stored_images_per_run, validate_images_per_run,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -109,6 +126,19 @@ CAMERA_STALENESS_SETTING_KEY = 'camera_registry.staleness_threshold_hours'
 # Must mirror the readers' fallback so reads return the effective value
 # even before anything is stored (camera-registry-sync Req 4.3).
 DEFAULT_CAMERA_STALENESS_THRESHOLD_HOURS = 24
+
+# --------------------------------------------------------------------------
+# Auto-labeling: Images per worker run (Settings -> Auto-Labeling)
+# --------------------------------------------------------------------------
+
+# Reserved path id on /data-accounts/{id} that routes to the auto-labeling
+# configuration handlers instead of the Data Account CRUD (same carrier as
+# 'bedrock-configuration' above; can never collide with a real Data Account
+# id - those are 12-digit AWS account ids). The item it stores is read by
+# dda_autolabel_worker at the start of every run:
+#     {setting_key: 'autolabel.images_per_run', value: <whole number 1-5>}
+# No item means nothing saved: the worker labels every record of its batch.
+AUTOLABEL_CONFIG_RESOURCE_ID = 'autolabel-configuration'
 
 # Requirement 10.7: invocation timeout is configurable up to 240 seconds
 # (raised from 60: large-output generations regularly exceed 60 s).
@@ -232,6 +262,11 @@ def handler(event: Dict, context: Any) -> Dict:
     Requirement 4.3, PortalAdmin only):
     GET    /api/v1/data-accounts/camera-registry-configuration - Read Staleness_Threshold
     PUT    /api/v1/data-accounts/camera-registry-configuration - Update Staleness_Threshold
+
+    Reserved id 'autolabel-configuration' (Settings -> Auto-Labeling,
+    PortalAdmin only):
+    GET    /api/v1/data-accounts/autolabel-configuration - Read Images per worker run
+    PUT    /api/v1/data-accounts/autolabel-configuration - Save or clear Images per worker run
     """
     # The Model_Token_Limits memo is per invocation, never per container, so
     # a warm container can never serve a mapping written by an earlier
@@ -266,6 +301,11 @@ def handler(event: Dict, context: Any) -> Dict:
         # (camera-registry-sync Requirement 4.3). PortalAdmin-only.
         if path_params.get('id') == CAMERA_REGISTRY_CONFIG_RESOURCE_ID:
             return handle_camera_registry_configuration(event, user, http_method)
+
+        # Reserved id: auto-labeling Images per worker run settings API
+        # (Settings -> Auto-Labeling). PortalAdmin-only.
+        if path_params.get('id') == AUTOLABEL_CONFIG_RESOURCE_ID:
+            return handle_autolabel_configuration(event, user, http_method)
         
         # List Data Accounts is allowed for all authenticated users (read-only for dropdown)
         # All other operations require PortalAdmin
@@ -1215,6 +1255,140 @@ def update_camera_registry_configuration_setting(event: Dict, user: Dict) -> Dic
     except Exception as e:
         logger.error(f"Error updating camera registry configuration: {str(e)}")
         return create_response(500, {'error': 'Failed to update camera registry configuration'})
+
+
+# --------------------------------------------------------------------------
+# Auto-labeling: Images per worker run (Settings -> Auto-Labeling)
+# --------------------------------------------------------------------------
+
+def read_stored_images_per_run() -> Optional[int]:
+    """The saved Images per worker run, or None when nothing usable is saved.
+
+    The rule dda_autolabel_worker applies at the start of every run, so the
+    settings page shows what the worker uses: None when the settings table
+    is not configured, the item is absent, the read fails, or the stored
+    value is not a whole number from 1 to 5.
+    """
+    if not SETTINGS_TABLE:
+        return None
+    try:
+        response = dynamodb.Table(SETTINGS_TABLE).get_item(
+            Key={'setting_key': IMAGES_PER_RUN_SETTING_KEY}
+        )
+    except ClientError as e:
+        logger.warning(f"Could not read images per run setting: {e}")
+        return None
+    item = response.get('Item') or {}
+    return parse_stored_images_per_run(item.get('value'))
+
+
+def handle_autolabel_configuration(event: Dict, user: Dict,
+                                   http_method: str) -> Dict:
+    """
+    Route auto-labeling configuration requests. Restricted to PortalAdmin;
+    denied attempts are audit-logged.
+    """
+    if not is_portal_admin(user):
+        log_audit_event(
+            user_id=user['user_id'],
+            action='unauthorized_access',
+            resource_type='setting',
+            resource_id=IMAGES_PER_RUN_SETTING_KEY,
+            result='denied',
+            details={
+                'required_role': 'PortalAdmin',
+                'method': http_method,
+                'path': event.get('path'),
+            }
+        )
+        return create_response(403, {'error': 'PortalAdmin access required'})
+
+    if http_method == 'GET':
+        return get_autolabel_configuration_setting(event, user)
+    if http_method == 'PUT':
+        return update_autolabel_configuration_setting(event, user)
+    return create_response(404, {'error': 'Not found'})
+
+
+def get_autolabel_configuration_setting(event: Dict, user: Dict) -> Dict:
+    """Return the saved Images per worker run (null: nothing saved), the
+    default the worker uses when nothing is saved, and the bounds."""
+    try:
+        if not SETTINGS_TABLE:
+            return create_response(500, {'error': 'Settings storage is not configured'})
+        return create_response(200, {
+            'images_per_run': read_stored_images_per_run(),
+            'default_images_per_run': DEFAULT_IMAGES_PER_RUN,
+            'min_images_per_run': MIN_IMAGES_PER_RUN,
+            'max_images_per_run': MAX_IMAGES_PER_RUN,
+        })
+    except Exception as e:
+        logger.error(f"Error reading auto-labeling configuration: {str(e)}")
+        return create_response(500, {'error': 'Failed to read auto-labeling configuration'})
+
+
+def update_autolabel_configuration_setting(event: Dict, user: Dict) -> Dict:
+    """
+    Save or clear the Images per worker run. A whole number from 1 to 5 is
+    written as the item dda_autolabel_worker reads at the start of every run:
+        {setting_key: 'autolabel.images_per_run', value: <n>,
+         updated_at: <ms>, updated_by: <user id>}
+    null deletes the item, so nothing is saved and the worker labels every
+    record of its batch again.
+    """
+    try:
+        if not SETTINGS_TABLE:
+            return create_response(500, {'error': 'Settings storage is not configured'})
+
+        try:
+            body = json.loads(event.get('body') or '{}')
+        except (json.JSONDecodeError, TypeError):
+            return create_response(400, {'error': 'Request body is not valid JSON'})
+        if not isinstance(body, dict):
+            return create_response(400, {'error': 'Request body must be a JSON object'})
+
+        if 'images_per_run' not in body:
+            return create_response(400, {
+                'error': 'Invalid auto-labeling configuration',
+                'validation_errors': [
+                    'images_per_run is required: ' + IMAGES_PER_RUN_ERROR],
+            })
+        images_per_run = body['images_per_run']
+        errors = validate_images_per_run(images_per_run)
+        if errors:
+            return create_response(400, {
+                'error': 'Invalid auto-labeling configuration',
+                'validation_errors': errors,
+            })
+
+        table = dynamodb.Table(SETTINGS_TABLE)
+        if images_per_run is None:
+            table.delete_item(Key={'setting_key': IMAGES_PER_RUN_SETTING_KEY})
+        else:
+            table.put_item(Item={
+                'setting_key': IMAGES_PER_RUN_SETTING_KEY,
+                'value': images_per_run,
+                'updated_at': int(datetime.utcnow().timestamp() * 1000),
+                'updated_by': user['user_id'],
+            })
+
+        log_audit_event(
+            user_id=user['user_id'],
+            action='update_autolabel_configuration',
+            resource_type='setting',
+            resource_id=IMAGES_PER_RUN_SETTING_KEY,
+            result='success',
+            details={'images_per_run': images_per_run},
+        )
+
+        return create_response(200, {
+            'message': 'Auto-labeling configuration updated successfully',
+            'images_per_run': images_per_run,
+        })
+
+    except Exception as e:
+        logger.error(f"Error updating auto-labeling configuration: {str(e)}")
+        return create_response(500, {'error': 'Failed to update auto-labeling configuration'})
 
 
 # --------------------------------------------------------------------------

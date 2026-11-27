@@ -2,7 +2,7 @@
 
 **Who:** PortalAdmin only (the page is reached from the navigation or the user menu). **Video:** [Module 0: Portal Setup](https://youtu.be/HtH_4zT23Fo). **Reference:** README [Step 4.1](../../README.md#41-one-time-setup) and [Step 5.2](../../README.md#52-data-account-optional-for-multi-account).
 
-**Portal Settings** holds the installation-wide configuration: the registered data accounts for multi-account setups, the Bedrock model used for AI generation and the assistant, the compute parameters for component builds, and the assistant's own settings. It has four tabs, and a fifth, **Assistant**, when the Portal is deployed with the assistant.
+**Portal Settings** holds the installation-wide configuration: the registered data accounts for multi-account setups, the Bedrock model used for AI generation and the assistant, the compute parameters for component builds, how the auto-label worker spreads pre-labels over its runs, and the assistant's own settings. It has five tabs, and a sixth, **Assistant**, when the Portal is deployed with the assistant.
 
 ## 19.1 Data Accounts
 
@@ -78,11 +78,21 @@ The settings of the assistant panel ([25. The assistant](25-assistant.md)). The 
 
 The two switches apply as soon as they are changed; **Save** stores the retention and guardrail fields. Every change is recorded in the Audit Logs as `assistant_settings_changed`. The limits and how to deploy or remove the assistant are in the [Administrator Guide, Portal assistant](../../edge-cv-portal/ADMIN_GUIDE.md#portal-assistant).
 
-## 19.5 General
+## 19.5 Auto-Labeling
+
+How the auto-label worker spreads the images of a labeling job over its runs when **Model-assisted pre-labeling** is on ([4.2](04-labeling.md#step-5-labeling-setup)). The worker's queue hands each run up to 5 images, which the run labels one after the other within its 300 s limit. A run that runs out of time is stopped, and the queue gives the same images to a new run twice more. Images that still have no pre-label after that stay **Pending**: they are not shown to labelers, and **Re-run pre-labels** only retries failed pre-labels ([4.5](04-labeling.md#45-monitoring-a-job)).
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| **Images per worker run** | 1 to 5: how many images a run labels. The run puts the other images of its batch back on the queue, where another run picks them up at once. A Grounded-SAM image takes about 2.5 s plus 4.5 s per label, plus up to about 140 s while the Grounded-SAM worker starts. With that start-up, 5 fits jobs of up to 6 labels, 4 fits 7 labels, and 3 fits 8 to 10. Lower values mean more runs in parallel, each with its own start-up, and the value applies to every auto-label model. Leave blank to use the default. | `5` (blank) |
+
+Click **Save Configuration**. A saved value applies to the next run, within seconds; runs in progress keep the value they started with. The 300 s run limit, the 240 s allowed per Grounded-SAM image and the batch of 5 are set at deploy time. Saves are recorded in the Audit Logs as `update_autolabel_configuration`.
+
+## 19.6 General
 
 Reserved for general portal settings; it currently shows "General settings coming soon".
 
-## 19.6 Deployment switches
+## 19.7 Deployment switches
 
 Some features are switched at deploy time rather than on this page. They are set as CDK context when the Portal infrastructure is deployed (`deploy-infrastructure.sh`, `-c <key>=<value>`), reach the Lambda functions as environment variables and the browser through the frontend's `config.json`.
 
