@@ -32,12 +32,15 @@ callers) omit the argument and the resolution check is skipped.
 from __future__ import annotations
 
 import json
+import math
 import posixpath
+import re
 from dataclasses import dataclass
 from typing import (
     AbstractSet, Any, Dict, List, Mapping, Optional, Sequence, Tuple,
 )
 
+from ..analytics.layout import MAX_MIN_OUTLINE_OVERLAP, parse_expected_regions
 from ..analytics.scene import (
     MAX_CLASS_LIST_ITEMS,
     MAX_REQUIRED_CLASSES,
@@ -246,11 +249,24 @@ CODE_V12_CONTINUOUS_ACTIVATION = "V12_CONTINUOUS_ACTIVATION"
 # labels).
 CODE_V13_ANALYTICS_CONFIG_INVALID = "V13_ANALYTICS_CONFIG_INVALID"
 
+# V14 (car-assembly-check Requirement 5.6): a ``layout_check`` node's
+# ``expected_regions`` value fails the shared ``analytics.layout`` parser
+# (invalid JSON, 0 or more than 10 classes, a bad label, a point count
+# outside 3-64, a coordinate outside 0-1, a region under 0.5 % of the
+# frame, a self-intersecting ring), or its ``min_iou``,
+# ``min_confidence`` or ``min_outline_overlap`` lies outside its range.
+CODE_V14_LAYOUT_CONFIG_INVALID = "V14_LAYOUT_CONFIG_INVALID"
+
 # W3 (rtsp-rtmp-stream-cameras Requirement 13.8): a ``detection_counter``
 # or ``object_association`` node with no ``model_inference`` node upstream
 # has no Detection_List to analyze at runtime — a warning, mirroring
 # BEDROCK_CROP_NO_MODEL's shape.
 CODE_W3_ANALYTICS_NO_DETECTOR = "W3_ANALYTICS_NO_DETECTOR"
+
+# W4 (car-assembly-check Requirement 5.6): a ``layout_check`` node with no
+# ``model_inference`` node upstream has no instance masks to check at
+# runtime — a warning, W3's walk with its own consumer type and message.
+CODE_W4_LAYOUT_NO_DETECTOR = "W4_LAYOUT_NO_DETECTOR"
 
 # W1 warnings (Requirement 4.6)
 CODE_W1_OUTPUT_NODE_NO_INPUT = "W1_OUTPUT_NODE_NO_INPUT"
@@ -449,6 +465,33 @@ DETECTION_CONSUMER_TYPES = frozenset({
     TYPE_DETECTION_COUNTER, TYPE_OBJECT_ASSOCIATION,
 })
 
+#: The Layout Check node type (car-assembly-check Requirement 5.1). It is
+#: deliberately not a Scene_Analytics_Node type: SCENE_ANALYTICS_TYPES
+#: feeds the packager's stream feature floor and the V13/W3 scope, which
+#: stay as they were; V14 and W4 cover this type.
+TYPE_LAYOUT_CHECK = "layout_check"
+
+#: The ``layout_check`` parameter V14 parses with the shared
+#: ``analytics.layout`` parser.
+LAYOUT_REGIONS_PARAMETER = "expected_regions"
+
+#: The ``layout_check`` thresholds V14 range-checks when their value is a
+#: number or a numeric string: name, inclusive bounds, and the problem
+#: sentence (the Workflow_Builder's inline mirror reports the same text).
+_LAYOUT_RANGE_PARAMETERS: Tuple[Tuple[str, float, float, str], ...] = (
+    ("min_iou", 0.01, 1.0, "The value must be between 0.01 and 1."),
+    ("min_confidence", 0.0, 1.0, "The value must be between 0 and 1."),
+    ("min_outline_overlap", 0.0, MAX_MIN_OUTLINE_OVERLAP,
+     "The value must be between 0 and 0.5."),
+)
+
+#: A decimal number as text (ASCII digits, optional sign and exponent):
+#: the numeric strings V14 range-checks. The inline mirror uses the same
+#: pattern, and both languages read such a text to the same double.
+_LAYOUT_NUMBER_TEXT = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+)
+
 #: Scene_Analytics_Node type -> the parameters V13 parses on it, each with
 #: the shared ``analytics.scene`` parser that defines "well formed" and the
 #: item cap that parser takes. ``subject_class`` is a single label, hence a
@@ -563,6 +606,8 @@ def validate(
     findings.extend(_check_v12_continuous_activation(graph, typed_nodes))
     findings.extend(_check_v13_analytics_config(graph, typed_nodes))
     findings.extend(_check_w3_analytics_no_detector(graph))
+    findings.extend(_check_v14_layout_config(graph, typed_nodes))
+    findings.extend(_check_w4_layout_no_detector(graph))
     findings.extend(_check_inspection_chain(graph, typed_nodes))
     findings.extend(_check_bedrock_request_fields(graph, typed_nodes))
     if model_registry is not None:
@@ -2081,3 +2126,122 @@ def _has_upstream_type(
             return True
         frontier.extend(predecessors.get(current, ()))
     return False
+
+
+# --------------------------------------------------------------------------
+# Layout Check rules (car-assembly-check Requirement 5.6): V14, W4
+# --------------------------------------------------------------------------
+
+def _check_v14_layout_config(
+    graph: WorkflowGraph,
+    typed_nodes: Dict[str, NodeTypeDescriptor],
+) -> List[ValidationFinding]:
+    """Every ``layout_check`` node's configuration must be usable
+    (Requirement 5.6).
+
+    ``expected_regions`` is parsed through the shared
+    ``analytics.layout.parse_expected_regions`` — what the device and the
+    sandbox accept — and a value that reports problems becomes exactly ONE
+    error finding carrying every problem, the V13 shape. A blank or missing
+    value is V4's concern and yields no V14 finding. ``min_iou`` (0.01 to
+    1), ``min_confidence`` (0 to 1) and ``min_outline_overlap`` (0 to 0.5)
+    each become one finding when their value is a number or a numeric
+    string outside the range; any other value is left to V4's type check.
+    The check keys on the node type, so a graph without a ``layout_check``
+    node produces zero V14 findings.
+    """
+    findings = []
+    for node in graph.nodes:
+        if node.type != TYPE_LAYOUT_CHECK:
+            continue
+        descriptor = typed_nodes.get(node.id)
+
+        regions = _parameter_value(node, descriptor, LAYOUT_REGIONS_PARAMETER)
+        if not (regions is None or (isinstance(regions, str) and regions.strip() == "")):
+            _regions, problems = parse_expected_regions(regions)
+            if problems:
+                findings.append(
+                    _layout_finding(node.id, LAYOUT_REGIONS_PARAMETER, problems)
+                )
+
+        for name, minimum, maximum, problem in _LAYOUT_RANGE_PARAMETERS:
+            number = _layout_number(_parameter_value(node, descriptor, name))
+            if number is not None and not (minimum <= number <= maximum):
+                findings.append(_layout_finding(node.id, name, [problem]))
+    return findings
+
+
+def _layout_number(value: Any) -> Optional[float]:
+    """``value`` as a finite float when it is a number (not a bool) or a
+    decimal number text, else ``None``."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except OverflowError:
+            return None
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if _LAYOUT_NUMBER_TEXT.fullmatch(text) is None:
+            return None
+        number = float(text)
+        return number if math.isfinite(number) else None
+    return None
+
+
+def _layout_finding(
+    node_id: str,
+    parameter_name: str,
+    problems: Sequence[str],
+) -> ValidationFinding:
+    """One V14 finding naming the offending parameter and its problems."""
+    return ValidationFinding(
+        SEVERITY_ERROR,
+        CODE_V14_LAYOUT_CONFIG_INVALID,
+        "Node '{0}': parameter '{1}': {2}".format(
+            node_id, parameter_name, " ".join(problems)
+        ),
+        node_id=node_id,
+    )
+
+
+def _check_w4_layout_no_detector(graph: WorkflowGraph) -> List[ValidationFinding]:
+    """Warn on a ``layout_check`` node with no detector upstream
+    (Requirement 5.6).
+
+    The Layout Check compares the instance masks of the run's
+    Detection_List, which only a ``model_inference`` node populates. When
+    no ``model_inference`` node is transitively upstream — the W3 walk
+    over connections backwards — the node gets exactly one warning. The
+    check keys on ``node.type``, so a graph without a ``layout_check``
+    node produces zero W4 findings.
+    """
+    known = {node.id for node in graph.nodes}
+    predecessors: Dict[str, List[str]] = {node_id: [] for node_id in known}
+    for connection in graph.connections:
+        source = connection.source.node
+        target = connection.target.node
+        if source in known and target in known:
+            predecessors[target].append(source)
+
+    node_types = {node.id: node.type for node in graph.nodes}
+
+    findings = []
+    for node in graph.nodes:
+        if node.type != TYPE_LAYOUT_CHECK:
+            continue
+        if _has_upstream_type(node.id, predecessors, node_types,
+                              TYPE_MODEL_INFERENCE):
+            continue
+        findings.append(ValidationFinding(
+            SEVERITY_WARNING,
+            CODE_W4_LAYOUT_NO_DETECTOR,
+            "Node '{0}': no '{1}' node is upstream of this '{2}' node, so no "
+            "instance masks will exist for it to check at runtime".format(
+                node.id, TYPE_MODEL_INFERENCE, node.type
+            ),
+            node_id=node.id,
+        ))
+    return findings
