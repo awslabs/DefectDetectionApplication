@@ -21,6 +21,8 @@ import {
   SHARED_AUTHORIZER_CONTEXT_KEY,
   detectorExportImageDefault,
   enforcementRefusalMessage,
+  layoutCheckFloorDefault,
+  rfDetrSegFloorDefault,
   legacyRolesAcknowledged,
   assistantEnabled,
   mcpMutatingToolsEnabled,
@@ -51,12 +53,23 @@ function readSsmParameter(name: string): string {
 // given to the App constructor is only a default: a -c or cdk.json value
 // always wins, so an explicit (even blank) -c behaves exactly as before. It
 // stops routine flag-less deploys from resetting the configured Export_Image.
+// The per-deployment LocalServer feature floors (car-assembly-check design
+// §7, DD9) take the same kind of default: env LAYOUT_CHECK_FLOOR / RFDETR_SEG_FLOOR,
+// then SSM /dda-portal/layout-check-min-local-server-versions /
+// /dda-portal/rfdetr-seg-min-local-server-versions. Only defined values enter
+// the default context.
+const defaultContext: Record<string, string> = {};
 const detectorExportImageFallback = detectorExportImageDefault(process.env, readSsmParameter);
-const app = new cdk.App(
-  detectorExportImageFallback
-    ? { context: { detectorExportImage: detectorExportImageFallback } }
-    : undefined,
-);
+if (detectorExportImageFallback) defaultContext.detectorExportImage = detectorExportImageFallback;
+const layoutCheckFloorFallback = layoutCheckFloorDefault(process.env, readSsmParameter);
+if (layoutCheckFloorFallback !== undefined) {
+  defaultContext.layoutCheckMinLocalServerVersions = layoutCheckFloorFallback;
+}
+const rfDetrSegFloorFallback = rfDetrSegFloorDefault(process.env, readSsmParameter);
+if (rfDetrSegFloorFallback !== undefined) {
+  defaultContext.rfdetrSegMinLocalServerVersions = rfDetrSegFloorFallback;
+}
+const app = new cdk.App(Object.keys(defaultContext).length > 0 ? { context: defaultContext } : undefined);
 
 // Portal_Identity enforcement must be stated, never defaulted by omission
 // (portal-authorization-and-iam-scoping, design I7 D7-A): an absent or

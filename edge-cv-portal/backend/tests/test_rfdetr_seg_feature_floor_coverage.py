@@ -12,7 +12,7 @@ This suite is the coverage/lockstep half of that mechanism, modelled on
 ``test_stream_camera_feature_floor_coverage.py`` (the teeth half is
 ``test_rfdetr_seg_feature_floor.py``):
 
-1. the DEPLOYED Seg feature-floor literal in
+1. the committed default Seg feature-floor literal in
    ``edge-cv-portal/infrastructure/lib/compute-stack.ts`` covers exactly
    ``workflow_packaging.ARCH_TO_LOCAL_SERVER_COMPONENT`` minus the
    architectures listed in ``UNVERIFIED_RFDETR_SEG_ARCHES`` once it carries
@@ -21,10 +21,15 @@ This suite is the coverage/lockstep half of that mechanism, modelled on
    architecture is left out only by a recorded decision;
 2. the packager parses exactly the shape the literal travels as, and the
    gate code is the spelled contract;
-3. with the deployed literal the gate accepts every verified architecture
+3. with the committed default the gate accepts every verified architecture
    and rejects exactly the unverified ones by name (once non-empty);
 4. a workflow without a Seg model is never gated and packages with its
-   floors unchanged whatever the literal holds (Requirement 17.1).
+   floors unchanged whatever the literal holds (Requirement 17.1);
+5. a CONFIGURED map (car-assembly-check task 12.5, design DD9: the
+   ``rfdetrSegMinLocalServerVersions`` CDK context replaces the committed
+   default on a deployment that sets it) has the packager shape and gates
+   exactly the architectures it lacks (``TestConfiguredFeatureFloor``). The
+   exact-key-set assertions above read the committed default only.
 
 Pre-enablement state: the literal is deployed EMPTY (``JSON.stringify({})``)
 until the six Seg-capable LocalServer builds of Requirement 14.5 exist; the
@@ -65,7 +70,7 @@ from test_workflow_packaging_binding_points import (
     COMPONENTS_ROOT,
 )
 
-#: The deployed Seg feature-floor env var (design DD8).
+#: The Seg feature-floor env var (design DD8).
 FEATURE_FLOOR_ENV = 'WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS'
 
 #: Architectures with no Seg-capable LocalServer build, or none verified,
@@ -110,7 +115,7 @@ def packaging(aws_stack):
 
 @pytest.fixture(scope="module")
 def deployed_feature_floor():
-    """The deployed Seg feature-floor literal: a dict ({} pre-enablement),
+    """The committed default Seg feature-floor literal: a dict ({} pre-enablement),
     or None if the env entry were ever removed from compute-stack.ts."""
     return extract_env_json_map(FEATURE_FLOOR_ENV, read_compute_stack_source())
 
@@ -133,7 +138,7 @@ def folder_definition():
 
 
 # --------------------------------------------------------------------------
-# 1. The deployed literal covers exactly the packager arch vocabulary
+# 1. The committed default covers exactly the packager arch vocabulary
 # --------------------------------------------------------------------------
 class TestDeployedFeatureFloorCoverage:
     """The map's keys pinned to ARCH_TO_LOCAL_SERVER_COMPONENT."""
@@ -194,7 +199,7 @@ class TestDeployedFeatureFloorCoverage:
     def test_deployed_literal_rejects_exactly_the_unverified_architectures(
             self, deployed_feature_floor, packaging, monkeypatch):
         # Validates: Requirements 14.8
-        # With the deployed literal, the gate accepts every verified
+        # With the committed default, the gate accepts every verified
         # architecture and rejects each unverified one by name.
         if not deployed_feature_floor:
             pytest.skip(f"{FEATURE_FLOOR_ENV} carries no entries yet")
@@ -236,7 +241,7 @@ class TestDeployedFeatureFloorCoverage:
     def test_packager_parses_the_deployed_literal_shape(
             self, deployed_feature_floor, packaging, monkeypatch):
         # Validates: Requirements 14.8
-        # The deployed literal travels as the JSON string JSON.stringify
+        # The committed default travels as the JSON string JSON.stringify
         # produces; pin that the packager's parser reads exactly it (a
         # JSON-vs-shape mismatch would silently leave the map empty, i.e.
         # reject every architecture).
@@ -293,13 +298,13 @@ class TestGateVocabulary:
 
 
 # --------------------------------------------------------------------------
-# 3. The key set has teeth under the deployed (empty) literal
+# 3. The key set has teeth under the committed default
 # --------------------------------------------------------------------------
 class TestFeatureFloorGateTeeth:
     def test_deployed_literal_as_parsed_gates_as_configured(
             self, deployed_feature_floor, packaging, monkeypatch):
         # Validates: Requirements 14.8
-        # The literal exactly as deployed: pre-enablement every arch is
+        # The committed default exactly as parsed: pre-enablement every arch is
         # rejected; once filled, exactly the unverified set is.
         monkeypatch.setattr(
             packaging, "RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS",
@@ -359,3 +364,32 @@ class TestNonSegWorkflowsUnchanged:
         item = harness.version_item()
         assert item["has_rfdetr_seg_model"] is False
         assert item["has_stream_features"] is False
+
+
+# --------------------------------------------------------------------------
+# 5. A configured (per-deployment) map has the packager shape
+# --------------------------------------------------------------------------
+class TestConfiguredFeatureFloor:
+    """car-assembly-check task 12.5 (design DD9): a deployment may set
+    ``rfdetrSegMinLocalServerVersions``, which compute-stack.ts serialises
+    into the same env var in place of the committed default. Its key set is
+    the deployment's choice, so only the shape is pinned here."""
+
+    @pytest.mark.parametrize("configured", [
+        {"arm64_jp5": "1.0.4"},
+        {"arm64_jp5": "1.0.4", "x86_64": "1.0.56", "x86_64_nvidia": "1.0.56"},
+    ])
+    def test_configured_map_has_the_shape_and_gates_what_it_lacks(
+            self, packaging, monkeypatch, configured):
+        # Validates: Requirements 9.3
+        monkeypatch.setenv(FEATURE_FLOOR_ENV, json.dumps(configured))
+        parsed = packaging._parse_min_versions_map(FEATURE_FLOOR_ENV)
+        assert parsed == configured
+        assert set(parsed) <= set(packaging.ARCH_TO_LOCAL_SERVER_COMPONENT)
+        assert all(_SEMVER.fullmatch(version) for version in parsed.values())
+        monkeypatch.setattr(
+            packaging, "RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS", parsed)
+        archs = sorted(packaging.ARCH_TO_LOCAL_SERVER_COMPONENT)
+        findings = packaging.rfdetr_seg_arch_gate_findings([SEG_MODEL_NAME], archs)
+        assert sorted(f['arch'] for f in findings) == \
+            sorted(set(archs) - set(configured))

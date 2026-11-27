@@ -175,3 +175,29 @@ class TestFloorMapCoverageLockstep:
             f"value(s) {malformed} - each must be a plain N.N.N version "
             "(they become '>=N.N.N' Greengrass VersionRequirements and "
             "packaging.version comparisons)")
+
+
+class TestNoLayoutCheckNoLayoutFloor:
+    """car-assembly-check task 12.3: the Layout_Check floor is a fourth,
+    opt-in floor. A workflow with no layout_check node resolves the deployed
+    lineage floors exactly as before."""
+
+    def test_version_item_without_has_layout_check_resolves_as_before(
+            self, floor_map, packaging, deployments, monkeypatch):
+        # Validates: car-assembly-check Requirement 9.3 (task 12.3 negative case)
+        monkeypatch.setattr(packaging, "MIN_LOCAL_SERVER_VERSIONS", dict(floor_map))
+        monkeypatch.setattr(packaging, "LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS",
+                            {arch: "9.9.9" for arch in floor_map})
+        monkeypatch.setattr(
+            deployments, "WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS",
+            {arch: "9.9.9" for arch in floor_map})
+        # The flag the deployment route derives from a version item that
+        # predates the discriminator.
+        version_item = {"workflow_id": "wf-legacy", "version": 1}
+        has_layout_check = bool(version_item.get("has_layout_check"))
+        assert has_layout_check is False
+        for arch, version in floor_map.items():
+            assert packaging.min_local_server_version_for(
+                arch, layout_check=has_layout_check) == version
+        assert packaging.min_local_server_versions_map(
+            layout_check=has_layout_check) == floor_map
