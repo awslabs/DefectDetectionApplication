@@ -1,0 +1,1959 @@
+{
+  "description": "Layout Check parity cases shared by the cloud test sandbox (tests/test_layout_check_bindings.py) and the device (test/backend-test/workflow_engine/test_property_layout_parity_device.py), car-assembly-check task 9.2. expected_section was generated once through workflow_core.analytics.layout.check_layout + run_metadata over attach_detection_ids(raw_entries, built_entries) and is pinned; built_entries are in raw_entries order.",
+  "cases": [
+    {
+      "name": "pass",
+      "regions": "{\"rear_fender\": [[0.12, 0.44], [0.19, 0.38], [0.3, 0.37], [0.47, 0.37], [0.47, 0.86], [0.4, 0.9], [0.31, 0.9], [0.26, 0.82], [0.12, 0.8]], \"front_fender\": [[0.47, 0.37], [0.74, 0.37], [0.88, 0.47], [0.9, 0.6], [0.86, 0.78], [0.78, 0.81], [0.72, 0.88], [0.63, 0.88], [0.58, 0.8], [0.47, 0.8]], \"roof\": [[0.3, 0.36], [0.33, 0.24], [0.4, 0.16], [0.5, 0.13], [0.6, 0.16], [0.68, 0.24], [0.72, 0.36]]}",
+      "frame": {
+        "width": 96,
+        "height": 68
+      },
+      "raw_entries": [
+        {
+          "class_index": "1",
+          "class_label": "rear_fender",
+          "confidence": 0.95,
+          "bounding_box": [
+            12.0,
+            25.0,
+            45.0,
+            61.0
+          ],
+          "mask_rle": "845 25 43 26 41 27 41 27 40 28 39 29 39 29 39 29 39 29 39 29 39 30 38 30 37 31 37 31 37 33 35 34 34 35 33 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 35 33 35 33 35 33 34 34 34 3477",
+          "mask_area": 1071
+        },
+        {
+          "class_index": "0",
+          "class_label": "front_fender",
+          "confidence": 0.97,
+          "bounding_box": [
+            45.0,
+            25.0,
+            86.0,
+            60.0
+          ],
+          "mask_rle": "3085 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 30 38 31 37 33 35 34 34 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 34 34 33 36 31 37 30 39 28 40 28 41 27 41 26 43 25 43 25 44 24 44 23 46 22 46 19 50 15 58 7 704",
+          "mask_area": 1194
+        },
+        {
+          "class_index": "2",
+          "class_label": "roof",
+          "confidence": 0.93,
+          "bounding_box": [
+            29.0,
+            9.0,
+            69.0,
+            24.0
+          ],
+          "mask_rle": "1994 2 64 4 61 7 60 8 59 9 58 10 57 11 56 12 56 12 55 13 55 13 54 14 54 14 54 14 54 14 54 14 53 15 53 15 53 15 53 15 53 15 53 15 54 14 54 14 54 14 54 14 54 14 55 13 55 13 56 12 56 12 57 11 58 10 58 10 59 9 60 8 61 7 63 5 65 3 67 1 1880",
+          "mask_area": 445
+        }
+      ],
+      "built_entries": [
+        {
+          "id": "2265b1f5",
+          "label": "rear_fender",
+          "confidence": 0.95,
+          "x_min": 12.0,
+          "y_min": 25.0,
+          "x_max": 45.0,
+          "y_max": 61.0,
+          "mask_area": 1071
+        },
+        {
+          "id": "91b7584a",
+          "label": "front_fender",
+          "confidence": 0.97,
+          "x_min": 45.0,
+          "y_min": 25.0,
+          "x_max": 86.0,
+          "y_max": 60.0,
+          "mask_area": 1194
+        },
+        {
+          "id": "d8f16adf",
+          "label": "roof",
+          "confidence": 0.93,
+          "x_min": 29.0,
+          "y_min": 9.0,
+          "x_max": 69.0,
+          "y_max": 24.0,
+          "mask_area": 445
+        }
+      ],
+      "parameters": {
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      },
+      "expected_section": {
+        "pass": true,
+        "pieces": {
+          "rear_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "2265b1f5",
+                "class_label": "rear_fender",
+                "confidence": 0.95,
+                "bounding_box": [
+                  12.0,
+                  25.0,
+                  45.0,
+                  61.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "front_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "91b7584a",
+                "class_label": "front_fender",
+                "confidence": 0.97,
+                "bounding_box": [
+                  45.0,
+                  25.0,
+                  86.0,
+                  60.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "roof": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "d8f16adf",
+                "class_label": "roof",
+                "confidence": 0.93,
+                "bounding_box": [
+                  29.0,
+                  9.0,
+                  69.0,
+                  24.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          }
+        },
+        "flagged": [],
+        "ignored": [],
+        "unexpected_classes": [],
+        "expected_regions": {
+          "rear_fender": [
+            [
+              0.12,
+              0.44
+            ],
+            [
+              0.19,
+              0.38
+            ],
+            [
+              0.3,
+              0.37
+            ],
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.47,
+              0.86
+            ],
+            [
+              0.4,
+              0.9
+            ],
+            [
+              0.31,
+              0.9
+            ],
+            [
+              0.26,
+              0.82
+            ],
+            [
+              0.12,
+              0.8
+            ]
+          ],
+          "front_fender": [
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.74,
+              0.37
+            ],
+            [
+              0.88,
+              0.47
+            ],
+            [
+              0.9,
+              0.6
+            ],
+            [
+              0.86,
+              0.78
+            ],
+            [
+              0.78,
+              0.81
+            ],
+            [
+              0.72,
+              0.88
+            ],
+            [
+              0.63,
+              0.88
+            ],
+            [
+              0.58,
+              0.8
+            ],
+            [
+              0.47,
+              0.8
+            ]
+          ],
+          "roof": [
+            [
+              0.3,
+              0.36
+            ],
+            [
+              0.33,
+              0.24
+            ],
+            [
+              0.4,
+              0.16
+            ],
+            [
+              0.5,
+              0.13
+            ],
+            [
+              0.6,
+              0.16
+            ],
+            [
+              0.68,
+              0.24
+            ],
+            [
+              0.72,
+              0.36
+            ]
+          ]
+        },
+        "frame": {
+          "width": 96,
+          "height": 68
+        },
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      }
+    },
+    {
+      "name": "one_misplaced",
+      "regions": "{\"rear_fender\": [[0.12, 0.44], [0.19, 0.38], [0.3, 0.37], [0.47, 0.37], [0.47, 0.86], [0.4, 0.9], [0.31, 0.9], [0.26, 0.82], [0.12, 0.8]], \"front_fender\": [[0.47, 0.37], [0.74, 0.37], [0.88, 0.47], [0.9, 0.6], [0.86, 0.78], [0.78, 0.81], [0.72, 0.88], [0.63, 0.88], [0.58, 0.8], [0.47, 0.8]], \"roof\": [[0.3, 0.36], [0.33, 0.24], [0.4, 0.16], [0.5, 0.13], [0.6, 0.16], [0.68, 0.24], [0.72, 0.36]]}",
+      "frame": {
+        "width": 96,
+        "height": 68
+      },
+      "raw_entries": [
+        {
+          "class_index": "1",
+          "class_label": "rear_fender",
+          "confidence": 0.95,
+          "bounding_box": [
+            24.0,
+            25.0,
+            57.0,
+            61.0
+          ],
+          "mask_rle": "1661 25 43 26 41 27 41 27 40 28 39 29 39 29 39 29 39 29 39 29 39 30 38 30 37 31 37 31 37 33 35 34 34 35 33 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 35 33 35 33 35 33 34 34 34 2661",
+          "mask_area": 1071
+        },
+        {
+          "class_index": "0",
+          "class_label": "front_fender",
+          "confidence": 0.97,
+          "bounding_box": [
+            45.0,
+            25.0,
+            86.0,
+            60.0
+          ],
+          "mask_rle": "3085 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 30 38 31 37 33 35 34 34 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 34 34 33 36 31 37 30 39 28 40 28 41 27 41 26 43 25 43 25 44 24 44 23 46 22 46 19 50 15 58 7 704",
+          "mask_area": 1194
+        },
+        {
+          "class_index": "2",
+          "class_label": "roof",
+          "confidence": 0.93,
+          "bounding_box": [
+            29.0,
+            9.0,
+            69.0,
+            24.0
+          ],
+          "mask_rle": "1994 2 64 4 61 7 60 8 59 9 58 10 57 11 56 12 56 12 55 13 55 13 54 14 54 14 54 14 54 14 54 14 53 15 53 15 53 15 53 15 53 15 53 15 54 14 54 14 54 14 54 14 54 14 55 13 55 13 56 12 56 12 57 11 58 10 58 10 59 9 60 8 61 7 63 5 65 3 67 1 1880",
+          "mask_area": 445
+        }
+      ],
+      "built_entries": [
+        {
+          "id": "f4bea973",
+          "label": "rear_fender",
+          "confidence": 0.95,
+          "x_min": 24.0,
+          "y_min": 25.0,
+          "x_max": 57.0,
+          "y_max": 61.0,
+          "mask_area": 1071
+        },
+        {
+          "id": "dcf4bb99",
+          "label": "front_fender",
+          "confidence": 0.97,
+          "x_min": 45.0,
+          "y_min": 25.0,
+          "x_max": 86.0,
+          "y_max": 60.0,
+          "mask_area": 1194
+        },
+        {
+          "id": "f2a4d27b",
+          "label": "roof",
+          "confidence": 0.93,
+          "x_min": 29.0,
+          "y_min": 9.0,
+          "x_max": 69.0,
+          "y_max": 24.0,
+          "mask_area": 445
+        }
+      ],
+      "parameters": {
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      },
+      "expected_section": {
+        "pass": false,
+        "pieces": {
+          "rear_fender": {
+            "status": "misplaced",
+            "iou": 0.4261,
+            "detections": [
+              {
+                "id": "f4bea973",
+                "class_label": "rear_fender",
+                "confidence": 0.95,
+                "bounding_box": [
+                  24.0,
+                  25.0,
+                  57.0,
+                  61.0
+                ],
+                "iou": 0.4261,
+                "outline_overlap": 0.9234
+              }
+            ]
+          },
+          "front_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "dcf4bb99",
+                "class_label": "front_fender",
+                "confidence": 0.97,
+                "bounding_box": [
+                  45.0,
+                  25.0,
+                  86.0,
+                  60.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "roof": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "f2a4d27b",
+                "class_label": "roof",
+                "confidence": 0.93,
+                "bounding_box": [
+                  29.0,
+                  9.0,
+                  69.0,
+                  24.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          }
+        },
+        "flagged": [
+          "f4bea973"
+        ],
+        "ignored": [],
+        "unexpected_classes": [],
+        "expected_regions": {
+          "rear_fender": [
+            [
+              0.12,
+              0.44
+            ],
+            [
+              0.19,
+              0.38
+            ],
+            [
+              0.3,
+              0.37
+            ],
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.47,
+              0.86
+            ],
+            [
+              0.4,
+              0.9
+            ],
+            [
+              0.31,
+              0.9
+            ],
+            [
+              0.26,
+              0.82
+            ],
+            [
+              0.12,
+              0.8
+            ]
+          ],
+          "front_fender": [
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.74,
+              0.37
+            ],
+            [
+              0.88,
+              0.47
+            ],
+            [
+              0.9,
+              0.6
+            ],
+            [
+              0.86,
+              0.78
+            ],
+            [
+              0.78,
+              0.81
+            ],
+            [
+              0.72,
+              0.88
+            ],
+            [
+              0.63,
+              0.88
+            ],
+            [
+              0.58,
+              0.8
+            ],
+            [
+              0.47,
+              0.8
+            ]
+          ],
+          "roof": [
+            [
+              0.3,
+              0.36
+            ],
+            [
+              0.33,
+              0.24
+            ],
+            [
+              0.4,
+              0.16
+            ],
+            [
+              0.5,
+              0.13
+            ],
+            [
+              0.6,
+              0.16
+            ],
+            [
+              0.68,
+              0.24
+            ],
+            [
+              0.72,
+              0.36
+            ]
+          ]
+        },
+        "frame": {
+          "width": 96,
+          "height": 68
+        },
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      }
+    },
+    {
+      "name": "one_missing",
+      "regions": "{\"rear_fender\": [[0.12, 0.44], [0.19, 0.38], [0.3, 0.37], [0.47, 0.37], [0.47, 0.86], [0.4, 0.9], [0.31, 0.9], [0.26, 0.82], [0.12, 0.8]], \"front_fender\": [[0.47, 0.37], [0.74, 0.37], [0.88, 0.47], [0.9, 0.6], [0.86, 0.78], [0.78, 0.81], [0.72, 0.88], [0.63, 0.88], [0.58, 0.8], [0.47, 0.8]], \"roof\": [[0.3, 0.36], [0.33, 0.24], [0.4, 0.16], [0.5, 0.13], [0.6, 0.16], [0.68, 0.24], [0.72, 0.36]]}",
+      "frame": {
+        "width": 96,
+        "height": 68
+      },
+      "raw_entries": [
+        {
+          "class_index": "1",
+          "class_label": "rear_fender",
+          "confidence": 0.95,
+          "bounding_box": [
+            12.0,
+            25.0,
+            45.0,
+            61.0
+          ],
+          "mask_rle": "845 25 43 26 41 27 41 27 40 28 39 29 39 29 39 29 39 29 39 29 39 30 38 30 37 31 37 31 37 33 35 34 34 35 33 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 35 33 35 33 35 33 34 34 34 3477",
+          "mask_area": 1071
+        },
+        {
+          "class_index": "0",
+          "class_label": "front_fender",
+          "confidence": 0.97,
+          "bounding_box": [
+            45.0,
+            25.0,
+            86.0,
+            60.0
+          ],
+          "mask_rle": "3085 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 30 38 31 37 33 35 34 34 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 34 34 33 36 31 37 30 39 28 40 28 41 27 41 26 43 25 43 25 44 24 44 23 46 22 46 19 50 15 58 7 704",
+          "mask_area": 1194
+        }
+      ],
+      "built_entries": [
+        {
+          "id": "3ceb3ffd",
+          "label": "rear_fender",
+          "confidence": 0.95,
+          "x_min": 12.0,
+          "y_min": 25.0,
+          "x_max": 45.0,
+          "y_max": 61.0,
+          "mask_area": 1071
+        },
+        {
+          "id": "97b75092",
+          "label": "front_fender",
+          "confidence": 0.97,
+          "x_min": 45.0,
+          "y_min": 25.0,
+          "x_max": 86.0,
+          "y_max": 60.0,
+          "mask_area": 1194
+        }
+      ],
+      "parameters": {
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      },
+      "expected_section": {
+        "pass": false,
+        "pieces": {
+          "rear_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "3ceb3ffd",
+                "class_label": "rear_fender",
+                "confidence": 0.95,
+                "bounding_box": [
+                  12.0,
+                  25.0,
+                  45.0,
+                  61.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "front_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "97b75092",
+                "class_label": "front_fender",
+                "confidence": 0.97,
+                "bounding_box": [
+                  45.0,
+                  25.0,
+                  86.0,
+                  60.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "roof": {
+            "status": "missing",
+            "iou": null,
+            "detections": []
+          }
+        },
+        "flagged": [],
+        "ignored": [],
+        "unexpected_classes": [],
+        "expected_regions": {
+          "rear_fender": [
+            [
+              0.12,
+              0.44
+            ],
+            [
+              0.19,
+              0.38
+            ],
+            [
+              0.3,
+              0.37
+            ],
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.47,
+              0.86
+            ],
+            [
+              0.4,
+              0.9
+            ],
+            [
+              0.31,
+              0.9
+            ],
+            [
+              0.26,
+              0.82
+            ],
+            [
+              0.12,
+              0.8
+            ]
+          ],
+          "front_fender": [
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.74,
+              0.37
+            ],
+            [
+              0.88,
+              0.47
+            ],
+            [
+              0.9,
+              0.6
+            ],
+            [
+              0.86,
+              0.78
+            ],
+            [
+              0.78,
+              0.81
+            ],
+            [
+              0.72,
+              0.88
+            ],
+            [
+              0.63,
+              0.88
+            ],
+            [
+              0.58,
+              0.8
+            ],
+            [
+              0.47,
+              0.8
+            ]
+          ],
+          "roof": [
+            [
+              0.3,
+              0.36
+            ],
+            [
+              0.33,
+              0.24
+            ],
+            [
+              0.4,
+              0.16
+            ],
+            [
+              0.5,
+              0.13
+            ],
+            [
+              0.6,
+              0.16
+            ],
+            [
+              0.68,
+              0.24
+            ],
+            [
+              0.72,
+              0.36
+            ]
+          ]
+        },
+        "frame": {
+          "width": 96,
+          "height": 68
+        },
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      }
+    },
+    {
+      "name": "duplicate",
+      "regions": "{\"rear_fender\": [[0.12, 0.44], [0.19, 0.38], [0.3, 0.37], [0.47, 0.37], [0.47, 0.86], [0.4, 0.9], [0.31, 0.9], [0.26, 0.82], [0.12, 0.8]], \"front_fender\": [[0.47, 0.37], [0.74, 0.37], [0.88, 0.47], [0.9, 0.6], [0.86, 0.78], [0.78, 0.81], [0.72, 0.88], [0.63, 0.88], [0.58, 0.8], [0.47, 0.8]], \"roof\": [[0.3, 0.36], [0.33, 0.24], [0.4, 0.16], [0.5, 0.13], [0.6, 0.16], [0.68, 0.24], [0.72, 0.36]]}",
+      "frame": {
+        "width": 96,
+        "height": 68
+      },
+      "raw_entries": [
+        {
+          "class_index": "1",
+          "class_label": "rear_fender",
+          "confidence": 0.95,
+          "bounding_box": [
+            12.0,
+            25.0,
+            45.0,
+            61.0
+          ],
+          "mask_rle": "845 25 43 26 41 27 41 27 40 28 39 29 39 29 39 29 39 29 39 29 39 30 38 30 37 31 37 31 37 33 35 34 34 35 33 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 35 33 35 33 35 33 34 34 34 3477",
+          "mask_area": 1071
+        },
+        {
+          "class_index": "0",
+          "class_label": "front_fender",
+          "confidence": 0.97,
+          "bounding_box": [
+            45.0,
+            25.0,
+            86.0,
+            60.0
+          ],
+          "mask_rle": "3085 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 30 38 31 37 33 35 34 34 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 34 34 33 36 31 37 30 39 28 40 28 41 27 41 26 43 25 43 25 44 24 44 23 46 22 46 19 50 15 58 7 704",
+          "mask_area": 1194
+        },
+        {
+          "class_index": "2",
+          "class_label": "roof",
+          "confidence": 0.93,
+          "bounding_box": [
+            29.0,
+            9.0,
+            69.0,
+            24.0
+          ],
+          "mask_rle": "1994 2 64 4 61 7 60 8 59 9 58 10 57 11 56 12 56 12 55 13 55 13 54 14 54 14 54 14 54 14 54 14 53 15 53 15 53 15 53 15 53 15 53 15 54 14 54 14 54 14 54 14 54 14 55 13 55 13 56 12 56 12 57 11 58 10 58 10 59 9 60 8 61 7 63 5 65 3 67 1 1880",
+          "mask_area": 445
+        },
+        {
+          "class_index": "2",
+          "class_label": "roof",
+          "confidence": 0.81,
+          "bounding_box": [
+            31.0,
+            9.0,
+            71.0,
+            24.0
+          ],
+          "mask_rle": "2130 2 64 4 61 7 60 8 59 9 58 10 57 11 56 12 56 12 55 13 55 13 54 14 54 14 54 14 54 14 54 14 53 15 53 15 53 15 53 15 53 15 53 15 54 14 54 14 54 14 54 14 54 14 55 13 55 13 56 12 56 12 57 11 58 10 58 10 59 9 60 8 61 7 63 5 65 3 67 1 1744",
+          "mask_area": 445
+        }
+      ],
+      "built_entries": [
+        {
+          "id": "3c6da5d7",
+          "label": "rear_fender",
+          "confidence": 0.95,
+          "x_min": 12.0,
+          "y_min": 25.0,
+          "x_max": 45.0,
+          "y_max": 61.0,
+          "mask_area": 1071
+        },
+        {
+          "id": "4da4f9fc",
+          "label": "front_fender",
+          "confidence": 0.97,
+          "x_min": 45.0,
+          "y_min": 25.0,
+          "x_max": 86.0,
+          "y_max": 60.0,
+          "mask_area": 1194
+        },
+        {
+          "id": "1a6916c7",
+          "label": "roof",
+          "confidence": 0.93,
+          "x_min": 29.0,
+          "y_min": 9.0,
+          "x_max": 69.0,
+          "y_max": 24.0,
+          "mask_area": 445
+        },
+        {
+          "id": "b8a1abcd",
+          "label": "roof",
+          "confidence": 0.81,
+          "x_min": 31.0,
+          "y_min": 9.0,
+          "x_max": 71.0,
+          "y_max": 24.0,
+          "mask_area": 445
+        }
+      ],
+      "parameters": {
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      },
+      "expected_section": {
+        "pass": false,
+        "pieces": {
+          "rear_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "3c6da5d7",
+                "class_label": "rear_fender",
+                "confidence": 0.95,
+                "bounding_box": [
+                  12.0,
+                  25.0,
+                  45.0,
+                  61.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "front_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "4da4f9fc",
+                "class_label": "front_fender",
+                "confidence": 0.97,
+                "bounding_box": [
+                  45.0,
+                  25.0,
+                  86.0,
+                  60.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "roof": {
+            "status": "duplicate",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "1a6916c7",
+                "class_label": "roof",
+                "confidence": 0.93,
+                "bounding_box": [
+                  29.0,
+                  9.0,
+                  69.0,
+                  24.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              },
+              {
+                "id": "b8a1abcd",
+                "class_label": "roof",
+                "confidence": 0.81,
+                "bounding_box": [
+                  31.0,
+                  9.0,
+                  71.0,
+                  24.0
+                ],
+                "iou": 0.8737,
+                "outline_overlap": 0.9326
+              }
+            ]
+          }
+        },
+        "flagged": [
+          "1a6916c7",
+          "b8a1abcd"
+        ],
+        "ignored": [],
+        "unexpected_classes": [],
+        "expected_regions": {
+          "rear_fender": [
+            [
+              0.12,
+              0.44
+            ],
+            [
+              0.19,
+              0.38
+            ],
+            [
+              0.3,
+              0.37
+            ],
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.47,
+              0.86
+            ],
+            [
+              0.4,
+              0.9
+            ],
+            [
+              0.31,
+              0.9
+            ],
+            [
+              0.26,
+              0.82
+            ],
+            [
+              0.12,
+              0.8
+            ]
+          ],
+          "front_fender": [
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.74,
+              0.37
+            ],
+            [
+              0.88,
+              0.47
+            ],
+            [
+              0.9,
+              0.6
+            ],
+            [
+              0.86,
+              0.78
+            ],
+            [
+              0.78,
+              0.81
+            ],
+            [
+              0.72,
+              0.88
+            ],
+            [
+              0.63,
+              0.88
+            ],
+            [
+              0.58,
+              0.8
+            ],
+            [
+              0.47,
+              0.8
+            ]
+          ],
+          "roof": [
+            [
+              0.3,
+              0.36
+            ],
+            [
+              0.33,
+              0.24
+            ],
+            [
+              0.4,
+              0.16
+            ],
+            [
+              0.5,
+              0.13
+            ],
+            [
+              0.6,
+              0.16
+            ],
+            [
+              0.68,
+              0.24
+            ],
+            [
+              0.72,
+              0.36
+            ]
+          ]
+        },
+        "frame": {
+          "width": 96,
+          "height": 68
+        },
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      }
+    },
+    {
+      "name": "no_mask_entry",
+      "regions": "{\"rear_fender\": [[0.12, 0.44], [0.19, 0.38], [0.3, 0.37], [0.47, 0.37], [0.47, 0.86], [0.4, 0.9], [0.31, 0.9], [0.26, 0.82], [0.12, 0.8]], \"front_fender\": [[0.47, 0.37], [0.74, 0.37], [0.88, 0.47], [0.9, 0.6], [0.86, 0.78], [0.78, 0.81], [0.72, 0.88], [0.63, 0.88], [0.58, 0.8], [0.47, 0.8]], \"roof\": [[0.3, 0.36], [0.33, 0.24], [0.4, 0.16], [0.5, 0.13], [0.6, 0.16], [0.68, 0.24], [0.72, 0.36]]}",
+      "frame": {
+        "width": 96,
+        "height": 68
+      },
+      "raw_entries": [
+        {
+          "class_index": "1",
+          "class_label": "rear_fender",
+          "confidence": 0.95,
+          "bounding_box": [
+            12.0,
+            25.0,
+            45.0,
+            61.0
+          ],
+          "mask_rle": "845 25 43 26 41 27 41 27 40 28 39 29 39 29 39 29 39 29 39 29 39 30 38 30 37 31 37 31 37 33 35 34 34 35 33 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 35 33 35 33 35 33 34 34 34 3477",
+          "mask_area": 1071
+        },
+        {
+          "class_index": "0",
+          "class_label": "front_fender",
+          "confidence": 0.97,
+          "bounding_box": [
+            45.0,
+            25.0,
+            86.0,
+            60.0
+          ],
+          "mask_rle": "3085 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 30 38 31 37 33 35 34 34 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 34 34 33 36 31 37 30 39 28 40 28 41 27 41 26 43 25 43 25 44 24 44 23 46 22 46 19 50 15 58 7 704",
+          "mask_area": 1194
+        },
+        {
+          "class_index": "2",
+          "class_label": "roof",
+          "confidence": 0.93,
+          "bounding_box": [
+            29.0,
+            9.0,
+            69.0,
+            24.0
+          ]
+        }
+      ],
+      "built_entries": [
+        {
+          "id": "9f767c45",
+          "label": "rear_fender",
+          "confidence": 0.95,
+          "x_min": 12.0,
+          "y_min": 25.0,
+          "x_max": 45.0,
+          "y_max": 61.0,
+          "mask_area": 1071
+        },
+        {
+          "id": "4164d839",
+          "label": "front_fender",
+          "confidence": 0.97,
+          "x_min": 45.0,
+          "y_min": 25.0,
+          "x_max": 86.0,
+          "y_max": 60.0,
+          "mask_area": 1194
+        },
+        {
+          "id": "bde5c099",
+          "label": "roof",
+          "confidence": 0.93,
+          "x_min": 29.0,
+          "y_min": 9.0,
+          "x_max": 69.0,
+          "y_max": 24.0
+        }
+      ],
+      "parameters": {
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      },
+      "expected_section": {
+        "pass": false,
+        "pieces": {
+          "rear_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "9f767c45",
+                "class_label": "rear_fender",
+                "confidence": 0.95,
+                "bounding_box": [
+                  12.0,
+                  25.0,
+                  45.0,
+                  61.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "front_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "4164d839",
+                "class_label": "front_fender",
+                "confidence": 0.97,
+                "bounding_box": [
+                  45.0,
+                  25.0,
+                  86.0,
+                  60.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "roof": {
+            "status": "misplaced",
+            "iou": null,
+            "detections": [
+              {
+                "id": "bde5c099",
+                "class_label": "roof",
+                "confidence": 0.93,
+                "bounding_box": [
+                  29.0,
+                  9.0,
+                  69.0,
+                  24.0
+                ],
+                "iou": null,
+                "outline_overlap": null
+              }
+            ]
+          }
+        },
+        "flagged": [
+          "bde5c099"
+        ],
+        "ignored": [],
+        "unexpected_classes": [],
+        "expected_regions": {
+          "rear_fender": [
+            [
+              0.12,
+              0.44
+            ],
+            [
+              0.19,
+              0.38
+            ],
+            [
+              0.3,
+              0.37
+            ],
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.47,
+              0.86
+            ],
+            [
+              0.4,
+              0.9
+            ],
+            [
+              0.31,
+              0.9
+            ],
+            [
+              0.26,
+              0.82
+            ],
+            [
+              0.12,
+              0.8
+            ]
+          ],
+          "front_fender": [
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.74,
+              0.37
+            ],
+            [
+              0.88,
+              0.47
+            ],
+            [
+              0.9,
+              0.6
+            ],
+            [
+              0.86,
+              0.78
+            ],
+            [
+              0.78,
+              0.81
+            ],
+            [
+              0.72,
+              0.88
+            ],
+            [
+              0.63,
+              0.88
+            ],
+            [
+              0.58,
+              0.8
+            ],
+            [
+              0.47,
+              0.8
+            ]
+          ],
+          "roof": [
+            [
+              0.3,
+              0.36
+            ],
+            [
+              0.33,
+              0.24
+            ],
+            [
+              0.4,
+              0.16
+            ],
+            [
+              0.5,
+              0.13
+            ],
+            [
+              0.6,
+              0.16
+            ],
+            [
+              0.68,
+              0.24
+            ],
+            [
+              0.72,
+              0.36
+            ]
+          ]
+        },
+        "frame": {
+          "width": 96,
+          "height": 68
+        },
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      }
+    },
+    {
+      "name": "unexpected_class",
+      "regions": "{\"rear_fender\": [[0.12, 0.44], [0.19, 0.38], [0.3, 0.37], [0.47, 0.37], [0.47, 0.86], [0.4, 0.9], [0.31, 0.9], [0.26, 0.82], [0.12, 0.8]], \"front_fender\": [[0.47, 0.37], [0.74, 0.37], [0.88, 0.47], [0.9, 0.6], [0.86, 0.78], [0.78, 0.81], [0.72, 0.88], [0.63, 0.88], [0.58, 0.8], [0.47, 0.8]], \"roof\": [[0.3, 0.36], [0.33, 0.24], [0.4, 0.16], [0.5, 0.13], [0.6, 0.16], [0.68, 0.24], [0.72, 0.36]]}",
+      "frame": {
+        "width": 96,
+        "height": 68
+      },
+      "raw_entries": [
+        {
+          "class_index": "1",
+          "class_label": "rear_fender",
+          "confidence": 0.95,
+          "bounding_box": [
+            12.0,
+            25.0,
+            45.0,
+            61.0
+          ],
+          "mask_rle": "845 25 43 26 41 27 41 27 40 28 39 29 39 29 39 29 39 29 39 29 39 30 38 30 37 31 37 31 37 33 35 34 34 35 33 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 35 33 35 33 35 33 34 34 34 3477",
+          "mask_area": 1071
+        },
+        {
+          "class_index": "0",
+          "class_label": "front_fender",
+          "confidence": 0.97,
+          "bounding_box": [
+            45.0,
+            25.0,
+            86.0,
+            60.0
+          ],
+          "mask_rle": "3085 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 30 38 31 37 33 35 34 34 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 34 34 33 36 31 37 30 39 28 40 28 41 27 41 26 43 25 43 25 44 24 44 23 46 22 46 19 50 15 58 7 704",
+          "mask_area": 1194
+        },
+        {
+          "class_index": "2",
+          "class_label": "roof",
+          "confidence": 0.93,
+          "bounding_box": [
+            29.0,
+            9.0,
+            69.0,
+            24.0
+          ],
+          "mask_rle": "1994 2 64 4 61 7 60 8 59 9 58 10 57 11 56 12 56 12 55 13 55 13 54 14 54 14 54 14 54 14 54 14 53 15 53 15 53 15 53 15 53 15 53 15 54 14 54 14 54 14 54 14 54 14 55 13 55 13 56 12 56 12 57 11 58 10 58 10 59 9 60 8 61 7 63 5 65 3 67 1 1880",
+          "mask_area": 445
+        },
+        {
+          "class_index": "3",
+          "class_label": "wheel",
+          "confidence": 0.88,
+          "bounding_box": [
+            40.0,
+            60.0,
+            50.0,
+            68.0
+          ],
+          "mask_rle": "2780 8 60 8 60 8 60 8 60 8 60 8 60 8 60 8 60 8 60 8 3128",
+          "mask_area": 80
+        }
+      ],
+      "built_entries": [
+        {
+          "id": "cb1855fe",
+          "label": "rear_fender",
+          "confidence": 0.95,
+          "x_min": 12.0,
+          "y_min": 25.0,
+          "x_max": 45.0,
+          "y_max": 61.0,
+          "mask_area": 1071
+        },
+        {
+          "id": "92e5dfe8",
+          "label": "front_fender",
+          "confidence": 0.97,
+          "x_min": 45.0,
+          "y_min": 25.0,
+          "x_max": 86.0,
+          "y_max": 60.0,
+          "mask_area": 1194
+        },
+        {
+          "id": "d26b9496",
+          "label": "roof",
+          "confidence": 0.93,
+          "x_min": 29.0,
+          "y_min": 9.0,
+          "x_max": 69.0,
+          "y_max": 24.0,
+          "mask_area": 445
+        },
+        {
+          "id": "14a03569",
+          "label": "wheel",
+          "confidence": 0.88,
+          "x_min": 40.0,
+          "y_min": 60.0,
+          "x_max": 50.0,
+          "y_max": 68.0,
+          "mask_area": 80
+        }
+      ],
+      "parameters": {
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      },
+      "expected_section": {
+        "pass": false,
+        "pieces": {
+          "rear_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "cb1855fe",
+                "class_label": "rear_fender",
+                "confidence": 0.95,
+                "bounding_box": [
+                  12.0,
+                  25.0,
+                  45.0,
+                  61.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "front_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "92e5dfe8",
+                "class_label": "front_fender",
+                "confidence": 0.97,
+                "bounding_box": [
+                  45.0,
+                  25.0,
+                  86.0,
+                  60.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "roof": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "d26b9496",
+                "class_label": "roof",
+                "confidence": 0.93,
+                "bounding_box": [
+                  29.0,
+                  9.0,
+                  69.0,
+                  24.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          }
+        },
+        "flagged": [],
+        "ignored": [],
+        "unexpected_classes": [
+          "wheel"
+        ],
+        "expected_regions": {
+          "rear_fender": [
+            [
+              0.12,
+              0.44
+            ],
+            [
+              0.19,
+              0.38
+            ],
+            [
+              0.3,
+              0.37
+            ],
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.47,
+              0.86
+            ],
+            [
+              0.4,
+              0.9
+            ],
+            [
+              0.31,
+              0.9
+            ],
+            [
+              0.26,
+              0.82
+            ],
+            [
+              0.12,
+              0.8
+            ]
+          ],
+          "front_fender": [
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.74,
+              0.37
+            ],
+            [
+              0.88,
+              0.47
+            ],
+            [
+              0.9,
+              0.6
+            ],
+            [
+              0.86,
+              0.78
+            ],
+            [
+              0.78,
+              0.81
+            ],
+            [
+              0.72,
+              0.88
+            ],
+            [
+              0.63,
+              0.88
+            ],
+            [
+              0.58,
+              0.8
+            ],
+            [
+              0.47,
+              0.8
+            ]
+          ],
+          "roof": [
+            [
+              0.3,
+              0.36
+            ],
+            [
+              0.33,
+              0.24
+            ],
+            [
+              0.4,
+              0.16
+            ],
+            [
+              0.5,
+              0.13
+            ],
+            [
+              0.6,
+              0.16
+            ],
+            [
+              0.68,
+              0.24
+            ],
+            [
+              0.72,
+              0.36
+            ]
+          ]
+        },
+        "frame": {
+          "width": 96,
+          "height": 68
+        },
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      }
+    },
+    {
+      "name": "outside_car_outline",
+      "regions": "{\"rear_fender\": [[0.12, 0.44], [0.19, 0.38], [0.3, 0.37], [0.47, 0.37], [0.47, 0.86], [0.4, 0.9], [0.31, 0.9], [0.26, 0.82], [0.12, 0.8]], \"front_fender\": [[0.47, 0.37], [0.74, 0.37], [0.88, 0.47], [0.9, 0.6], [0.86, 0.78], [0.78, 0.81], [0.72, 0.88], [0.63, 0.88], [0.58, 0.8], [0.47, 0.8]], \"roof\": [[0.3, 0.36], [0.33, 0.24], [0.4, 0.16], [0.5, 0.13], [0.6, 0.16], [0.68, 0.24], [0.72, 0.36]]}",
+      "frame": {
+        "width": 96,
+        "height": 68
+      },
+      "raw_entries": [
+        {
+          "class_index": "1",
+          "class_label": "rear_fender",
+          "confidence": 0.95,
+          "bounding_box": [
+            12.0,
+            25.0,
+            45.0,
+            61.0
+          ],
+          "mask_rle": "845 25 43 26 41 27 41 27 40 28 39 29 39 29 39 29 39 29 39 29 39 30 38 30 37 31 37 31 37 33 35 34 34 35 33 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 36 32 35 33 35 33 35 33 34 34 34 3477",
+          "mask_area": 1071
+        },
+        {
+          "class_index": "0",
+          "class_label": "front_fender",
+          "confidence": 0.97,
+          "bounding_box": [
+            45.0,
+            25.0,
+            86.0,
+            60.0
+          ],
+          "mask_rle": "3085 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 29 39 30 38 31 37 33 35 34 34 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 35 33 34 34 33 36 31 37 30 39 28 40 28 41 27 41 26 43 25 43 25 44 24 44 23 46 22 46 19 50 15 58 7 704",
+          "mask_area": 1194
+        },
+        {
+          "class_index": "2",
+          "class_label": "roof",
+          "confidence": 0.93,
+          "bounding_box": [
+            29.0,
+            9.0,
+            69.0,
+            24.0
+          ],
+          "mask_rle": "1994 2 64 4 61 7 60 8 59 9 58 10 57 11 56 12 56 12 55 13 55 13 54 14 54 14 54 14 54 14 54 14 53 15 53 15 53 15 53 15 53 15 53 15 54 14 54 14 54 14 54 14 54 14 55 13 55 13 56 12 56 12 57 11 58 10 58 10 59 9 60 8 61 7 63 5 65 3 67 1 1880",
+          "mask_area": 445
+        },
+        {
+          "class_index": "1",
+          "class_label": "rear_fender",
+          "confidence": 0.84,
+          "bounding_box": [
+            0.0,
+            30.0,
+            5.0,
+            50.0
+          ],
+          "mask_rle": "30 20 48 20 48 20 48 20 48 20 6206",
+          "mask_area": 100
+        }
+      ],
+      "built_entries": [
+        {
+          "id": "52e6b438",
+          "label": "rear_fender",
+          "confidence": 0.95,
+          "x_min": 12.0,
+          "y_min": 25.0,
+          "x_max": 45.0,
+          "y_max": 61.0,
+          "mask_area": 1071
+        },
+        {
+          "id": "f2a74de4",
+          "label": "front_fender",
+          "confidence": 0.97,
+          "x_min": 45.0,
+          "y_min": 25.0,
+          "x_max": 86.0,
+          "y_max": 60.0,
+          "mask_area": 1194
+        },
+        {
+          "id": "269e0d37",
+          "label": "roof",
+          "confidence": 0.93,
+          "x_min": 29.0,
+          "y_min": 9.0,
+          "x_max": 69.0,
+          "y_max": 24.0,
+          "mask_area": 445
+        },
+        {
+          "id": "6513270e",
+          "label": "rear_fender",
+          "confidence": 0.84,
+          "x_min": 0.0,
+          "y_min": 30.0,
+          "x_max": 5.0,
+          "y_max": 50.0,
+          "mask_area": 100
+        }
+      ],
+      "parameters": {
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      },
+      "expected_section": {
+        "pass": true,
+        "pieces": {
+          "rear_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "52e6b438",
+                "class_label": "rear_fender",
+                "confidence": 0.95,
+                "bounding_box": [
+                  12.0,
+                  25.0,
+                  45.0,
+                  61.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "front_fender": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "f2a74de4",
+                "class_label": "front_fender",
+                "confidence": 0.97,
+                "bounding_box": [
+                  45.0,
+                  25.0,
+                  86.0,
+                  60.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          },
+          "roof": {
+            "status": "ok",
+            "iou": 1.0,
+            "detections": [
+              {
+                "id": "269e0d37",
+                "class_label": "roof",
+                "confidence": 0.93,
+                "bounding_box": [
+                  29.0,
+                  9.0,
+                  69.0,
+                  24.0
+                ],
+                "iou": 1.0,
+                "outline_overlap": 1.0
+              }
+            ]
+          }
+        },
+        "flagged": [],
+        "ignored": [
+          {
+            "id": "6513270e",
+            "class_label": "rear_fender",
+            "confidence": 0.84,
+            "bounding_box": [
+              0.0,
+              30.0,
+              5.0,
+              50.0
+            ],
+            "outline_overlap": 0.0
+          }
+        ],
+        "unexpected_classes": [],
+        "expected_regions": {
+          "rear_fender": [
+            [
+              0.12,
+              0.44
+            ],
+            [
+              0.19,
+              0.38
+            ],
+            [
+              0.3,
+              0.37
+            ],
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.47,
+              0.86
+            ],
+            [
+              0.4,
+              0.9
+            ],
+            [
+              0.31,
+              0.9
+            ],
+            [
+              0.26,
+              0.82
+            ],
+            [
+              0.12,
+              0.8
+            ]
+          ],
+          "front_fender": [
+            [
+              0.47,
+              0.37
+            ],
+            [
+              0.74,
+              0.37
+            ],
+            [
+              0.88,
+              0.47
+            ],
+            [
+              0.9,
+              0.6
+            ],
+            [
+              0.86,
+              0.78
+            ],
+            [
+              0.78,
+              0.81
+            ],
+            [
+              0.72,
+              0.88
+            ],
+            [
+              0.63,
+              0.88
+            ],
+            [
+              0.58,
+              0.8
+            ],
+            [
+              0.47,
+              0.8
+            ]
+          ],
+          "roof": [
+            [
+              0.3,
+              0.36
+            ],
+            [
+              0.33,
+              0.24
+            ],
+            [
+              0.4,
+              0.16
+            ],
+            [
+              0.5,
+              0.13
+            ],
+            [
+              0.6,
+              0.16
+            ],
+            [
+              0.68,
+              0.24
+            ],
+            [
+              0.72,
+              0.36
+            ]
+          ]
+        },
+        "frame": {
+          "width": 96,
+          "height": 68
+        },
+        "min_iou": 0.7,
+        "min_confidence": 0.5,
+        "min_outline_overlap": 0.1
+      }
+    }
+  ]
+}
