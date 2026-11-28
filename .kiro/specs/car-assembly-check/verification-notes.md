@@ -422,7 +422,8 @@ Change sets, as CloudFormation executed them (`state-19-3/changesets/`). Each ro
 
 Outcome:
 
-- No change set replaced a resource.
+- None of the 10 change sets above replaced a resource.
+- **Not captured:** the change sets of the 8 nested stacks (ComputeStack's 7 and NodeDesigner's 1). Their read at 03:29–03:30Z came after the deploy and the post-deploy readings had finished, and it failed because the `dda-usw2` session had expired. It was not repeated after the owner logged in again (read at 04:29:53Z). The nested stacks' resource events during the deploy (`state-19-3/postcheck/summary.txt`) stand in for them: one change, `ComponentConfigurationHandler` in ComputeStack's ApiGateway nested stack, the function the diff named there, and none in the other 7.
 - The custom resource returned a new physical id on each of its two runs, and CloudFormation deleted the previous one in the cleanup. The rule `sagemaker-eventbridge-enabler` stays absent.
 - All 20 stacks ended `UPDATE_COMPLETE`.
 - 69 functions run new code. No layer version, environment variable name or stack output value changed.
