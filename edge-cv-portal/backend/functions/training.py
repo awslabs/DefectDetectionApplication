@@ -154,6 +154,56 @@ def _reference_exists(ref_field: str, ref_uri: Any, usecase: Dict, allowed,
     return True
 
 
+# The training-launch validators check a manifest's first line only, and read
+# it whole: an instance-segmentation line carries every instance's
+# full-resolution RLE mask (line 1 of a 4608x3288, three-mask manifest is
+# ~44 KB), so a fixed prefix cuts it off. The cap bounds the read for an
+# object that is not JSON Lines. At ~10 bytes per mask column, 16 MiB holds
+# over 300 full-width masks at that resolution (300 is the largest
+# RF-DETR-Seg query count) and is small next to the handler's 512 MB.
+MANIFEST_FIRST_LINE_MAX_BYTES = 16 * 1024 * 1024
+_MANIFEST_READ_CHUNK_BYTES = 64 * 1024
+MANIFEST_FIRST_LINE_TOO_LONG = (
+    f'First manifest line is longer than the '
+    f'{MANIFEST_FIRST_LINE_MAX_BYTES // (1024 * 1024)} MiB limit '
+    f'({MANIFEST_FIRST_LINE_MAX_BYTES:,} bytes)')
+
+
+class ManifestFirstLineTooLong(ValueError):
+    """The first manifest line does not end within MANIFEST_FIRST_LINE_MAX_BYTES."""
+
+
+def _read_first_manifest_line(body) -> str:
+    """The first non-blank line of the manifest streamed by `body` (an S3
+    GetObject Body), without its newline, or '' when there is none.
+
+    Reads in chunks and stops at that line's newline, so the rest of the
+    object is not downloaded. Raises ManifestFirstLineTooLong when the line
+    does not end within the first MANIFEST_FIRST_LINE_MAX_BYTES of the
+    object (leading blank lines count, so the read is bounded whatever the
+    object holds).
+    """
+    buf = bytearray()
+    line_start = searched = 0
+    while True:
+        newline = buf.find(b'\n', searched)
+        if newline != -1:
+            line = buf[line_start:newline].decode('utf-8')
+            if line.strip():
+                return line
+            line_start = searched = newline + 1
+            continue
+        if len(buf) > MANIFEST_FIRST_LINE_MAX_BYTES:
+            raise ManifestFirstLineTooLong(MANIFEST_FIRST_LINE_TOO_LONG)
+        chunk = body.read(min(_MANIFEST_READ_CHUNK_BYTES,
+                              MANIFEST_FIRST_LINE_MAX_BYTES + 1 - len(buf)))
+        if not chunk:
+            line = buf[line_start:].decode('utf-8')
+            return line if line.strip() else ''
+        searched = len(buf)
+        buf += chunk
+
+
 def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: str) -> Dict:
     """
     Validate that manifest has required attributes for AWS Marketplace DDA model.
@@ -193,11 +243,16 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
         # Get S3 client with correct credentials for the manifest bucket
         s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-manifest')
         
-        # Download and parse first few lines of manifest
+        # Download the manifest's first line (read whole, up to the cap)
         try:
             response = s3_client.get_object(Bucket=bucket, Key=key)
-            # Read first 10KB to check format (should be enough for several entries)
-            content = response['Body'].read(10240).decode('utf-8')
+            content = _read_first_manifest_line(response['Body'])
+        except ManifestFirstLineTooLong as e:
+            return {
+                'valid': False,
+                'errors': [str(e)],
+                'message': 'First manifest line is too long'
+            }
         except ClientError as e:
             if e.response['Error']['Code'] == 'NoSuchKey':
                 return {
@@ -414,7 +469,10 @@ def validate_detection_manifest(manifest_uri: str, usecase: Dict,
         s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-detection-manifest')
         try:
             response = s3_client.get_object(Bucket=bucket, Key=key)
-            content = response['Body'].read(10240).decode('utf-8')
+            content = _read_first_manifest_line(response['Body'])
+        except ManifestFirstLineTooLong as e:
+            return {'valid': False, 'message': 'First manifest line is too long',
+                    'errors': [str(e)], 'class_names': [], 'detected_attributes': []}
         except ClientError as e:
             if e.response['Error']['Code'] in ('NoSuchKey', '404'):
                 return {'valid': False, 'message': 'Manifest file does not exist',
