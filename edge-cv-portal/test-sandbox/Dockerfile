@@ -29,7 +29,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # run in this image. The harness itself runs Python 3.11 from its own venv
 # (next layers) and executes the rendered launch string through
 # Gst.parse_launch, like GstPipelineManager.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt-get upgrade first brings the packages the base image ships to the
+# archive's current versions; apt-get install then adds the packages
+# below at their current versions. So the image carries the Ubuntu fixes
+# published before it was built. Docker reuses this layer from its build
+# cache with the packages of the build that made it; build with
+# --no-cache to pick up newer ones (README.md, "Build gotchas").
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
         python3 \
         # libpython3.10 ships libpython3.10.so.1.0, which the copied
         # Triton python-backend stub is dynamically linked against; the

@@ -60,7 +60,8 @@ SLIM_IMAGE_TAG = "dda-workflow-test-sandbox:it-slim"
 SLIM_DOCKERFILE = """\
 FROM public.ecr.aws/ubuntu/ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \\
+RUN apt-get update && apt-get upgrade -y \\
+    && apt-get install -y --no-install-recommends \\
         python3 \\
         python3-pip \\
         python3-gi \\

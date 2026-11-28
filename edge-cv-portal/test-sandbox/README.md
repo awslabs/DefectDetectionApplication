@@ -270,6 +270,12 @@ npx cdk deploy --context testSandboxImageTag=${TAG} ...
   were specified".
 - Always run the step-2 verification before repointing `latest`; a
   stale cross-arch layer can otherwise ship silently.
+- **A rebuild from the layer cache keeps old OS packages.** The first
+  `apt-get` layer runs `apt-get upgrade`, so a build that runs it gets
+  the Ubuntu archive's current packages. Docker reuses that layer from
+  an earlier build's cache, with that build's packages. To pick up
+  newer ones, add `--no-cache` to the build command; every later layer
+  then rebuilds too.
 
 ## Tests
 
