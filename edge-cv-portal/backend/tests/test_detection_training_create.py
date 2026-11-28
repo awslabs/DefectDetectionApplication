@@ -18,6 +18,10 @@ Two halves:
    Seg env and MetricDefinitions, persists the Seg record (mask_threshold,
    top_k, output_mode, no iou_threshold), every 400 of Req 5.1 / 5.2 / 5.4 /
    5.5 and the Seg_Switch 403 before the access check (Req 15.2).
+4. Manifest first line (section 6 below) — both validators read the whole
+   first line, not a 10,240-byte prefix: an Instance_Manifest whose line 1 is
+   over 10 KB launches, and a first line over the 16 MiB cap is a 400 naming
+   the limit.
 
 Fixture conventions follow test_onnx_compile_diagnostics_units.py (module env
 on the moto aws_stack, FakeSageMakerService recording stub, own table/bucket).
@@ -1932,3 +1936,156 @@ def test_detection_audit_model_type_is_unchanged(env, aws_stack):
     assert details["model_type"] == "object_detection"
     assert details["detection_arch"] == "yolo"
     assert svc.create_training_calls[0]["HyperParameters"]["sagemaker_program"] == "train.py"
+
+
+# ---------------------------------------------------------------------------
+# 6. Manifest first line longer than the validators' old 10,240-byte read.
+#    An instance-segmentation line carries every instance's full-resolution
+#    RLE mask, so line 1 of the car-assembly manifests is ~44 KB; both
+#    validators parsed only the first 10,240 bytes and POST /training
+#    answered 400 "First manifest line is not valid JSON". They now read to
+#    the end of the line, up to MANIFEST_FIRST_LINE_MAX_BYTES (16 MiB).
+# ---------------------------------------------------------------------------
+
+LONG_INSTANCE_MANIFEST_KEY = "labeled/labeling-inst-full-res/output.manifest"
+AT_CAP_MANIFEST_KEY = "labeled/labeling-inst-at-cap/output.manifest"
+OVER_CAP_MANIFEST_KEY = "labeled/labeling-inst-over-cap/output.manifest"
+FIRST_LINE_TOO_LONG_ERROR = (
+    "First manifest line is longer than the 16 MiB limit (16,777,216 bytes)")
+
+
+def _usecase(env):
+    return {
+        "usecase_id": env.usecase_id, "account_id": ACCOUNT_ID,
+        "s3_bucket": USECASE_BUCKET, "region": REGION,
+        "cross_account_role_arn": f"arn:aws:iam::{ACCOUNT_ID}:root",
+    }
+
+
+def _rect_rle(image_w, image_h, left, top, width, height):
+    """Column-major RLE of a width x height rectangle at (left, top) over the
+    whole image, the form of the RLE the labeling tool writes."""
+    tail = (image_h - top - height) + (image_w - left - width) * image_h
+    counts = ([left * image_h + top] + [height, image_h - height] * (width - 1)
+              + [height, tail])
+    return " ".join(str(c) for c in counts)
+
+
+def _full_resolution_instance_line(bucket):
+    """Line 1 of a car-assembly-like Instance_Manifest: a 4608x3288 image with
+    three instances, each mask a full-resolution RLE (~50 KB in all)."""
+    image_w, image_h = 4608, 3288
+    boxes = [(0, 2522, 1815, 1532, 1274), (1, 400, 1700, 1400, 1300),
+             (2, 1200, 300, 2200, 900)]
+    return json.dumps({
+        "source-ref": f"s3://{bucket}/{IMAGE_KEY}",
+        "instance-segmentation": {
+            "image_size": [{"width": image_w, "height": image_h, "depth": 3}],
+            "annotations": [
+                {"class_id": c, "left": x, "top": y, "width": w, "height": h,
+                 "rle": _rect_rle(image_w, image_h, x, y, w, h)}
+                for c, x, y, w, h in boxes],
+        },
+        "instance-segmentation-metadata": {
+            "objects": [{"confidence": 1.0}] * len(boxes),
+            "class-map": {"0": "front_fender", "1": "rear_fender", "2": "roof"},
+            "type": "groundtruth/instance-segmentation",
+            "human-annotated": "yes",
+            "creation-date": "2026-11-27T16:46:29.418694Z",
+            "job-name": "car-assembly-instances-r2",
+        },
+    })
+
+
+def _put_full_resolution_manifest(env):
+    line = _full_resolution_instance_line(USECASE_BUCKET)
+    assert len(line.encode()) > 10240
+    env.s3.put_object(Bucket=USECASE_BUCKET, Key=LONG_INSTANCE_MANIFEST_KEY,
+                      Body=(line + "\n" + line + "\n").encode())
+    return f"s3://{USECASE_BUCKET}/{LONG_INSTANCE_MANIFEST_KEY}"
+
+
+def _instance_line_of_size(bucket, n_bytes):
+    """A valid Instance_Manifest line exactly `n_bytes` long (padded inside
+    its metadata, which the entry check ignores)."""
+    entry = json.loads(_instance_line(bucket))
+    entry["instance-segmentation-metadata"]["padding"] = ""
+    entry["instance-segmentation-metadata"]["padding"] = "x" * (n_bytes - len(json.dumps(entry)))
+    line = json.dumps(entry)
+    assert len(line.encode()) == n_bytes
+    return line
+
+
+def test_seg_request_with_a_first_line_over_10_kb_launches(env, all_arch_code_dir):
+    """The car-assembly failure: an Instance_Manifest whose first line is
+    longer than 10,240 bytes validates, and the RF-DETR-Seg job launches."""
+    manifest = _put_full_resolution_manifest(env)
+
+    result = env.training.validate_detection_manifest(
+        manifest, _usecase(env), expected="instance")
+    assert result["valid"] is True, result
+    assert result["class_names"] == ["front_fender", "rear_fender", "roof"]
+
+    svc = fresh_service()
+    status, body = create(env, seg_body(env, dataset_manifest_s3=manifest))
+    assert status == 201, body
+    assert len(svc.create_training_calls) == 1
+    assert _record(env, body["training_id"])["detection"]["class_names"] == [
+        "front_fender", "rear_fender", "roof"]
+
+
+def test_lfv_validator_reads_an_instance_first_line_over_10_kb(env):
+    """validate_marketplace_manifest read the same 10,240 bytes: the long
+    Instance_Manifest got 'Manifest is not valid JSON Lines format' instead of
+    the task-type mismatch that names RF-DETR-Seg."""
+    manifest = _put_full_resolution_manifest(env)
+
+    result = env.training.validate_marketplace_manifest(
+        manifest, _usecase(env), "segmentation")
+
+    assert result == {
+        "valid": False,
+        "errors": [INSTANCE_MISMATCH_ERROR],
+        "message": "Task type mismatch: manifest is instance segmentation",
+        "detected_attributes": [
+            "source-ref", "instance-segmentation", "instance-segmentation-metadata"],
+    }
+
+
+def test_first_line_over_the_cap_is_refused_with_a_clear_error(env, s3_spy):
+    """A first line one byte over MANIFEST_FIRST_LINE_MAX_BYTES is refused by
+    both validators with the limit named, and POST /training answers 400 with
+    nothing staged; a first line of exactly the cap still validates."""
+    cap = env.training.MANIFEST_FIRST_LINE_MAX_BYTES
+    assert cap == 16 * 1024 * 1024
+    second = _instance_line(USECASE_BUCKET)
+    for key, size in ((AT_CAP_MANIFEST_KEY, cap), (OVER_CAP_MANIFEST_KEY, cap + 1)):
+        env.s3.put_object(Bucket=USECASE_BUCKET, Key=key, Body=(
+            _instance_line_of_size(USECASE_BUCKET, size) + "\n" + second + "\n").encode())
+    at_cap = f"s3://{USECASE_BUCKET}/{AT_CAP_MANIFEST_KEY}"
+    over_cap = f"s3://{USECASE_BUCKET}/{OVER_CAP_MANIFEST_KEY}"
+    usecase = _usecase(env)
+
+    at_cap_result = env.training.validate_detection_manifest(at_cap, usecase, expected="instance")
+    assert at_cap_result["valid"] is True, at_cap_result["errors"]
+
+    assert env.training.validate_detection_manifest(over_cap, usecase, expected="instance") == {
+        "valid": False,
+        "message": "First manifest line is too long",
+        "errors": [FIRST_LINE_TOO_LONG_ERROR],
+        "class_names": [],
+        "detected_attributes": [],
+    }
+    assert env.training.validate_marketplace_manifest(over_cap, usecase, "segmentation") == {
+        "valid": False,
+        "errors": [FIRST_LINE_TOO_LONG_ERROR],
+        "message": "First manifest line is too long",
+    }
+
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, seg_body(env, dataset_manifest_s3=over_cap))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == "RF-DETR-Seg requires an instance-segmentation manifest"
+    assert body["details"] == [FIRST_LINE_TOO_LONG_ERROR]
+    assert body["message"] == "First manifest line is too long"
