@@ -247,3 +247,99 @@ The two new layers hold only Python sources. The extra findings therefore come f
   aws ecr put-image --profile dda-usw2 --region us-west-2 --repository-name dda-workflow-test-sandbox --image-tag latest --image-manifest "$M" --image-digest sha256:3813e4ebdb57f890db64857348d355242febe1e3fc485b03e6c3710a64985d0d
   ```
 - **Coordination:** another session has local, unpushed sandbox images built from a tree that predates PR #174. The owner will ask that session to rebuild from `main` at or after `16f3e8ab` before it moves `latest`. An image without PR #174 would drop the `layout_check` binding again.
+
+## Build
+
+Task 19.1: the demo Portal's Build Fleet builds `aws.edgeml.dda.LocalServer.arm64JP5` from `<DEPLOY_COMMIT>`, and its version is read from the job. As in the sections above, a relative evidence path is in the run directory, and `live-log.md` lists every command. The task was followed as written: the spec-review NIT fixes in `a6b211e2` do not change 19.1.
+
+### Result
+
+- **`<DEMO_JP5_VERSION>`:** `1.0.4`, that is `aws.edgeml.dda.LocalServer.arm64JP5 1.0.4` in account 326334468650, us-west-2. It is the job's `result.published_version`, read in the job detail (`GET /builds/45e87f6a-…`, 2026-11-28 00:10:43Z) and in the re-read `dda-portal-build-jobs` item (00:11:19Z). Nobody chose it: the Fleet published the highest version plus one patch (`Publishing version: 1.0.4`, over `1.0.3`).
+- **Fleet job:** `45e87f6a-7110-4406-afef-b74c2f26f0a8` (request `aa7b9a40-16e6-4555-b638-3d7321dd207a`), JP5, terminal status `succeeded`.
+- **Resolved commit:** `16f3e8ab391a3d184530c8ae9fb01057b6fe6f04`, equal to `<DEPLOY_COMMIT>`. It was read from the job's log stream, because the job detail's Resolved commit is empty (see "After the job").
+- **Requester:** `tmp-cac-191-build-20261127T235814Z`, a temporary PortalAdmin (sub `08a11330-50f1-70e8-06e3-df3c1338cece`), created for the request and deleted after the job.
+- **Times:** submitted 2026-11-27 23:58:35Z, started 23:58:36Z, ended 2026-11-28 00:09:59Z.
+- **Published artifacts:**
+  - the component version, created 00:09:56Z, `DEPLOYABLE`, platform linux/aarch64;
+  - `326334468650.dkr.ecr.us-west-2.amazonaws.com/dda/flask-app:arm64JP5-1.0.4` (`sha256:67498dc7bfc28d0b2636ff90dca9756455865f8715b135a95b0d19452cd3de8c`, pushed 00:09:46Z);
+  - `326334468650.dkr.ecr.us-west-2.amazonaws.com/dda/react-webapp:arm64JP5-1.0.4` (`sha256:ba1cca43e6d4d77e0bef54d90f8bace3f628c04ee97915396246ca7d7f2e897e`, pushed 00:09:51Z);
+  - the scripts artifact `s3://dda-component-us-west-2-326334468650/aws.edgeml.dda.LocalServer.arm64JP5/1.0.4/aws.edgeml.dda.LocalServer.arm64JP5-aarch64.zip`.
+
+### Before the request
+
+The state was read at 23:36–23:42Z and again at 23:57:25–23:57:55Z (`state-19-1/precheck-before-request/summary.txt`). The build-jobs table was read once more at 23:58:33Z, three seconds before the request (`state-19-1/build/build-jobs-before-request.json`).
+
+- **The JP5 items of `dda-portal-build-jobs`** (read-only `aws dynamodb scan --table-name dda-portal-build-jobs --profile dda-usw2 --region us-west-2`; 13 items in all):
+
+  | `build_job_id` | `status` | `requested_by_username` | `config_snapshot.source_ref` | `result.published_version` | Ended |
+  |---|---|---|---|---|---|
+  | `78e19e25-d96c-49c3-849d-e0518ea8d7fb` | succeeded | `admin` | none (the default branch) | `1.0.0` | 2026-11-15 21:06:17Z |
+  | `e51c6f13-ed50-4cb0-8474-3f475a8c1a99` | succeeded | `kiro-temp-zone3-buildjp5` | `b0fbc53e3534725f32a8d391430dabf0823a05c2` | `1.0.1` | 2026-11-16 02:55:15Z |
+  | `2ab20b2b-6ac3-497d-8c5f-24ce5d4e6cdd` | failed | `kiro-temp-zone3-fubuild` | `ab1f574d74f63e0a4bd5e4365467a7c6841fd83e` | none | 2026-11-22 04:47:37Z |
+  | `37569b67-decd-425b-80af-634cc5862dd1` | succeeded | `kiro-temp-rfdetr-seg-g2-demo` | `feature/rfdetr-seg-support` | `1.0.2` | 2026-11-24 05:02:18Z |
+  | `02414266-05ca-4a09-8b50-65cb567cd486` | succeeded | `kiro-temp-z3resume-jp5` | `268dc5f593b146c79131ab55e6b42022ad14efd4` | `1.0.3` | 2026-11-25 20:49:47Z |
+
+  No JP5 item was `queued`, `provisioning`, `building` or `publishing`. No job of another target was running, on the dedicated server or elsewhere. All five ran dedicated on `srv-a4eb137f-…`.
+- **The lineage:** `aws greengrassv2 list-component-versions --arn arn:aws:greengrass:us-west-2:326334468650:components:aws.edgeml.dda.LocalServer.arm64JP5 --region us-west-2` gave `1.0.3`, `1.0.2`, `1.0.1`, `1.0.0`, unchanged since 18.1.
+- **No Portal deploy running:**
+  - no stack was in a `*_IN_PROGRESS` status, apart from the 22 old `REVIEW_IN_PROGRESS` nested stacks;
+  - the 12 top-level stacks were `*_COMPLETE`, none updated after the 18.2 deploy (the newest at 21:50:13Z) and none with a change set;
+  - none of the 105 functions was modified after 21:51:16Z;
+  - no deploy or build process ran on this host.
+
+  The parent session confirmed for its runs. The data-training run's training launches do not conflict with the build.
+- **The build server:** `srv-a4eb137f-3a13-4196-9ad0-991be921d9e1` (`jp5/6 build`, Ubuntu 22.04, arm64, m6g.4xlarge) was `running` with no `running_build_job_id`. Its instance `i-0758e9dd583c81d90` was `running`, with no SSM command pending or in progress.
+
+### The request
+
+- **Owner decisions:**
+  - D5 (a): the dedicated server `jp5/6 build`, which every earlier JP5 job of this lineage used;
+  - D6 (a): one temporary PortalAdmin (method A, as in "Portal deploy #1").
+- **Deviation, the API instead of the Build page:** the request is the call the Build page makes. It was sent once through the Portal API, signed in as the temporary PortalAdmin through the web client (USER_SRP_AUTH): `POST /builds` with `{"targets": ["JP5"], "execution_mode": "dedicated", "server_id": "srv-a4eb137f-3a13-4196-9ad0-991be921d9e1", "repository": "https://github.com/awslabs/DefectDetectionApplication", "source_ref": "16f3e8ab391a3d184530c8ae9fb01057b6fe6f04"}` returned 201 at 23:58:36Z. The ref is the 40-character SHA, not a branch name.
+- **The job as created:** `queued`, `required_arch` arm64, `config_snapshot.repository` and `config_snapshot.source_ref` as sent, `max_runtime_hours` 8.
+- **The temporary user:**
+  - Created at 23:58:19Z: `AdminCreateUser` with no email sent and `custom:role=PortalAdmin`. Its password was generated inside the process and never written anywhere. Its global registry row was added.
+  - Deleted at 00:10:59Z with its registry row. The read-back gave `UserNotFoundException` and 0 rows.
+  - Kept: one audit entry under it (`build_requested`), and the Cognito admin-activity alerts, which went to a topic with no subscribers.
+
+### The job
+
+- **Dispatch:** at 23:58:36Z the dispatcher sent SSM command `eaf0d27f-0a29-45b1-b64c-b304373d0ffa` (`AWS-RunShellScript`) to `i-0758e9dd583c81d90`. Its final status is `Success`, with 0 errors. The log is in `/dda/portal-builds`, stream `eaf0d27f-0a29-45b1-b64c-b304373d0ffa/i-0758e9dd583c81d90/aws-runShellScript/stdout`.
+- **Source:** the log shows, in order:
+  - the build lock;
+  - the preflight (865 GB free);
+  - `Syncing source to ref '16f3e8ab391a3d184530c8ae9fb01057b6fe6f04'...`;
+  - `HEAD is now at 16f3e8ab Merge pull request #174 from awslabs/feature/car-assembly-check` and `✓ Source synced to 16f3e8ab (16f3e8ab391a3d184530c8ae9fb01057b6fe6f04)`;
+  - the pre-build prune, which removed only the workspace `custom-build/` (144K);
+  - `Starting portal-build.sh aarch64 5 (target JP5, …)`.
+- **Status:** `queued`, then `building` (23:58:36Z), then `publishing` (seen at the 00:09:42Z poll), then `succeeded` (00:09:59Z).
+- **Publish:** the artifacts were 5.8G, so the Fleet took the ECR + S3 path. The log shows, in order:
+  - `Publishing version: 1.0.4` at 00:09:39Z;
+  - the two image pushes;
+  - the scripts zip;
+  - `Creating component version via API...`, answered with `"componentVersion": "1.0.4"`;
+  - `PORTAL_BUILD_RESULT {"component_name":"aws.edgeml.dda.LocalServer.arm64JP5","published_version":"1.0.4",…}`.
+
+### After the job
+
+- **The job detail** (`GET /builds/45e87f6a-…` at 00:10:43Z): `succeeded`, `result.published_version` `1.0.4`, `result.pushed_image_refs` the two images, no error, all terminal effects done.
+- **Deviation, the resolved commit:** the job detail has no `source_commit`, so its **Resolved commit** shows `-`. The agent did emit it: its `building` event at 23:58:46Z carries `"source_commit":"16f3e8ab391a3d184530c8ae9fb01057b6fe6f04"` (`git rev-parse HEAD` after the sync).
+  - **Why it is missing:** the deployed `build_events.apply_phase_event` (`16f3e8ab`, L340–L400) treats that event as a no-op for a dedicated job, which the dispatcher has already moved to `building`. It returns before it persists `source_commit`, so no dedicated job of this Portal records the commit. None of the five earlier JP5 items has it either.
+  - **Where it was read instead:** the log stream, as the plan provided. The commit equals `<DEPLOY_COMMIT>`, so the published version is not a stray.
+  - **Status of the defect:** it is in the Portal's build code, outside this spec. It is reported here and not fixed.
+- **The JP5 items read again** (00:11:19Z, `state-19-1/precheck-after-job/summary.txt`): the five above, unchanged, plus `45e87f6a-7110-4406-afef-b74c2f26f0a8`: succeeded, requester `tmp-cac-191-build-20261127T235814Z`, ref `16f3e8ab391a3d184530c8ae9fb01057b6fe6f04`, version `1.0.4`, ended 2026-11-28 00:09:59Z. None is running.
+- **The lineage:** `list-component-versions` gives `1.0.4`, `1.0.3`, `1.0.2`, `1.0.1`, `1.0.0`, so `1.0.4` is listed. It is also the highest version at this read. That is recorded but is not a check, because the lineage is shared. No higher version was seen.
+- **The component:** `describe-component` of `…:versions:1.0.4` shows it created 2026-11-28 00:09:56Z, `DEPLOYABLE`, platform linux/aarch64.
+
+### Effect and undo
+
+- **Effect:**
+  - `1.0.4` is now the highest version of the shared `arm64JP5` lineage, so **Update to latest** on any `arm64JP5` device, `mic-730ai` included, installs it. The owner was asked to tell the zone3 session.
+  - No device, deployment, floor, stack or function changed.
+  - On the shared build server, the checkout moved from `268dc5f5` to `16f3e8ab` (detached), and its workspace was pruned, as every Fleet build does.
+- **Next:**
+  - 19.3 sets both floor entries of the demo deployment to `{"arm64_jp5": "1.0.4"}`.
+  - 19.4 pins `mic-730ai` to `1.0.4`, behind gate 0.15.
+- **Undo** (not run; each step needs its own go):
+  1. `aws greengrassv2 delete-component --arn arn:aws:greengrass:us-west-2:326334468650:components:aws.edgeml.dda.LocalServer.arm64JP5:versions:1.0.4`, which is possible only while no deployment names the version.
+  2. Then the two ECR tags (`aws ecr batch-delete-image`) and the S3 object.
