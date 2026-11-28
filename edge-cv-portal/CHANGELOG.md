@@ -4,6 +4,15 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - Workflow test sandbox image: current LocalServer module copies and Ubuntu packages (2026-11-27)
+
+The workflow test sandbox image (`test-sandbox/`) runs copies of LocalServer modules from `test-sandbox/dda_triton_resources/`. Five of them had fallen behind: each lacked one later `src/backend` change, so test runs used older code for these modules than devices do. The image also kept the packages of its Ubuntu 22.04 base image at the versions that image shipped with.
+
+- **The five copies match their `src/backend` sources again:** `inference_runtimes.py` (the record of which ONNX Runtime execution providers a model obtained), `lfv_model_template.py` (detection postprocessors get the manifest's `score_threshold`), `marshal_for_capture_template.py` (the detections sidecar), and the model processors `basic_preprocessor.py` and `yolo_detection_postprocessor.py` (the opt-in aspect-preserving model input). All 49 copied files in `dda_triton_resources/` now equal their sources.
+- **A parity test**, `test/backend-test/test_sandbox_duplicates_triton_resources.py`, compares each of the five copies with its source by sha256, so a change to one side fails it until the file is copied to the other.
+- **Current Ubuntu packages.** The image's first apt layer runs `apt-get upgrade` before `apt-get install`, so a build gets the Ubuntu archive's current versions of the base image's packages as well as of the packages it adds. A build that reuses that layer from Docker's cache keeps the packages of the build that made it; `--no-cache` picks up newer ones (`test-sandbox/README.md`, "Build gotchas"). The slim integration image in `tests/integration/conftest.py` gets the same line.
+- **Rollout.** Each environment builds and pushes the image by hand (`test-sandbox/README.md`, "Build and push"); until it does, its test runs keep the image they have.
+
 ### Added - Layout Check node, per-deployment LocalServer floors and the car-assembly-check use case (2026-11-27)
 
 A **Layout Check** node (`layout_check`, Post-processing) checks that each listed class of an instance-segmentation model is detected exactly once in its own region of the frame, so a station can tell whether every piece of an assembly sits where it belongs.
