@@ -343,3 +343,130 @@ The state was read at 23:36–23:42Z and again at 23:57:25–23:57:55Z (`state-1
 - **Undo** (not run; each step needs its own go):
   1. `aws greengrassv2 delete-component --arn arn:aws:greengrass:us-west-2:326334468650:components:aws.edgeml.dda.LocalServer.arm64JP5:versions:1.0.4`, which is possible only while no deployment names the version.
   2. Then the two ECR tags (`aws ecr batch-delete-image`) and the S3 object.
+
+## Portal deploy #2
+
+Task 19.3: the demo deployment's two floor entries and deploy #2. It was followed as corrected by spec-review NIT 2 in `a6b211e2`, which adds the `SageMakerEventBridgeIntegration` `Timestamp` to the expected `cdk diff` entries. 19.3 names no section for its record, so this one follows "Portal deploy #1". As in the sections above, a relative evidence path is in the run directory, and `live-log.md` lists every command.
+
+### Floor entries
+
+- **Before:** both parameters were `ParameterNotFound` at 2026-11-28 00:26:35Z. 19.1's build had ended (job `45e87f6a-…`, `succeeded` at 00:09:59Z), and none of the 14 build jobs was running (`state-19-3/precheck-before-write/summary.txt`, 00:37:28–00:38:07Z).
+- **Credentials:** `dda-usw2` (`Admin/ryvan-Isengard`, 326334468650). The plan called that profile read-only; the owner authorized it for these two writes (plan decision D7).
+- **Writes** (`state-19-3/ssm-write/write.log`), without `--overwrite`:
+  - 00:38:18Z `aws ssm put-parameter --name /dda-portal/layout-check-min-local-server-versions --type String --value '{"arm64_jp5": "1.0.4"}' --region us-west-2 --profile dda-usw2` → Version 1, Standard tier;
+  - 00:38:19Z the same for `/dda-portal/rfdetr-seg-min-local-server-versions` → Version 1, Standard tier.
+- **Read back:** `aws ssm get-parameter --name <each> --region us-west-2 --query Parameter.Value --output text --profile dda-usw2` printed `{"arm64_jp5": "1.0.4"}` for both (00:38:21Z and 00:38:23Z).
+- `1.0.4` is 19.1's `<DEMO_JP5_VERSION>`. No `compute-stack.ts` edit was made, and nothing was written in the lab account, whose Portal keeps the defaults (18.4).
+- **What the Seg value changes:** the map now names only `arm64_jp5`, so the demo Portal refuses Seg packaging for `arm64_jp6`, `x86_64` and `x86_64_nvidia`, which the committed literal allowed. The demo account has LocalServer lineages only for `arm64JP5` and `arm64JP7` (`list-components`, 00:32:10Z), so no demo device is affected. `arm64_jp7` and `arm64_cpu` were not in the literal either.
+
+### Deploy tree
+
+- **Commit:** `f9e1a7f9073e1a5c2e066b28f053c29e8010a362`, `origin/main` as fetched at 02:44:48Z (`git ls-remote` agrees). It is the merge of PR #176, the training-validator fix: `training.py` reads the whole first manifest line at training launch. The parent session named it as the tree for deploy #2.
+- It contains `<DEPLOY_COMMIT>` `16f3e8ab` and, through it, `c066b4c8` and the separately deployed `e7547824` (PR #172) and `d1d94f72` (PR #173). `16f3e8ab..f9e1a7f9` changes two files: `edge-cv-portal/backend/functions/training.py` and its test.
+- **Worktree:** `/home/ubuntu/github/jp5/main/.worktrees/car-assembly-check-deploy-f9e1a7f9`, detached and clean before and after every step.
+- **Seg literal:** filled in the tree (`compute-stack.ts:868-873`: `arm64_jp5` `1.0.62`, `arm64_jp6` `1.0.85`, `x86_64` and `x86_64_nvidia` `1.0.56`). With the SSM value set, it is no longer what the deploy uses.
+- **Later:** `origin/main` moved to `50bfe898` (PR #175), which changes only test-sandbox files, tests and `CHANGELOG.md`. The owner kept deploy #2 at `f9e1a7f9`, so no redeploy followed.
+
+### Pre-deploy checks
+
+`state-19-3/precheck-before-deploy/summary.txt`, read 03:02:12–03:02:51Z, right before the deploy:
+
+- Only the 22 known October `REVIEW_IN_PROGRESS` nested stacks were in progress.
+- The 12 top-level stacks were `*_COMPLETE`. None had been updated since the 18.2 deploy, and none had a change set.
+- None of the 105 functions had been modified since the 18.2 deploy.
+- None of the 14 build jobs was running.
+- Both parameters held `{"arm64_jp5": "1.0.4"}`, and `LAYOUT_CHECK_FLOOR` and `RFDETR_SEG_FLOOR` were unset.
+- No deploy or build process ran on this host. The parent session confirmed that none of its runs was deploying and that no training launch was in progress.
+- The deploy context, resolved at 03:02:50Z with the tree's own helpers, was the same as for deploy #1: `-c cloudFrontDomain=d23jpvi9ax40sj.cloudfront.net -c portalRegistryEnforced=false -c buildFleetNatGateway=true -c sharedAuthorizerId=ckc9gq`, with no permissions boundary and Step 6 trusted accounts `326334468650` from SSM.
+
+**Region pre-check** (Requirements 9.3 and 9.6), in the deploying shell at 03:03:17–03:03:30Z (`state-19-3/deploy/steps.log`): `echo $AWS_REGION` printed `us-west-2`, and `CDK_DEFAULT_REGION` was unset, so `bin/app.ts` reads the parameters in `us-west-2`. `aws ssm get-parameter --name <each> --region us-west-2 --query Parameter.Value --output text --profile dda-usw2` printed `{"arm64_jp5": "1.0.4"}` for both, and so did the read `bin/app.ts` makes in that shell.
+
+### Diff and classification
+
+`npx cdk diff --all --no-change-set --profile dda-usw2-proc -c cloudFrontDomain=d23jpvi9ax40sj.cloudfront.net -c portalRegistryEnforced=false -c buildFleetNatGateway=true -c sharedAuthorizerId=ckc9gq`, run 02:47:52–02:49:06Z from the deploy tree. It created no change set. Full classification: `19.3-cdk-diff.classified.md`.
+
+- **Counts:** 10 stacks with differences and 78 entries. Auth, Storage, Frontend and 7 of the 8 nested stacks had none.
+- **Expected by 19.3, and found:**
+  - the two environment values on exactly `DeploymentsHandler` and `WorkflowPackagingHandler`: the Seg floor from the committed literal to `{"arm64_jp5":"1.0.4"}`, and the Layout floor from `{}` to `{"arm64_jp5":"1.0.4"}`;
+  - the `SageMakerEventBridgeIntegration` `Timestamp`;
+  - what the newer `main` commit changes: a new code asset on the 69 functions built from `backend/functions`, which changes only `training.py`, file for file; the WorkflowDebug and Telemetry ingest versions and aliases and the ApiGateway nested stack's `TemplateURL`, which follow from it; and `MCP_BUILD_SHA` from `16f3e8ab391a` to `f9e1a7f9073e`.
+- **Outside the list, through on the owner's go:** O1, `QuickSetupBundle`, whose asset hash follows the tree path while its 5 files are identical; and O2, the `TelemetryDataPlaneGrant` output description. Both also went through deploy #1.
+- **Cross-checks:** a leaf-by-leaf comparison of every synthesized template with the deployed one found nothing else. Exactly the two handlers carry either floor variable, in the synth and in `deploy-frontend.sh` Step 6's synth. No layer, IAM statement, route or Build Fleet NAT resource changes, and no image is built.
+- **Earlier diff:** on `16f3e8ab`, at 00:44–00:46Z, the same diff showed only the floors and the `Timestamp` (`19.3-cdk-diff.16f3e8ab.classified.md`).
+
+### Deploy
+
+`scripts/19-3-run.sh`, detached from the terminal with stdin from `/dev/null` (`state-19-3/run.log`), on the owner's go relayed by the parent session:
+
+1. A snapshot of the deployed state (03:01:00–03:02:12Z), then the pre-check above.
+2. `scripts/19-3-deploy.sh`: the region pre-check, then `./deploy-infrastructure.sh`, 03:03:30–03:20:04Z → rc 0. The script passed the context it resolved and ran `npx cdk deploy --all --require-approval never --force`.
+3. A read of the two handlers' floors at 03:20:20Z and 03:20:36Z: both variables were `{"arm64_jp5":"1.0.4"}` on both handlers, so the run went on.
+4. The served `config.json` copied into the tree (the 18.2 plan addition), then `./deploy-frontend.sh`, 03:20:52–03:25:18Z → rc 0, including Step 6 (`cdk deploy EdgeCVPortalComputeStack`).
+5. The post-deploy readings below.
+
+Change sets, as CloudFormation executed them (`state-19-3/changesets/`). Each row gives the changes, then the resources whose own template values changed; the other changes re-read a reference to a resource updated in place.
+
+| stack | changes |
+|---|---|
+| TestRunner | 3 / 1 |
+| Compute | 72 / 46: 43 functions, `QuickSetupBundle`, the custom resource, the ApiGateway nested stack |
+| SyntheticData | 23 / 1 |
+| WorkflowDebug | 22 / 4, plus one Lambda version added and one removed |
+| BuildFleet | 44 / 5, functions only |
+| Telemetry | 45 / 5, plus one Lambda version added and one removed |
+| NodeDesigner | 17 / 8 |
+| Mcp | 12 / 1 |
+| Assistant | 36 / 2 |
+| Compute again (Step 6) | 1 / 1, the custom resource's `Timestamp` |
+| Auth, Storage, Frontend | no changes |
+
+Outcome:
+
+- No change set replaced a resource.
+- The custom resource returned a new physical id on each of its two runs, and CloudFormation deleted the previous one in the cleanup. The rule `sagemaker-eventbridge-enabler` stays absent.
+- All 20 stacks ended `UPDATE_COMPLETE`.
+- 69 functions run new code. No layer version, environment variable name or stack output value changed.
+- The Build Fleet NAT gateway, EIP and routes (8 resources) keep their ids and were not updated.
+- The frontend serves `assets/index-coiu2_-H.js`, built from `f9e1a7f9`, and the same `config.json` (sha256 `a7baf3d3…`).
+
+### Post-deploy readings
+
+`aws lambda get-function-configuration` on both Lambdas, `aws lambda list-functions`, and both parameters read again, 03:25:52–03:27:58Z (`state-19-3/postcheck/summary.txt`):
+
+- **(i)** `WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS` is `{"arm64_jp5":"1.0.4"}` on `EdgeCVPortalComputeStack-DeploymentsHandler70E83D8-mKnssydwOEcW` and `EdgeCVPortalComputeStack-WorkflowPackagingHandler7-vWH7rI8irvFo` (LastModified 03:10:15Z and 03:10:16Z). It equals its SSM value `{"arm64_jp5": "1.0.4"}` as parsed JSON: CDK writes `JSON.stringify` of the parsed map (`compute-stack.ts:883`, `:895`), so the Lambda value has no space.
+- **(ii)** `WORKFLOW_LAYOUT_CHECK_MIN_LOCAL_SERVER_VERSIONS` is `{"arm64_jp5":"1.0.4"}` on the same two, equal to its SSM value as parsed JSON.
+- **(iii)** No other function carries either variable.
+- The two handlers read the same at 04:31:07Z, right before the Portal checks.
+
+### Portal checks
+
+`scripts/portal_checks_19_3_temp_admin.py`, 2026-11-28 04:31:22–04:33:11Z, through the deployed API. Records: `state-19-3/portal-checks/`.
+
+- **Portal user** (owner decision D6, method A): one temporary PortalAdmin, `tmp-cac-193-check-20261128T043141Z`.
+  - It was created at 04:31:46Z with its global registry row. Its password was generated inside the process and never left it.
+  - It was deleted with its registry row at 04:32:53Z, and both deletions read back absent.
+  - A scan of the 17 record files finds neither the password nor the ID token.
+- **The test workflow:** `cac-193-check-layout-gate` (`6ddabff9-90d0-4098-b5e5-64857cd4c7bd`) in use case `reinvent`: `folder_source → bedrock_inference → layout_check → mqtt_publish`, with a valid `expected_regions`. Validation passed with the one warning `W4_LAYOUT_NO_DETECTOR`. As in 18.2, `bedrock_inference` feeds `layout_check` because the demo account has no registered model.
+- **`arm64_jp6`, an arch without an entry:** packaging is refused with 409 `LAYOUT_CHECK_UNSUPPORTED_ARCH`: "Architecture 'arm64_jp6' has no LocalServer version known to support layout_check nodes, so node(s) n3 cannot be packaged for it. Architectures with a supporting LocalServer version: arm64_jp5 >= 1.0.4". The message names the node type, the arch and the required version.
+- **`arm64_jp5`:** packaging answers 201 in 3.1 s and registers `dda.workflow.6ddabff9-90d0-4098-b5e5-64857cd4c7bd` `1.0.0` (`DEPLOYABLE`). Its artifact's `manifest.json` has `minLocalServerVersion` `1.0.4` and `minLocalServerVersions.arm64_jp5` `1.0.4`: the Layout_Check floor, `<DEMO_JP5_VERSION>`. The workflow references no Seg model, so the Seg floor does not enter the package. The map's other entries are the lineage floors (`arm64_cpu` `1.1.0`, the rest `1.0.0`).
+- **Removal** (owner decision D3, which the owner's go extended to the package): `DELETE /workflows/6ddabff9-…` → 200, then `GET` → 404. The Portal's delete removes the workflow's records and portal-S3 documents but not its package, so the package's parts were removed with `dda-usw2`, each identified by its exact name:
+  - the component version `arn:aws:greengrass:us-west-2:326334468650:components:dda.workflow.6ddabff9-90d0-4098-b5e5-64857cd4c7bd:versions:1.0.0`;
+  - in `dda-usecase-reinvent-326334468650-us-west-2`, the artifact `workflows/components/6ddabff9-…/1/1.0.0/arm64_jp5/workflow-arm64_jp5.zip` and the staged copy `workflows/staging/6ddabff9-…/1/836cc85ab9ee4e4d9e30ad4fcada6b0c/arm64_jp5/workflow-arm64_jp5.zip`.
+
+  Read back at 04:32:13Z and again at 04:35:29–04:36:02Z (`state-19-3/portal-checks-readback.txt`): the component version does not exist and the component has no version; no object is left under either prefix or under the workflow's portal-S3 prefix; and the use case lists no `cac-193-check-*` workflow.
+- **Kept:** three audit entries (`create_workflow`, `package_workflow`, `delete_workflow`), and three Cognito admin-activity alerts published to a topic with no subscribers.
+- **Not sent:** a deployment of the package to `mic-730ai`. It is expected to be refused with 409 `INCOMPATIBLE_LOCAL_SERVER` while the device runs `1.0.3`, but it is a request aimed at the shared device, and owner decision D2 and gate 0.15 hold it until 19.4.
+- **Found, not fixed (outside this spec):** after the 201, the packager left its staged copy under `workflows/staging/`. Its `finally` deletes the staging root after a successful registration (`workflow_packaging.py:3320`), and the handler logged no cleanup error, so the delete most likely failed per key inside `delete_objects`, whose errors the best-effort helper does not read (`:2664-2680`). 34 other objects lie under `workflows/staging/` in the use-case bucket. They were counted and not touched.
+
+**Requirement 10.2(d)** is now recorded in both halves. With the floor at `{}`, a `layout_check` workflow was refused for every arch (18.2, "Portal deploy #1"). With the floor at `{"arm64_jp5": "1.0.4"}`, an arch without an entry is refused with the required version named, and `arm64_jp5` packages with `1.0.4` in its manifest (here).
+
+### Effect
+
+- From this deploy on, a Seg or `layout_check` workflow on the demo Portal packages for `arm64_jp5` only. Its deployment is refused for a device whose installed `arm64JP5` LocalServer is older than `1.0.4`, which includes `mic-730ai` until 19.4 moves it. The gate is a minimum: it approves any build at or above `1.0.4`, which is why 19.4 pins the version.
+- Training launches validate a manifest by its whole first line, up to 16 MiB (PR #176).
+- Every later scripted deploy of the demo Portal from a tree that contains `16f3e8ab` keeps both floors, because they come from SSM.
+- The two entries are the candidates. Group 21 confirms them, or they are raised to a rebuilt version if the build proves unusable. They are never lowered, and never moved for another actor's build.
+
+### Undo
+
+Not run; each step needs its own go. Deleting the two parameters (`aws ssm delete-parameter --name <each> --region us-west-2 --profile dda-usw2`) and redeploying restores the defaults: `{}` for Layout and the committed literal for Seg. There is no one-command rollback of the deploy itself. The 'before' snapshot (`state-19-3/snapshot-before/`; the full templates are under `/home/ubuntu/dda-tmp/car-assembly-live-18-19/19-3/snapshot-before/`) is the basis for change sets that would restore the previous templates.
